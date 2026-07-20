@@ -28,6 +28,88 @@ func TestReduceDeterministicAcrossShuffledArrival(t *testing.T) {
 	}
 }
 
+func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		commands []Command
+		winner   string
+	}{
+		{
+			name: "counter",
+			commands: []Command{
+				withCounter(command("counter-high", "device-a", "shared-timer", "start", 1, 100, base, 0), 1),
+				withCounter(command("counter-low", "device-a", "shared-timer", "start", 2, 100, base, 0), 0),
+			},
+			winner: "counter-low",
+		},
+		{
+			name: "device ID",
+			commands: []Command{
+				command("command-a", "device-b", "shared-timer", "start", 1, 100, base, 0),
+				command("command-z", "device-a", "shared-timer", "start", 1, 100, base, 0),
+			},
+			winner: "command-z",
+		},
+		{
+			name: "command ID",
+			commands: []Command{
+				command("command-b", "device-a", "shared-timer", "start", 1, 100, base, 0),
+				command("command-a", "device-a", "shared-timer", "start", 2, 100, base, 0),
+			},
+			winner: "command-a",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := Reduce(test.commands, base)
+			for _, input := range test.commands {
+				want := "ignored"
+				if input.ID == test.winner {
+					want = "applied"
+				}
+				if got := result.Outcomes[input.ID].Outcome; got != want {
+					t.Fatalf("outcome for %q = %q, want %q", input.ID, got, want)
+				}
+			}
+			if result.Canonical == nil || result.Canonical.LastIntent == nil || result.Canonical.LastIntent.CommandID != test.winner {
+				t.Fatalf("ordering winner = %#v, want command %q", result.Canonical, test.winner)
+			}
+		})
+	}
+}
+
+func TestReduceDoesNotMutateInput(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	commands := []Command{
+		command("command-b", "device-b", "timer-b", "start", 1, 200, base.Add(time.Second), 0),
+		command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0),
+	}
+	want := append([]Command(nil), commands...)
+	Reduce(commands, base.Add(time.Minute))
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("Reduce mutated input\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
+func TestHistoryIsNewestFirstAtFractionalSecondPrecision(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	commands := []Command{
+		command("start-a", "device-a", "timer-a", "start", 1, 100, base, 0),
+		command("cancel-a", "device-a", "timer-a", "cancel", 2, 200, base.Add(time.Second), 1_000),
+		command("start-b", "device-a", "timer-b", "start", 3, 300, base.Add(time.Second+50*time.Millisecond), 0),
+		command("cancel-b", "device-a", "timer-b", "cancel", 4, 400, base.Add(time.Second+100*time.Millisecond), 50),
+	}
+	result := Reduce(commands, base.Add(2*time.Second))
+	if len(result.History) != 2 || result.History[0].TimerID != "timer-b" || result.History[1].TimerID != "timer-a" {
+		t.Fatalf("history order = %#v, want timer-b then timer-a", result.History)
+	}
+	latest := result.History[0]
+	if latest.Status != "cancelled" || latest.CommandID != "cancel-b" || latest.CompletedAt != "" || latest.EndedAt != base.Add(time.Second+100*time.Millisecond).Format(time.RFC3339Nano) {
+		t.Fatalf("latest terminal history item mismatch: %#v", latest)
+	}
+}
+
 func TestReduceTransitionsClampAndAutoComplete(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	commands := []Command{
@@ -120,4 +202,9 @@ func command(id, deviceID, timerID, commandType string, sequence, wall int64, oc
 		Phase: "focus", PlannedDurationMs: 5 * 60_000, OccurredAt: occurredAt,
 		HLCWallMs: wall, HLCCounter: 0, ObservedElapsedMs: observed,
 	}
+}
+
+func withCounter(command Command, counter int64) Command {
+	command.HLCCounter = counter
+	return command
 }

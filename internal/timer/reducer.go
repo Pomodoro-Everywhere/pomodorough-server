@@ -211,10 +211,20 @@ func Reduce(input []Command, now time.Time) Result {
 	if current := viewByID[currentID]; current != nil {
 		result.Canonical = canonical(current, now)
 	}
+	terminalSessions := make([]Session, 0, len(viewSessions))
 	for _, session := range viewSessions {
 		if session.Status != "completed" && session.Status != "cancelled" && session.Status != "superseded" {
 			continue
 		}
+		terminalSessions = append(terminalSessions, session)
+	}
+	sort.Slice(terminalSessions, func(i, j int) bool {
+		if !terminalSessions[i].EndedAt.Equal(terminalSessions[j].EndedAt) {
+			return terminalSessions[i].EndedAt.After(terminalSessions[j].EndedAt)
+		}
+		return terminalSessions[i].TimerID < terminalSessions[j].TimerID
+	})
+	for _, session := range terminalSessions {
 		item := HistoryItem{
 			ID:                session.TimerID,
 			TimerID:           session.TimerID,
@@ -229,12 +239,6 @@ func Reduce(input []Command, now time.Time) Result {
 		}
 		result.History = append(result.History, item)
 	}
-	sort.Slice(result.History, func(i, j int) bool {
-		if result.History[i].EndedAt != result.History[j].EndedAt {
-			return result.History[i].EndedAt > result.History[j].EndedAt
-		}
-		return result.History[i].TimerID < result.History[j].TimerID
-	})
 	return result
 }
 

@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
-	"strings"
 )
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, destination any) error {
 	contentType := r.Header.Get("Content-Type")
-	if contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
-		return errors.New("Content-Type must be application/json")
+	if contentType != "" {
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil || mediaType != "application/json" {
+			return errors.New("Content-Type must be application/json")
+		}
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)

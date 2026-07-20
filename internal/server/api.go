@@ -22,21 +22,21 @@ var (
 
 type syncRequestJSON struct {
 	DeviceID     string            `json:"deviceId"`
-	LastRevision int64             `json:"lastRevision"`
+	LastRevision *int64            `json:"lastRevision"`
 	Commands     []syncCommandJSON `json:"commands"`
 }
 
 type syncCommandJSON struct {
 	ID                string `json:"id"`
-	DeviceSequence    int64  `json:"deviceSequence"`
+	DeviceSequence    *int64 `json:"deviceSequence"`
 	TimerID           string `json:"timerId"`
 	Type              string `json:"type"`
 	Phase             string `json:"phase"`
-	PlannedDurationMs int64  `json:"plannedDurationMs"`
+	PlannedDurationMs *int64 `json:"plannedDurationMs"`
 	OccurredAt        string `json:"occurredAt"`
-	HLCWallMs         int64  `json:"hlcWallMs"`
-	HLCCounter        int64  `json:"hlcCounter"`
-	ObservedElapsedMs int64  `json:"observedElapsedMs"`
+	HLCWallMs         *int64 `json:"hlcWallMs"`
+	HLCCounter        *int64 `json:"hlcCounter"`
+	ObservedElapsedMs *int64 `json:"observedElapsedMs"`
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -217,12 +217,12 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 	if err := decodeJSON(w, r, maxSyncBody, &payload); err != nil {
 		return store.SyncRequest{}, err
 	}
-	if !validID(payload.DeviceID) || payload.LastRevision < 0 || len(payload.Commands) > 256 {
+	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || payload.Commands == nil || len(payload.Commands) > 256 {
 		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
 	}
-	request := store.SyncRequest{DeviceID: payload.DeviceID, LastRevision: payload.LastRevision, Commands: make([]timer.Command, 0, len(payload.Commands))}
+	request := store.SyncRequest{DeviceID: payload.DeviceID, LastRevision: *payload.LastRevision, Commands: make([]timer.Command, 0, len(payload.Commands))}
 	for _, input := range payload.Commands {
-		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence <= 0 {
+		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 {
 			return store.SyncRequest{}, fmt.Errorf("invalid command identity")
 		}
 		if _, valid := validTypes[input.Type]; !valid {
@@ -231,10 +231,10 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 		if _, valid := validPhases[input.Phase]; !valid {
 			return store.SyncRequest{}, fmt.Errorf("invalid command phase")
 		}
-		if input.PlannedDurationMs < int64(time.Minute/time.Millisecond) || input.PlannedDurationMs > int64(4*time.Hour/time.Millisecond) {
+		if input.PlannedDurationMs == nil || *input.PlannedDurationMs < int64(time.Minute/time.Millisecond) || *input.PlannedDurationMs > int64(4*time.Hour/time.Millisecond) {
 			return store.SyncRequest{}, fmt.Errorf("invalid timer duration")
 		}
-		if input.HLCWallMs <= 0 || input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter < 0 {
+		if input.HLCWallMs == nil || *input.HLCWallMs <= 0 || *input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter == nil || *input.HLCCounter < 0 || input.ObservedElapsedMs == nil {
 			return store.SyncRequest{}, fmt.Errorf("invalid hybrid clock")
 		}
 		occurredAt, err := time.Parse(time.RFC3339Nano, input.OccurredAt)
@@ -242,9 +242,9 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 			return store.SyncRequest{}, fmt.Errorf("invalid occurrence time")
 		}
 		request.Commands = append(request.Commands, timer.Command{
-			ID: input.ID, DeviceID: payload.DeviceID, DeviceSequence: input.DeviceSequence, TimerID: input.TimerID,
-			Type: input.Type, Phase: input.Phase, PlannedDurationMs: input.PlannedDurationMs, OccurredAt: occurredAt,
-			HLCWallMs: input.HLCWallMs, HLCCounter: input.HLCCounter, ObservedElapsedMs: input.ObservedElapsedMs,
+			ID: input.ID, DeviceID: payload.DeviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
+			Type: input.Type, Phase: input.Phase, PlannedDurationMs: *input.PlannedDurationMs, OccurredAt: occurredAt,
+			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter, ObservedElapsedMs: *input.ObservedElapsedMs,
 		})
 	}
 	return request, nil
