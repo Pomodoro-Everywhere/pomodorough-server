@@ -2,6 +2,10 @@
 
 Local-first Pomodoro timer with cross-device synchronization. One Go process serves the protected PWA and API. Each Google account has an independent SQLite database.
 
+## License
+
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE) for details.
+
 ## Runtime model
 
 - Browser actions are written to IndexedDB before the UI changes.
