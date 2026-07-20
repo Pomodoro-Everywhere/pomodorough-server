@@ -1,0 +1,915 @@
+openapi: 3.0.3
+info:
+  title: Pomodorough API
+  version: 1.0.0
+  description: |
+    Local-first Pomodoro timer synchronization API.
+
+    Timer mutations are immutable, idempotent commands. The server orders them by
+    hybrid logical clock, device ID, and command ID, then returns the canonical
+    projection. Clients must retain unacknowledged commands and retry them with
+    the same command IDs and device sequence numbers.
+
+    Web clients authenticate with the session cookie created by Google OAuth.
+    Cookie-authenticated mutations must also send the exact public origin and an
+    `X-CSRF-Token` matching the token returned by `GET /api/v1/me`. Native and
+    desktop clients authenticate with an access-token bearer credential and do
+    not send CSRF credentials.
+
+    Revision events are hints only. Clients must use `POST /api/v1/sync` as the
+    authoritative source of timer state.
+servers:
+  - url: https://pomodorough.egigoka.me
+    description: Production
+tags:
+  - name: System
+    description: Service health and operational endpoints.
+  - name: Web authentication
+    description: Browser Google OAuth redirect flow.
+  - name: Native authentication
+    description: Google ID-token exchange and native token rotation.
+  - name: Account
+    description: Current account, session, and device controls.
+  - name: Timer
+    description: Timer command synchronization, history, and revision hints.
+paths:
+  /openapi.yaml:
+    get:
+      tags: [System]
+      operationId: getOpenAPISpec
+      summary: Download OpenAPI specification
+      security: []
+      responses:
+        "200":
+          description: OpenAPI 3.0 specification for this service.
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "503":
+          description: Specification file is unavailable.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Check service health
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+
+  /auth/google/start:
+    get:
+      tags: [Web authentication]
+      operationId: startGoogleAuthentication
+      summary: Start web Google OAuth
+      description: |
+        Creates short-lived OAuth state, nonce, and PKCE verifier data in an
+        encrypted secure cookie, then redirects to Google. Unsafe or external
+        return paths are replaced with `/`.
+      security: []
+      parameters:
+        - name: return
+          in: query
+          required: false
+          description: Same-origin path to open after successful authentication.
+          schema:
+            type: string
+            maxLength: 1024
+            default: /
+            example: /
+      responses:
+        "302":
+          description: Redirect to Google authorization endpoint.
+          headers:
+            Location:
+              description: Google authorization URL.
+              schema:
+                type: string
+                format: uri
+        "500":
+          $ref: "#/components/responses/PlainInternalServerError"
+        "503":
+          $ref: "#/components/responses/PlainAuthUnavailable"
+
+  /auth/google/callback:
+    get:
+      tags: [Web authentication]
+      operationId: completeGoogleAuthentication
+      summary: Complete web Google OAuth
+      description: |
+        Google OAuth callback. Validates encrypted state, PKCE, nonce, issuer,
+        audience, and verified email; creates a 30-day web session; then sets
+        secure session and CSRF cookies.
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "303":
+          description: Authentication succeeded; redirect to requested local path.
+          headers:
+            Location:
+              description: Validated same-origin return path.
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/PlainInvalidAuthState"
+        "401":
+          $ref: "#/components/responses/PlainAuthenticationFailed"
+        "500":
+          $ref: "#/components/responses/PlainInternalServerError"
+        "502":
+          $ref: "#/components/responses/PlainAuthenticationFailed"
+        "503":
+          $ref: "#/components/responses/PlainAuthUnavailable"
+
+  /api/v1/auth/google/challenge:
+    post:
+      tags: [Native authentication]
+      operationId: createGoogleChallenge
+      summary: Create native Google Sign-In challenge
+      description: |
+        Returns an encrypted five-minute challenge and nonce. Native clients must
+        include this nonce when requesting a Google ID token, then submit both
+        values to the exchange endpoint.
+      security: []
+      responses:
+        "200":
+          description: Challenge created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NativeChallengeResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
+
+  /api/v1/auth/google/exchange:
+    post:
+      tags: [Native authentication]
+      operationId: exchangeGoogleIDToken
+      summary: Exchange native Google identity for app tokens
+      description: |
+        Verifies challenge, Google ID-token nonce, issuer, audience, authorized
+        party, and verified email. Returns a 15-minute access token and rotating
+        30-day refresh token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NativeExchangeRequest"
+      responses:
+        "200":
+          description: Native session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Native authentication]
+      operationId: refreshNativeTokens
+      summary: Rotate native access and refresh tokens
+      description: |
+        Consumes the supplied refresh token and returns a new token pair. Reusing
+        an already consumed refresh token revokes its entire session family.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Tokens rotated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: Refresh token is invalid, expired, revoked, or reused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: invalid refresh token
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/me:
+    get:
+      tags: [Account]
+      operationId: getCurrentUser
+      summary: Get authenticated user and CSRF token
+      description: |
+        For web sessions, returns the CSRF token required by mutation endpoints
+        and replaces it when the CSRF cookie is missing or invalid. `csrfToken`
+        is an empty string for bearer-authenticated clients.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Account]
+      operationId: logout
+      summary: Revoke current session
+      description: |
+        Revokes the current web or native session and all tokens belonging to it.
+        Web clients must supply both conditional CSRF headers.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      responses:
+        "204":
+          description: Session revoked. Web session cookies are cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/auth/revoke-device:
+    post:
+      tags: [Account]
+      operationId: revokeDevice
+      summary: Revoke all sessions for a device
+      description: |
+        Revokes the device and all native sessions and tokens associated with it.
+        Web clients must supply both conditional CSRF headers.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeDeviceRequest"
+      responses:
+        "204":
+          description: Matching device sessions revoked. Unknown IDs are a no-op.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/sync:
+    post:
+      tags: [Timer]
+      operationId: syncTimer
+      summary: Submit commands and read canonical timer state
+      description: |
+        Accepts up to 256 immutable commands. Repeating a command ID is
+        idempotent. Reusing a device sequence for a different command produces a
+        rejected acknowledgement. Commands are ordered by `hlcWallMs`,
+        `hlcCounter`, device ID, then command ID; latest valid intent wins.
+
+        `lastRevision` reports the client's last observed revision. This version
+        always returns the complete canonical snapshot and history. A revision is
+        incremented once per request that inserts at least one new command.
+
+        Bearer-authenticated clients may only sync the device bound to their
+        access-token session. Web clients must supply both conditional CSRF
+        headers.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncRequest"
+      responses:
+        "200":
+          description: Commands reconciled and canonical snapshot returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          description: Envelope or any command is invalid; no command is stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: invalid sync request
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF validation failed or bearer session device mismatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                csrf:
+                  value:
+                    error: forbidden
+                deviceMismatch:
+                  value:
+                    error: device mismatch
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/history:
+    get:
+      tags: [Timer]
+      operationId: getTimerHistory
+      summary: Get full timer history
+      description: |
+        Returns completed, cancelled, and superseded timer sessions, newest first.
+        History is rebuilt from the immutable command audit log.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Full timer history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/stream:
+    get:
+      tags: [Timer]
+      operationId: streamTimerRevisions
+      summary: Stream timer revision hints
+      description: |
+        Sends current revision immediately, then sends a `revision` event whenever
+        a sync request containing commands completes. Sends a comment keepalive
+        every 20 seconds. Events are hints; reconnect and call sync to retrieve
+        authoritative state.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Server-Sent Events stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                event: revision
+                data: {"revision":42}
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-pomodorough_session
+      description: Secure HttpOnly web session cookie created by Google OAuth.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Native 15-minute access token returned by exchange or refresh.
+
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: false
+      description: |
+        Required only with `cookieAuth`; must exactly equal
+        `https://pomodorough.egigoka.me`. Not required with `bearerAuth`.
+      schema:
+        type: string
+        format: uri
+      example: https://pomodorough.egigoka.me
+    CSRFToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: |
+        Required only with `cookieAuth`; use `csrfToken` from `GET /api/v1/me`.
+        It must also match the `__Host-pomodorough_csrf` cookie. Not required with
+        `bearerAuth`.
+      schema:
+        type: string
+
+  responses:
+    InvalidRequest:
+      description: Request body is malformed or violates its schema.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: invalid request
+    Unauthorized:
+      description: Authentication credential is missing, invalid, expired, or revoked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: unauthorized
+    Forbidden:
+      description: Cookie CSRF validation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: forbidden
+    InternalServerError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: internal server error
+    AuthUnavailable:
+      description: Required Google OAuth client configuration is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Google authentication unavailable
+    PlainAuthUnavailable:
+      description: Required Google OAuth client configuration is missing.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Google authentication unavailable
+    PlainInternalServerError:
+      description: Internal server error.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Internal Server Error
+    PlainInvalidAuthState:
+      description: OAuth state cookie, state query, or authorization code is invalid.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Invalid authentication state
+    PlainAuthenticationFailed:
+      description: Google exchange or ID-token verification failed.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Authentication failed
+
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    NativeChallengeResponse:
+      type: object
+      additionalProperties: false
+      required: [challenge, nonce, expiresAt]
+      properties:
+        challenge:
+          type: string
+          description: Encrypted, authenticated challenge submitted unchanged at exchange.
+        nonce:
+          type: string
+          description: Nonce to include in the Google ID-token request.
+        expiresAt:
+          type: string
+          format: date-time
+      example:
+        challenge: encrypted-challenge
+        nonce: google-id-token-nonce
+        expiresAt: "2026-07-15T17:05:00Z"
+
+    NativeExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [idToken, challenge, deviceId, platform]
+      properties:
+        idToken:
+          type: string
+          description: Google OpenID Connect ID token containing the challenge nonce.
+        challenge:
+          type: string
+          description: Value returned by the challenge endpoint.
+        deviceId:
+          $ref: "#/components/schemas/DeviceID"
+        platform:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$"
+          minLength: 2
+          maxLength: 32
+          example: ios
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          format: password
+          minLength: 1
+
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - accessToken
+        - accessTokenExpiresAt
+        - refreshToken
+        - refreshTokenExpiresAt
+      properties:
+        accessToken:
+          type: string
+          format: password
+          description: Opaque bearer token valid for 15 minutes.
+        accessTokenExpiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+          format: password
+          description: Single-use rotating refresh token valid for 30 days.
+        refreshTokenExpiresAt:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, avatarUrl]
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{32}$"
+          minLength: 32
+          maxLength: 32
+          description: Opaque account ID derived from Google issuer and subject.
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        avatarUrl:
+          type: string
+
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [user, csrfToken]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        csrfToken:
+          type: string
+          description: Web CSRF token, or an empty string for bearer authentication.
+
+    RevokeDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceId]
+      properties:
+        deviceId:
+          $ref: "#/components/schemas/DeviceID"
+
+    DeviceID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: device-01J2YKB4E6T8V9R0X1C3M5N7P9
+
+    CommandID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: command-01J2YKCP7G5A3F9D8S6H4J2K1L
+
+    TimerID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: timer-01J2YKD8Q2W4E6R8T0Y1U3I5O7
+
+    TimerPhase:
+      type: string
+      enum: [focus, short_break, long_break]
+
+    CommandType:
+      type: string
+      enum: [start, pause, resume, finish, cancel, clear]
+
+    TimerCommand:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - deviceSequence
+        - timerId
+        - type
+        - phase
+        - plannedDurationMs
+        - occurredAt
+        - hlcWallMs
+        - hlcCounter
+        - observedElapsedMs
+      properties:
+        id:
+          $ref: "#/components/schemas/CommandID"
+        deviceSequence:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonic sequence unique within one device ID.
+        timerId:
+          $ref: "#/components/schemas/TimerID"
+        type:
+          $ref: "#/components/schemas/CommandType"
+        phase:
+          $ref: "#/components/schemas/TimerPhase"
+        plannedDurationMs:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 14400000
+          description: Planned timer duration from one minute through four hours.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Client-observed intent time in RFC 3339 format.
+        hlcWallMs:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Hybrid logical clock wall component in Unix milliseconds. Must not be
+            more than five minutes ahead of server time.
+        hlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+        observedElapsedMs:
+          type: integer
+          format: int64
+          description: Client-observed elapsed time; reducer clamps it to timer bounds.
+      example:
+        id: command-01J2YKCP7G5A3F9D8S6H4J2K1L
+        deviceSequence: 12
+        timerId: timer-01J2YKD8Q2W4E6R8T0Y1U3I5O7
+        type: pause
+        phase: focus
+        plannedDurationMs: 1500000
+        occurredAt: "2026-07-15T17:00:00.125Z"
+        hlcWallMs: 1784134800125
+        hlcCounter: 0
+        observedElapsedMs: 420125
+
+    SyncRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceId, lastRevision, commands]
+      properties:
+        deviceId:
+          $ref: "#/components/schemas/DeviceID"
+        lastRevision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Latest account revision applied by this client.
+        commands:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/TimerCommand"
+
+    Acknowledgement:
+      type: object
+      additionalProperties: false
+      required: [commandId, outcome, reason]
+      properties:
+        commandId:
+          $ref: "#/components/schemas/CommandID"
+        outcome:
+          type: string
+          enum: [applied, ignored, rejected]
+        reason:
+          type: string
+          description: Empty for applied commands; explanatory text otherwise.
+
+    TimerIntent:
+      type: object
+      additionalProperties: false
+      required: [type, commandId, occurredAt]
+      properties:
+        type:
+          $ref: "#/components/schemas/CommandType"
+        commandId:
+          $ref: "#/components/schemas/CommandID"
+        occurredAt:
+          type: string
+          format: date-time
+
+    CanonicalTimer:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - phase
+        - status
+        - plannedDurationMs
+        - elapsedAtAnchorMs
+        - anchorAt
+      properties:
+        id:
+          $ref: "#/components/schemas/TimerID"
+        phase:
+          $ref: "#/components/schemas/TimerPhase"
+        status:
+          type: string
+          enum: [running, paused, completed, cancelled, superseded]
+        plannedDurationMs:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 14400000
+        elapsedAtAnchorMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Elapsed time at `anchorAt`. While status is `running`, add positive
+            wall-clock time since `anchorAt`, capped at `plannedDurationMs`.
+        anchorAt:
+          type: string
+          format: date-time
+        lastIntent:
+          $ref: "#/components/schemas/TimerIntent"
+
+    HistoryItem:
+      type: object
+      additionalProperties: false
+      required: [id, timerId, phase, status, plannedDurationMs]
+      properties:
+        id:
+          $ref: "#/components/schemas/TimerID"
+        timerId:
+          $ref: "#/components/schemas/TimerID"
+        commandId:
+          $ref: "#/components/schemas/CommandID"
+        phase:
+          $ref: "#/components/schemas/TimerPhase"
+        status:
+          type: string
+          enum: [completed, cancelled, superseded]
+        plannedDurationMs:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 14400000
+        completedAt:
+          type: string
+          format: date-time
+          description: Present only for completed timers.
+        endedAt:
+          type: string
+          format: date-time
+
+    SyncResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - acknowledgements
+        - revision
+        - canonicalTimer
+        - history
+        - serverTime
+        - serverHlcWallMs
+      properties:
+        acknowledgements:
+          type: array
+          description: One entry for each command in request order.
+          items:
+            $ref: "#/components/schemas/Acknowledgement"
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        canonicalTimer:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/CanonicalTimer"
+          nullable: true
+          description: Current timer projection, or null after clear/no commands.
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryItem"
+        serverTime:
+          type: string
+          format: date-time
+        serverHlcWallMs:
+          type: integer
+          format: int64
+          minimum: 1
+
+    HistoryResponse:
+      type: object
+      additionalProperties: false
+      required: [history]
+      properties:
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryItem"

@@ -1,0 +1,21 @@
+{
+  "name": "Pomodorough",
+  "short_name": "Pomodorough",
+  "description": "A local-first focus timer that continues across your devices.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#dceaf1",
+  "theme_color": "#142c5c",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

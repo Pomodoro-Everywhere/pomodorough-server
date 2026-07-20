@@ -1,0 +1,17 @@
+.claude/
+
+.env
+.env.*
+!.env.example
+pomodorough.env
+
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+*.key
+*.pem
+*.p12
+*.pfx
