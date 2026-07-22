@@ -89,6 +89,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/logout", s.requireMutation(s.handleLogout))
 	mux.Handle("POST /api/v1/auth/revoke-device", s.requireMutation(s.handleRevokeDevice))
 	mux.Handle("POST /api/v1/sync", s.requireMutation(s.handleSync))
+	mux.Handle("GET /api/v1/bootstrap", s.requireAuth(s.handleBootstrap))
+	mux.Handle("POST /api/v1/bootstrap/resolve", s.requireMutation(s.handleBootstrapResolve))
 	mux.Handle("GET /api/v1/history", s.requireAuth(s.handleHistory))
 	mux.Handle("GET /api/v1/stream", s.requireAuth(s.handleStream))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {

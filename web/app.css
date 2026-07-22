@@ -407,6 +407,178 @@ main {
   font-weight: 800;
 }
 
+.bootstrap-dialog {
+  width: min(43rem, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  padding: 0;
+  overflow: auto;
+  color: var(--track);
+  background: var(--porcelain);
+  border: 3px solid var(--track);
+  border-radius: 0;
+  box-shadow: 12px 12px 0 var(--signal);
+}
+
+.bootstrap-dialog::backdrop {
+  background: rgba(12, 27, 57, 0.82);
+}
+
+.bootstrap-dialog[aria-busy="true"] .bootstrap-confirmation {
+  border-left-color: var(--ticket);
+}
+
+.bootstrap-ticket {
+  padding: clamp(1.25rem, 4vw, 2.5rem);
+  border-top: 0.8rem solid var(--ticket);
+}
+
+.bootstrap-kicker {
+  color: var(--platform);
+  font-family: var(--utility);
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.bootstrap-ticket h2,
+.bootstrap-ticket h3,
+.bootstrap-ticket p {
+  margin-inline: 0;
+}
+
+.bootstrap-ticket h2 {
+  margin-block: 0.35rem 0.5rem;
+  font-family: var(--display);
+  font-size: clamp(2.4rem, 7vw, 4.5rem);
+  letter-spacing: 0.025em;
+  line-height: 0.9;
+  text-transform: uppercase;
+}
+
+.bootstrap-ticket > p {
+  margin-block: 0 1.4rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.bootstrap-choices {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.bootstrap-choices button {
+  min-height: 5.1rem;
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.45fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  color: var(--track);
+  background: var(--sky);
+  border: 2px solid var(--track);
+  border-left: 0.65rem solid var(--platform);
+  text-align: left;
+}
+
+.bootstrap-choices button:last-child {
+  border-left-color: var(--signal);
+}
+
+.bootstrap-choices strong,
+.bootstrap-choices span {
+  display: block;
+}
+
+.bootstrap-choices strong {
+  font-family: var(--display);
+  font-size: 1.15rem;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.bootstrap-choices span {
+  font-size: 0.73rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.bootstrap-confirmation {
+  padding: 1.2rem;
+  color: var(--porcelain);
+  background: var(--platform);
+  border-left: 0.7rem solid var(--signal);
+}
+
+.bootstrap-confirmation h3 {
+  margin-block: 0 0.45rem;
+  color: var(--ticket);
+  font-family: var(--display);
+  font-size: 1.55rem;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.bootstrap-confirmation p {
+  margin-block: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.bootstrap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 1.1rem;
+}
+
+.bootstrap-actions button,
+.bootstrap-retry,
+.bootstrap-signout {
+  min-height: 2.9rem;
+  padding: 0.65rem 1rem;
+  border: 2px solid var(--track);
+  border-radius: 0;
+  font-family: var(--display);
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.bootstrap-confirm {
+  background: var(--ticket);
+}
+
+.bootstrap-cancel {
+  color: var(--porcelain);
+  background: transparent;
+  border-color: var(--porcelain) !important;
+}
+
+.bootstrap-error {
+  margin-block: 0 1rem !important;
+  padding: 0.9rem 1rem;
+  color: var(--porcelain) !important;
+  background: var(--danger);
+  border: 2px solid var(--track);
+  font-family: var(--utility);
+  font-size: 0.7rem !important;
+  line-height: 1.45;
+}
+
+.bootstrap-retry {
+  color: var(--track);
+  background: var(--ticket);
+  box-shadow: 5px 5px 0 var(--signal);
+}
+
+.bootstrap-signout {
+  margin-left: 0.75rem;
+  color: var(--porcelain);
+  background: var(--platform);
+}
+
 .workbench {
   display: grid;
   grid-template-columns: 1fr;
@@ -1417,6 +1589,21 @@ main {
 }
 
 @media (max-width: 640px) {
+  .bootstrap-dialog {
+    width: calc(100% - 1rem);
+    max-height: calc(100vh - 1rem);
+    box-shadow: 6px 6px 0 var(--signal);
+  }
+
+  .bootstrap-ticket {
+    padding: 1rem;
+  }
+
+  .bootstrap-choices button {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+
   .masthead {
     min-height: auto;
     display: block;

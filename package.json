@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "test:web": "node --test web/*.test.js",
+    "check:web": "node --check web/sync-core.js && node --check web/sync-storage.js && node --check web/app.js && node --check web/sw.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
+  }
+}

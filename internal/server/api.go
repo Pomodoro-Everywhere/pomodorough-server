@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -12,14 +13,20 @@ import (
 	"pomodorough/internal/timer"
 )
 
-const maxSyncBody = 1 << 20
+const (
+	maxSyncBody      = 1 << 20
+	maxBootstrapBody = 32 << 20
+)
 
 var (
-	idPattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
-	platformPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
-	validTypes              = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}}
-	validPhases             = map[string]struct{}{"focus": {}, "short_break": {}, "long_break": {}}
-	validTaskOperationTypes = map[string]struct{}{"upsert": {}, "delete": {}}
+	idPattern                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
+	platformPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
+	validTypes               = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}}
+	validPhases              = map[string]struct{}{"focus": {}, "short_break": {}, "long_break": {}}
+	validTaskOperationTypes  = map[string]struct{}{"upsert": {}, "delete": {}}
+	validBootstrapStrategies = map[string]struct{}{
+		store.BootstrapKeepRemote: {}, store.BootstrapReplaceRemote: {}, store.BootstrapMerge: {},
+	}
 )
 
 type syncRequestJSON struct {
@@ -61,6 +68,16 @@ type syncDurationOperationJSON struct {
 	OccurredAt string `json:"occurredAt"`
 	HLCWallMs  *int64 `json:"hlcWallMs"`
 	HLCCounter *int64 `json:"hlcCounter"`
+}
+
+type bootstrapResolutionRequestJSON struct {
+	RequestID          string                      `json:"requestId"`
+	DeviceID           string                      `json:"deviceId"`
+	ExpectedRevision   *int64                      `json:"expectedRevision"`
+	Strategy           string                      `json:"strategy"`
+	Commands           []syncCommandJSON           `json:"commands"`
+	TaskOperations     []syncTaskOperationJSON     `json:"taskOperations"`
+	DurationOperations []syncDurationOperationJSON `json:"durationOperations"`
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -170,6 +187,57 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 	}
 }
 
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identity principal) {
+	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	result, err := s.store.Bootstrap(r.Context(), db, identity.UserID, time.Now())
+	db.Close()
+	if err != nil {
+		s.internalAPIError(w, "read bootstrap snapshot", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, identity principal) {
+	now := time.Now()
+	request, err := parseBootstrapResolutionRequest(w, r, now)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid bootstrap resolution request")
+		return
+	}
+	if identity.Method == "bearer" && !authn.EqualString(identity.DeviceID, request.DeviceID) {
+		writeAPIError(w, http.StatusForbidden, "device mismatch")
+		return
+	}
+	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	result, err := s.store.ResolveBootstrap(r.Context(), db, identity.UserID, request, now)
+	db.Close()
+	if errors.Is(err, store.ErrRevisionConflict) {
+		writeAPIError(w, http.StatusConflict, "revision conflict")
+		return
+	}
+	if errors.Is(err, store.ErrRequestIDConflict) {
+		writeAPIError(w, http.StatusConflict, "request ID conflict")
+		return
+	}
+	if err != nil {
+		s.internalAPIError(w, "resolve bootstrap history", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+	if result.Changed {
+		s.hub.publish(identity.UserID, result.Revision)
+	}
+}
+
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity principal) {
 	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
 	if err != nil {
@@ -244,17 +312,59 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 {
 		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
 	}
-	request := store.SyncRequest{
-		DeviceID: payload.DeviceID, LastRevision: *payload.LastRevision,
-		Commands:           make([]timer.Command, 0, len(payload.Commands)),
-		TaskOperations:     make([]task.Operation, 0, len(payload.TaskOperations)),
-		DurationOperations: make([]store.DurationOperation, 0, len(payload.DurationOperations)),
+	request, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, 256, now)
+	if err != nil {
+		return store.SyncRequest{}, err
 	}
-	seenDurationOperationIDs := make(map[string]struct{}, len(payload.DurationOperations))
-	for _, input := range payload.Commands {
+	request.LastRevision = *payload.LastRevision
+	return request, nil
+}
+
+func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now time.Time) (store.BootstrapResolutionRequest, error) {
+	var payload bootstrapResolutionRequestJSON
+	if err := decodeJSON(w, r, maxBootstrapBody, &payload); err != nil {
+		return store.BootstrapResolutionRequest{}, err
+	}
+	_, validStrategy := validBootstrapStrategies[payload.Strategy]
+	if !validID(payload.RequestID) || !validID(payload.DeviceID) || payload.ExpectedRevision == nil || *payload.ExpectedRevision < 0 || !validStrategy ||
+		payload.Commands == nil || payload.TaskOperations == nil || payload.DurationOperations == nil ||
+		len(payload.Commands) > 4096 || len(payload.TaskOperations) > 4096 || len(payload.DurationOperations) > 4096 {
+		return store.BootstrapResolutionRequest{}, fmt.Errorf("invalid bootstrap resolution envelope")
+	}
+	if payload.Strategy == store.BootstrapKeepRemote && (len(payload.Commands) != 0 || len(payload.TaskOperations) != 0 || len(payload.DurationOperations) != 0) {
+		return store.BootstrapResolutionRequest{}, fmt.Errorf("keep_remote requires empty operation arrays")
+	}
+	operations, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, 4096, now)
+	if err != nil {
+		return store.BootstrapResolutionRequest{}, err
+	}
+	return store.BootstrapResolutionRequest{
+		RequestID: payload.RequestID, DeviceID: payload.DeviceID, ExpectedRevision: *payload.ExpectedRevision, Strategy: payload.Strategy,
+		Commands: operations.Commands, TaskOperations: operations.TaskOperations, DurationOperations: operations.DurationOperations,
+	}, nil
+}
+
+func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
+	if len(commands) > maximum || len(taskOperations) > maximum || len(durationOperations) > maximum {
+		return store.SyncRequest{}, fmt.Errorf("too many operations")
+	}
+	request := store.SyncRequest{
+		DeviceID:           deviceID,
+		Commands:           make([]timer.Command, 0, len(commands)),
+		TaskOperations:     make([]task.Operation, 0, len(taskOperations)),
+		DurationOperations: make([]store.DurationOperation, 0, len(durationOperations)),
+	}
+	seenCommandIDs := make(map[string]struct{}, len(commands))
+	seenTaskOperationIDs := make(map[string]struct{}, len(taskOperations))
+	seenDurationOperationIDs := make(map[string]struct{}, len(durationOperations))
+	for _, input := range commands {
 		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 {
 			return store.SyncRequest{}, fmt.Errorf("invalid command identity")
 		}
+		if _, duplicate := seenCommandIDs[input.ID]; duplicate {
+			return store.SyncRequest{}, fmt.Errorf("duplicate command identity")
+		}
+		seenCommandIDs[input.ID] = struct{}{}
 		if _, valid := validTypes[input.Type]; !valid {
 			return store.SyncRequest{}, fmt.Errorf("invalid command type")
 		}
@@ -275,16 +385,20 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 			return store.SyncRequest{}, fmt.Errorf("invalid occurrence time")
 		}
 		request.Commands = append(request.Commands, timer.Command{
-			ID: input.ID, DeviceID: payload.DeviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
+			ID: input.ID, DeviceID: deviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
 			TaskID: input.TaskID,
 			Type:   input.Type, Phase: input.Phase, PlannedDurationMs: *input.PlannedDurationMs, OccurredAt: occurredAt,
 			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter, ObservedElapsedMs: *input.ObservedElapsedMs,
 		})
 	}
-	for _, input := range payload.TaskOperations {
+	for _, input := range taskOperations {
 		if !validID(input.ID) || !validID(input.TaskID) {
 			return store.SyncRequest{}, fmt.Errorf("invalid task operation identity")
 		}
+		if _, duplicate := seenTaskOperationIDs[input.ID]; duplicate {
+			return store.SyncRequest{}, fmt.Errorf("duplicate task operation identity")
+		}
+		seenTaskOperationIDs[input.ID] = struct{}{}
 		if _, valid := validTaskOperationTypes[input.Type]; !valid {
 			return store.SyncRequest{}, fmt.Errorf("invalid task operation type")
 		}
@@ -305,11 +419,11 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 			return store.SyncRequest{}, fmt.Errorf("invalid task occurrence time")
 		}
 		request.TaskOperations = append(request.TaskOperations, task.Operation{
-			ID: input.ID, DeviceID: payload.DeviceID, TaskID: input.TaskID, Type: input.Type, Title: title,
+			ID: input.ID, DeviceID: deviceID, TaskID: input.TaskID, Type: input.Type, Title: title,
 			OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
 		})
 	}
-	for _, input := range payload.DurationOperations {
+	for _, input := range durationOperations {
 		if !validID(input.ID) {
 			return store.SyncRequest{}, fmt.Errorf("invalid duration operation identity")
 		}
@@ -331,7 +445,7 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 			return store.SyncRequest{}, fmt.Errorf("invalid duration occurrence time")
 		}
 		request.DurationOperations = append(request.DurationOperations, store.DurationOperation{
-			ID: input.ID, DeviceID: payload.DeviceID, Phase: input.Phase, DurationMs: *input.DurationMs,
+			ID: input.ID, DeviceID: deviceID, Phase: input.Phase, DurationMs: *input.DurationMs,
 			OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
 		})
 	}

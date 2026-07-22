@@ -70,6 +70,9 @@ type SyncResult struct {
 }
 
 func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request SyncRequest, now time.Time) (SyncResult, error) {
+	if err := validateUniqueOperationIDs(request); err != nil {
+		return SyncResult{}, err
+	}
 	unlock := s.LockUser(userID)
 	defer unlock()
 	tx, err := db.BeginTx(ctx, nil)
@@ -84,122 +87,193 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 		return SyncResult{}, fmt.Errorf("record sync device: %w", err)
 	}
 
-	rejections := make(map[string]timer.Outcome)
-	newCommands := false
+	applied, err := applyOperations(ctx, tx, request)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	reduction, err := reduceAccount(ctx, tx, now)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	revision := reduction.revision
+	if applied.changed {
+		revision++
+	}
+	if err := persistReduction(ctx, tx, reduction, revision); err != nil {
+		return SyncResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SyncResult{}, fmt.Errorf("commit sync: %w", err)
+	}
+
+	result := resultFromReduction(reduction, revision, now, &request)
+	addAcknowledgements(&result, request, applied, reduction)
+	result.Changed = applied.changed
+	return result, nil
+}
+
+type operationApplication struct {
+	commandRejections  map[string]timer.Outcome
+	taskRejections     map[string]TaskAcknowledgement
+	durationRejections map[string]DurationAcknowledgement
+	changed            bool
+}
+
+type accountReduction struct {
+	revision                  int64
+	commands                  []timer.Command
+	timer                     timer.Result
+	taskOperations            []task.Operation
+	tasks                     []task.Task
+	winningTaskOperations     map[string]string
+	durationOperations        []DurationOperation
+	durations                 DurationsMs
+	winningDurationOperations map[string]struct{}
+}
+
+func validateUniqueOperationIDs(request SyncRequest) error {
+	commandIDs := make(map[string]struct{}, len(request.Commands))
 	for _, command := range request.Commands {
-		var existingID string
-		err := tx.QueryRowContext(ctx, `SELECT id FROM timer_commands WHERE id = ?`, command.ID).Scan(&existingID)
+		if _, duplicate := commandIDs[command.ID]; duplicate {
+			return fmt.Errorf("duplicate timer command id %q", command.ID)
+		}
+		commandIDs[command.ID] = struct{}{}
+	}
+	taskOperationIDs := make(map[string]struct{}, len(request.TaskOperations))
+	for _, operation := range request.TaskOperations {
+		if _, duplicate := taskOperationIDs[operation.ID]; duplicate {
+			return fmt.Errorf("duplicate task operation id %q", operation.ID)
+		}
+		taskOperationIDs[operation.ID] = struct{}{}
+	}
+	durationOperationIDs := make(map[string]struct{}, len(request.DurationOperations))
+	for _, operation := range request.DurationOperations {
+		if _, duplicate := durationOperationIDs[operation.ID]; duplicate {
+			return fmt.Errorf("duplicate duration operation id %q", operation.ID)
+		}
+		durationOperationIDs[operation.ID] = struct{}{}
+	}
+	return nil
+}
+
+func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (operationApplication, error) {
+	application := operationApplication{
+		commandRejections:  make(map[string]timer.Outcome),
+		taskRejections:     make(map[string]TaskAcknowledgement),
+		durationRejections: make(map[string]DurationAcknowledgement),
+	}
+	for _, command := range request.Commands {
+		existing, err := loadCommand(ctx, tx, command.ID)
 		if err == nil {
+			if !sameCommand(existing, command, request.DeviceID) {
+				application.commandRejections[command.ID] = timer.Outcome{Outcome: "rejected", Reason: "command ID already used with different payload"}
+			}
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return SyncResult{}, fmt.Errorf("check command id: %w", err)
+			return operationApplication{}, fmt.Errorf("check command id: %w", err)
 		}
+		var existingID string
 		err = tx.QueryRowContext(ctx, `SELECT id FROM timer_commands WHERE device_id = ? AND device_sequence = ?`, request.DeviceID, command.DeviceSequence).Scan(&existingID)
 		if err == nil {
-			rejections[command.ID] = timer.Outcome{Outcome: "rejected", Reason: "device sequence already used"}
+			application.commandRejections[command.ID] = timer.Outcome{Outcome: "rejected", Reason: "device sequence already used"}
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return SyncResult{}, fmt.Errorf("check device sequence: %w", err)
+			return operationApplication{}, fmt.Errorf("check device sequence: %w", err)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO timer_commands(
+		if _, err := tx.ExecContext(ctx, `INSERT INTO timer_commands(
 			id, device_id, device_sequence, timer_id, task_id, command_type, phase, planned_duration_ms,
 			occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter, observed_elapsed_ms
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			command.ID, request.DeviceID, command.DeviceSequence, command.TimerID, nullString(command.TaskID), command.Type, command.Phase,
 			command.PlannedDurationMs, command.OccurredAt.UTC().Format(time.RFC3339Nano), command.OccurredAt.UnixMilli(),
 			command.HLCWallMs, command.HLCCounter, command.ObservedElapsedMs,
-		)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf("insert timer command: %w", err)
+		); err != nil {
+			return operationApplication{}, fmt.Errorf("insert timer command: %w", err)
 		}
-		newCommands = true
+		application.changed = true
 	}
-	newTaskOperations := false
 	for _, operation := range request.TaskOperations {
-		var existingID string
-		err := tx.QueryRowContext(ctx, `SELECT id FROM task_operations WHERE id = ?`, operation.ID).Scan(&existingID)
+		existing, err := loadTaskOperation(ctx, tx, operation.ID)
 		if err == nil {
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return SyncResult{}, fmt.Errorf("check task operation id: %w", err)
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO task_operations(
-			id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.TaskID, operation.Type,
-			operation.Title, operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf("insert task operation: %w", err)
-		}
-		newTaskOperations = true
-	}
-	newDurationOperations := false
-	durationRejections := make(map[string]DurationAcknowledgement)
-	seenDurationOperationIDs := make(map[string]struct{}, len(request.DurationOperations))
-	for _, operation := range request.DurationOperations {
-		if _, duplicate := seenDurationOperationIDs[operation.ID]; duplicate {
-			return SyncResult{}, fmt.Errorf("duplicate duration operation id %q", operation.ID)
-		}
-		seenDurationOperationIDs[operation.ID] = struct{}{}
-
-		var existing DurationOperation
-		var occurredAt string
-		err := tx.QueryRowContext(ctx, `SELECT id, device_id, phase, duration_ms, occurred_at, hlc_wall_ms, hlc_counter
-			FROM duration_operations WHERE id = ?`, operation.ID).Scan(
-			&existing.ID, &existing.DeviceID, &existing.Phase, &existing.DurationMs, &occurredAt, &existing.HLCWallMs, &existing.HLCCounter,
-		)
-		if err == nil {
-			existing.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
-			if err != nil {
-				return SyncResult{}, fmt.Errorf("parse stored duration operation timestamp: %w", err)
-			}
-			if existing.DeviceID != request.DeviceID || existing.Phase != operation.Phase || existing.DurationMs != operation.DurationMs ||
-				!existing.OccurredAt.Equal(operation.OccurredAt) || existing.HLCWallMs != operation.HLCWallMs || existing.HLCCounter != operation.HLCCounter {
-				durationRejections[operation.ID] = DurationAcknowledgement{
-					OperationID: operation.ID,
-					Outcome:     "rejected",
-					Reason:      "operation ID already used with different payload",
+			if !sameTaskOperation(existing, operation, request.DeviceID) {
+				application.taskRejections[operation.ID] = TaskAcknowledgement{
+					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
 				}
 			}
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return SyncResult{}, fmt.Errorf("check duration operation id: %w", err)
+			return operationApplication{}, fmt.Errorf("check task operation id: %w", err)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO duration_operations(
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_operations(
+			id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.TaskID, operation.Type,
+			operation.Title, operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
+			return operationApplication{}, fmt.Errorf("insert task operation: %w", err)
+		}
+		application.changed = true
+	}
+	for _, operation := range request.DurationOperations {
+		existing, err := loadDurationOperation(ctx, tx, operation.ID)
+		if err == nil {
+			if !sameDurationOperation(existing, operation, request.DeviceID) {
+				application.durationRejections[operation.ID] = DurationAcknowledgement{
+					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
+				}
+			}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return operationApplication{}, fmt.Errorf("check duration operation id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO duration_operations(
 			id, device_id, phase, duration_ms, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.Phase, operation.DurationMs,
-			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf("insert duration operation: %w", err)
+			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
+			return operationApplication{}, fmt.Errorf("insert duration operation: %w", err)
 		}
-		newDurationOperations = true
+		application.changed = true
 	}
+	return application, nil
+}
 
-	var revision int64
-	if err := tx.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&revision); err != nil {
-		return SyncResult{}, fmt.Errorf("read account revision: %w", err)
+func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (accountReduction, error) {
+	var reduction accountReduction
+	if err := source.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&reduction.revision); err != nil {
+		return accountReduction{}, fmt.Errorf("read account revision: %w", err)
 	}
-	if newCommands || newTaskOperations || newDurationOperations {
-		revision++
-	}
-	commands, err := loadCommands(ctx, tx)
+	var err error
+	reduction.commands, err = loadCommands(ctx, source)
 	if err != nil {
-		return SyncResult{}, err
+		return accountReduction{}, err
 	}
-	reduced := timer.Reduce(commands, now)
-	for commandID, outcome := range reduced.Outcomes {
+	reduction.timer = timer.Reduce(reduction.commands, now)
+	reduction.taskOperations, err = loadTaskOperations(ctx, source)
+	if err != nil {
+		return accountReduction{}, err
+	}
+	reduction.tasks, reduction.winningTaskOperations = reduceTasks(reduction.taskOperations)
+	reduction.durationOperations, err = loadDurationOperations(ctx, source)
+	if err != nil {
+		return accountReduction{}, err
+	}
+	reduction.durations, reduction.winningDurationOperations = reduceDurations(reduction.durationOperations)
+	return reduction, nil
+}
+
+func persistReduction(ctx context.Context, tx *sql.Tx, reduction accountReduction, revision int64) error {
+	for commandID, outcome := range reduction.timer.Outcomes {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO command_outcomes(command_id, outcome, reason) VALUES (?, ?, ?)
 			ON CONFLICT(command_id) DO UPDATE SET outcome = excluded.outcome, reason = excluded.reason`, commandID, outcome.Outcome, outcome.Reason); err != nil {
-			return SyncResult{}, fmt.Errorf("save command outcome: %w", err)
+			return fmt.Errorf("save command outcome: %w", err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM timer_sessions`); err != nil {
-		return SyncResult{}, fmt.Errorf("clear timer projection: %w", err)
+		return fmt.Errorf("clear timer projection: %w", err)
 	}
-	for _, session := range reduced.Sessions {
+	for _, session := range reduction.timer.Sessions {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO timer_sessions(
 			timer_id, task_id, phase, status, planned_duration_ms, elapsed_at_anchor_ms, anchor_at_ms, started_at_ms,
 			ended_at_ms, last_command_id, terminal_command_id, superseded_by_timer_id
@@ -208,19 +282,20 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 			session.AnchorAt.UnixMilli(), session.StartedAt.UnixMilli(), unixMilli(session.EndedAt), session.LastCommandID,
 			nullString(session.TerminalCommandID), nullString(session.SupersededByTimerID),
 		); err != nil {
-			return SyncResult{}, fmt.Errorf("save timer projection: %w", err)
+			return fmt.Errorf("save timer projection: %w", err)
 		}
 	}
-	taskOperations, err := loadTaskOperations(ctx, tx)
-	if err != nil {
-		return SyncResult{}, err
+	var currentTimerID any
+	if reduction.timer.Canonical != nil {
+		currentTimerID = reduction.timer.Canonical.ID
 	}
-	tasks, winningTaskOperations := reduceTasks(taskOperations)
-	durationOperations, err := loadDurationOperations(ctx, tx)
-	if err != nil {
-		return SyncResult{}, err
+	if _, err := tx.ExecContext(ctx, `UPDATE account_state SET revision = ?, current_timer_id = ? WHERE singleton = 1`, revision, currentTimerID); err != nil {
+		return fmt.Errorf("save account state: %w", err)
 	}
-	durations, winningDurationOperations := reduceDurations(durationOperations)
+	return nil
+}
+
+func resultFromReduction(reduction accountReduction, revision int64, now time.Time, request *SyncRequest) SyncResult {
 	serverHLCWallMs, serverHLCCounter := now.UnixMilli(), int64(0)
 	observeHLC := func(wallMs, counter int64) {
 		if wallMs > serverHLCWallMs || wallMs == serverHLCWallMs && counter > serverHLCCounter {
@@ -228,79 +303,146 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 			serverHLCCounter = counter
 		}
 	}
-	for _, command := range commands {
+	for _, command := range reduction.commands {
 		observeHLC(command.HLCWallMs, command.HLCCounter)
 	}
-	for _, operation := range taskOperations {
+	for _, operation := range reduction.taskOperations {
 		observeHLC(operation.HLCWallMs, operation.HLCCounter)
 	}
-	for _, operation := range durationOperations {
+	for _, operation := range reduction.durationOperations {
 		observeHLC(operation.HLCWallMs, operation.HLCCounter)
 	}
-	for _, command := range request.Commands {
-		observeHLC(command.HLCWallMs, command.HLCCounter)
-	}
-	for _, operation := range request.TaskOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
-	}
-	for _, operation := range request.DurationOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
-	}
-	var currentTimerID any
-	if reduced.Canonical != nil {
-		currentTimerID = reduced.Canonical.ID
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE account_state SET revision = ?, current_timer_id = ? WHERE singleton = 1`, revision, currentTimerID); err != nil {
-		return SyncResult{}, fmt.Errorf("save account state: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return SyncResult{}, fmt.Errorf("commit sync: %w", err)
-	}
-
-	acknowledgements := make([]Acknowledgement, 0, len(request.Commands))
-	for _, command := range request.Commands {
-		outcome, rejected := rejections[command.ID]
-		if !rejected {
-			outcome = reduced.Outcomes[command.ID]
+	if request != nil {
+		for _, command := range request.Commands {
+			observeHLC(command.HLCWallMs, command.HLCCounter)
 		}
-		acknowledgements = append(acknowledgements, Acknowledgement{CommandID: command.ID, Outcome: outcome.Outcome, Reason: outcome.Reason})
-	}
-	taskAcknowledgements := make([]TaskAcknowledgement, 0, len(request.TaskOperations))
-	for _, operation := range request.TaskOperations {
-		acknowledgement := TaskAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer task operation"}
-		if winningTaskOperations[operation.TaskID] == operation.ID {
-			acknowledgement.Outcome = "applied"
-			acknowledgement.Reason = ""
+		for _, operation := range request.TaskOperations {
+			observeHLC(operation.HLCWallMs, operation.HLCCounter)
 		}
-		taskAcknowledgements = append(taskAcknowledgements, acknowledgement)
-	}
-	durationAcknowledgements := make([]DurationAcknowledgement, 0, len(request.DurationOperations))
-	for _, operation := range request.DurationOperations {
-		if acknowledgement, rejected := durationRejections[operation.ID]; rejected {
-			durationAcknowledgements = append(durationAcknowledgements, acknowledgement)
-			continue
+		for _, operation := range request.DurationOperations {
+			observeHLC(operation.HLCWallMs, operation.HLCCounter)
 		}
-		acknowledgement := DurationAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer duration operation"}
-		if _, winning := winningDurationOperations[operation.ID]; winning {
-			acknowledgement.Outcome = "applied"
-			acknowledgement.Reason = ""
-		}
-		durationAcknowledgements = append(durationAcknowledgements, acknowledgement)
 	}
 	return SyncResult{
-		Acknowledgements:         acknowledgements,
-		TaskAcknowledgements:     taskAcknowledgements,
-		DurationAcknowledgements: durationAcknowledgements,
+		Acknowledgements:         []Acknowledgement{},
+		TaskAcknowledgements:     []TaskAcknowledgement{},
+		DurationAcknowledgements: []DurationAcknowledgement{},
 		Revision:                 revision,
-		CanonicalTimer:           reduced.Canonical,
-		History:                  nonNilHistory(reduced.History),
-		Tasks:                    tasks,
-		DurationsMs:              durations,
+		CanonicalTimer:           reduction.timer.Canonical,
+		History:                  nonNilHistory(reduction.timer.History),
+		Tasks:                    reduction.tasks,
+		DurationsMs:              reduction.durations,
 		ServerTime:               now.UTC().Format(time.RFC3339Nano),
 		ServerHLCWallMs:          serverHLCWallMs,
 		ServerHLCCounter:         serverHLCCounter,
-		Changed:                  newCommands || newTaskOperations || newDurationOperations,
-	}, nil
+	}
+}
+
+func addAcknowledgements(result *SyncResult, request SyncRequest, application operationApplication, reduction accountReduction) {
+	result.Acknowledgements = make([]Acknowledgement, 0, len(request.Commands))
+	for _, command := range request.Commands {
+		outcome, rejected := application.commandRejections[command.ID]
+		if !rejected {
+			outcome = reduction.timer.Outcomes[command.ID]
+		}
+		result.Acknowledgements = append(result.Acknowledgements, Acknowledgement{CommandID: command.ID, Outcome: outcome.Outcome, Reason: outcome.Reason})
+	}
+	result.TaskAcknowledgements = make([]TaskAcknowledgement, 0, len(request.TaskOperations))
+	for _, operation := range request.TaskOperations {
+		if acknowledgement, rejected := application.taskRejections[operation.ID]; rejected {
+			result.TaskAcknowledgements = append(result.TaskAcknowledgements, acknowledgement)
+			continue
+		}
+		acknowledgement := TaskAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer task operation"}
+		if reduction.winningTaskOperations[operation.TaskID] == operation.ID {
+			acknowledgement.Outcome = "applied"
+			acknowledgement.Reason = ""
+		}
+		result.TaskAcknowledgements = append(result.TaskAcknowledgements, acknowledgement)
+	}
+	result.DurationAcknowledgements = make([]DurationAcknowledgement, 0, len(request.DurationOperations))
+	for _, operation := range request.DurationOperations {
+		if acknowledgement, rejected := application.durationRejections[operation.ID]; rejected {
+			result.DurationAcknowledgements = append(result.DurationAcknowledgements, acknowledgement)
+			continue
+		}
+		acknowledgement := DurationAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer duration operation"}
+		if _, winning := reduction.winningDurationOperations[operation.ID]; winning {
+			acknowledgement.Outcome = "applied"
+			acknowledgement.Reason = ""
+		}
+		result.DurationAcknowledgements = append(result.DurationAcknowledgements, acknowledgement)
+	}
+}
+
+func loadCommand(ctx context.Context, source databaseQueryer, id string) (timer.Command, error) {
+	var command timer.Command
+	var occurredAt string
+	var taskID sql.NullString
+	err := source.QueryRowContext(ctx, `SELECT id, device_id, device_sequence, timer_id, task_id, command_type, phase,
+		planned_duration_ms, occurred_at, hlc_wall_ms, hlc_counter, observed_elapsed_ms
+		FROM timer_commands WHERE id = ?`, id).Scan(
+		&command.ID, &command.DeviceID, &command.DeviceSequence, &command.TimerID, &taskID, &command.Type, &command.Phase,
+		&command.PlannedDurationMs, &occurredAt, &command.HLCWallMs, &command.HLCCounter, &command.ObservedElapsedMs,
+	)
+	if err != nil {
+		return timer.Command{}, err
+	}
+	command.TaskID = taskID.String
+	command.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return timer.Command{}, fmt.Errorf("parse stored command timestamp: %w", err)
+	}
+	return command, nil
+}
+
+func loadTaskOperation(ctx context.Context, source databaseQueryer, id string) (task.Operation, error) {
+	var operation task.Operation
+	var occurredAt string
+	err := source.QueryRowContext(ctx, `SELECT id, device_id, task_id, operation_type, title, occurred_at, hlc_wall_ms, hlc_counter
+		FROM task_operations WHERE id = ?`, id).Scan(&operation.ID, &operation.DeviceID, &operation.TaskID, &operation.Type,
+		&operation.Title, &occurredAt, &operation.HLCWallMs, &operation.HLCCounter)
+	if err != nil {
+		return task.Operation{}, err
+	}
+	operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return task.Operation{}, fmt.Errorf("parse stored task operation timestamp: %w", err)
+	}
+	return operation, nil
+}
+
+func loadDurationOperation(ctx context.Context, source databaseQueryer, id string) (DurationOperation, error) {
+	var operation DurationOperation
+	var occurredAt string
+	err := source.QueryRowContext(ctx, `SELECT id, device_id, phase, duration_ms, occurred_at, hlc_wall_ms, hlc_counter
+		FROM duration_operations WHERE id = ?`, id).Scan(&operation.ID, &operation.DeviceID, &operation.Phase, &operation.DurationMs,
+		&occurredAt, &operation.HLCWallMs, &operation.HLCCounter)
+	if err != nil {
+		return DurationOperation{}, err
+	}
+	operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return DurationOperation{}, fmt.Errorf("parse stored duration operation timestamp: %w", err)
+	}
+	return operation, nil
+}
+
+func sameCommand(stored, submitted timer.Command, deviceID string) bool {
+	return stored.DeviceID == deviceID && stored.DeviceSequence == submitted.DeviceSequence && stored.TimerID == submitted.TimerID &&
+		stored.TaskID == submitted.TaskID && stored.Type == submitted.Type && stored.Phase == submitted.Phase &&
+		stored.PlannedDurationMs == submitted.PlannedDurationMs && stored.OccurredAt.Equal(submitted.OccurredAt) &&
+		stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter && stored.ObservedElapsedMs == submitted.ObservedElapsedMs
+}
+
+func sameTaskOperation(stored, submitted task.Operation, deviceID string) bool {
+	return stored.DeviceID == deviceID && stored.TaskID == submitted.TaskID && stored.Type == submitted.Type && stored.Title == submitted.Title &&
+		stored.OccurredAt.Equal(submitted.OccurredAt) && stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
+}
+
+func sameDurationOperation(stored, submitted DurationOperation, deviceID string) bool {
+	return stored.DeviceID == deviceID && stored.Phase == submitted.Phase && stored.DurationMs == submitted.DurationMs &&
+		stored.OccurredAt.Equal(submitted.OccurredAt) && stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
 }
 
 func History(ctx context.Context, db *sql.DB, now time.Time) ([]timer.HistoryItem, int64, error) {
@@ -317,6 +459,11 @@ func History(ctx context.Context, db *sql.DB, now time.Time) ([]timer.HistoryIte
 
 type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+type databaseQueryer interface {
+	queryer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func loadCommands(ctx context.Context, source queryer) ([]timer.Command, error) {

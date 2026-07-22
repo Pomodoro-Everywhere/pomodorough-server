@@ -189,6 +189,54 @@ func TestSyncTasksAreIdempotentLWWAndRetainHistoryAssociation(t *testing.T) {
 	}
 }
 
+func TestSyncTaskLWWUsesCounterDeviceAndOperationIDBoundaries(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-task-order-subject")
+	defer db.Close()
+	title := "Boundary task"
+	taskID := task.ID(title)
+	wallMs := now.UnixMilli()
+	steps := []struct {
+		deviceID  string
+		operation task.Operation
+		wantTask  bool
+		wantAck   string
+	}{
+		{
+			deviceID: "device-z", wantTask: true, wantAck: "applied",
+			operation: task.Operation{ID: "task-operation-base", TaskID: taskID, Type: "upsert", Title: title, OccurredAt: now, HLCWallMs: wallMs},
+		},
+		{
+			deviceID: "device-a", wantTask: false, wantAck: "applied",
+			operation: task.Operation{ID: "task-operation-counter", TaskID: taskID, Type: "delete", OccurredAt: now, HLCWallMs: wallMs, HLCCounter: 1},
+		},
+		{
+			deviceID: "device-z", wantTask: true, wantAck: "applied",
+			operation: task.Operation{ID: "task-operation-a", TaskID: taskID, Type: "upsert", Title: title, OccurredAt: now, HLCWallMs: wallMs, HLCCounter: 1},
+		},
+		{
+			deviceID: "device-z", wantTask: false, wantAck: "applied",
+			operation: task.Operation{ID: "task-operation-z", TaskID: taskID, Type: "delete", OccurredAt: now, HLCWallMs: wallMs, HLCCounter: 1},
+		},
+		{
+			deviceID: "device-zz", wantTask: false, wantAck: "ignored",
+			operation: task.Operation{ID: "task-operation-stale", TaskID: taskID, Type: "upsert", Title: title, OccurredAt: now.Add(-time.Second), HLCWallMs: wallMs - 1},
+		},
+	}
+	for index, step := range steps {
+		result, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: step.deviceID, TaskOperations: []task.Operation{step.operation}}, now.Add(time.Duration(index)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(result.Tasks) == 1) != step.wantTask || result.TaskAcknowledgements[0].Outcome != step.wantAck {
+			t.Fatalf("step %d result = %#v", index, result)
+		}
+		if step.wantTask && (result.Tasks[0].ID != taskID || result.Tasks[0].Title != title) {
+			t.Fatalf("step %d task = %#v", index, result.Tasks[0])
+		}
+	}
+}
+
 func TestSyncDurationsMergeIndependentlyAndRetryDeterministically(t *testing.T) {
 	ctx := context.Background()
 	userStore, db, userID, now := openTestUser(t, "sync-duration-subject")

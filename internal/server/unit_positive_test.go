@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,25 @@ func TestParseSyncRequestAcceptsDurationOperationsAndOmission(t *testing.T) {
 	}
 	if len(result.DurationOperations) != 2 || result.DurationOperations[0].DurationMs != 60_000 || result.DurationOperations[0].HLCWallMs != 0 || result.DurationOperations[1].DurationMs != 10_800_000 || result.DurationOperations[1].Phase != "long_break" {
 		t.Fatalf("parsed duration operations = %#v", result.DurationOperations)
+	}
+}
+
+func TestParseBootstrapResolutionAcceptsMaximumOperationHistory(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	payload := emptyBootstrapResolutionJSON("resolution-maximum-0001", "device-0001", 0, "merge")
+	payload.DurationOperations = make([]syncDurationOperationJSON, 4096)
+	for index := range payload.DurationOperations {
+		operation := validDurationOperationJSON(now, "focus", 1_500_000)
+		operation.ID = fmt.Sprintf("duration-operation-%04d", index)
+		payload.DurationOperations[index] = operation
+	}
+	request, response := newJSONRequest(t, http.MethodPost, "/api/v1/bootstrap/resolve", payload)
+	result, err := parseBootstrapResolutionRequest(response, request, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DurationOperations) != 4096 || result.DurationOperations[4095].ID != "duration-operation-4095" {
+		t.Fatalf("parsed bootstrap operation count=%d", len(result.DurationOperations))
 	}
 }
 

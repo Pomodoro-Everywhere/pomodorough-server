@@ -93,6 +93,71 @@ func TestMigrateVersionTwoAddsDurationSchemaWithoutRecreatingTasks(t *testing.T)
 	}
 }
 
+func TestMigrateVersionThreeAddsBootstrapSchemaAndScopedDeleteBypass(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/legacy.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`CREATE TABLE timer_commands (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE task_operations (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE duration_operations (id TEXT PRIMARY KEY)`,
+		`CREATE TRIGGER timer_commands_no_delete BEFORE DELETE ON timer_commands BEGIN SELECT RAISE(ABORT, 'timer commands are immutable'); END`,
+		`CREATE TRIGGER task_operations_no_delete BEFORE DELETE ON task_operations BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
+		`CREATE TRIGGER duration_operations_no_delete BEFORE DELETE ON duration_operations BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
+		`PRAGMA user_version = 3`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`SELECT name FROM maintenance_flags LIMIT 0`,
+		`SELECT request_id, payload_hash, response_json FROM bootstrap_resolutions LIMIT 0`,
+	} {
+		rows, err := db.QueryContext(ctx, query)
+		if err != nil {
+			t.Fatalf("migration query %q failed: %v", query, err)
+		}
+		rows.Close()
+	}
+	for _, table := range []string{"timer_commands", "task_operations", "duration_operations"} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO `+table+`(id) VALUES ('operation-0001')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM `+table); err == nil {
+			t.Fatalf("%s became deletable after migration", table)
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO maintenance_flags(name) VALUES ('bootstrap_replace')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"timer_commands", "task_operations", "duration_operations"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("scoped delete from %s failed: %v", table, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM maintenance_flags`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var flags int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_flags`).Scan(&flags); err != nil || flags != 0 {
+		t.Fatalf("maintenance flags = %d, %v", flags, err)
+	}
+}
+
 func TestConcurrentMigrationsSerializeSchemaOwnership(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/legacy.sqlite"

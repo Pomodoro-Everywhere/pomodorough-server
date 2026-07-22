@@ -1,11 +1,13 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v7";
+const CACHE_NAME = "pomodorough-shell-v13";
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/index.html",
-  "/app.css",
-  "/app.js",
+  "/app.css?v=13",
+  "/sync-core.js?v=13",
+  "/sync-storage.js?v=13",
+  "/app.js?v=13",
   "/manifest.webmanifest",
   "/icon.svg"
 ];
@@ -19,16 +21,20 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((cacheNames) => Promise.all(
-        cacheNames
-          .filter((cacheName) => cacheName.startsWith(CACHE_PREFIX) && cacheName !== CACHE_NAME)
-          .map((cacheName) => caches.delete(cacheName))
-      ))
-      .then(() => self.clients.claim())
-  );
+  event.waitUntil(activateShell());
 });
+
+async function activateShell() {
+  const cacheNames = await caches.keys();
+  const staleShells = cacheNames.filter(
+    (cacheName) => cacheName.startsWith(CACHE_PREFIX) && cacheName !== CACHE_NAME
+  );
+  await Promise.all(staleShells.map((cacheName) => caches.delete(cacheName)));
+  await self.clients.claim();
+  if (staleShells.length === 0) return;
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  await Promise.all(windows.map((client) => client.navigate(client.url).catch(() => null)));
+}
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
@@ -47,7 +53,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (!SHELL.includes(url.pathname)) {
+  if (!SHELL.includes(`${url.pathname}${url.search}`)) {
     event.respondWith(fetch(request));
     return;
   }

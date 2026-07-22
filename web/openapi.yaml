@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Pomodorough API
-  version: 1.3.0
+  version: 1.4.0
   description: |
     Local-first Pomodoro timer synchronization API.
 
@@ -16,8 +16,9 @@ info:
     desktop clients authenticate with an access-token bearer credential and do
     not send CSRF credentials.
 
-    Revision events are hints only. Clients must use `POST /api/v1/sync` as the
-    authoritative source of timer, task, and duration preference state.
+    Revision events are hints only. Clients must use `GET /api/v1/bootstrap` or
+    `POST /api/v1/sync` as authoritative sources of timer, task, and duration
+    preference state.
 servers:
   - url: https://pomodorough.egigoka.me
     description: Production
@@ -31,7 +32,7 @@ tags:
   - name: Account
     description: Current account, session, and device controls.
   - name: Timer
-    description: Timer, task, and duration synchronization, history, and revision hints.
+    description: Bootstrap resolution, timer/task/duration synchronization, history, and revision hints.
 paths:
   /openapi.yaml:
     get:
@@ -312,6 +313,108 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/bootstrap:
+    get:
+      tags: [Timer]
+      operationId: getBootstrapSnapshot
+      summary: Preview canonical server state for bootstrap
+      description: |
+        Returns the same complete canonical snapshot shape as synchronization,
+        with empty acknowledgement arrays. This endpoint is strictly read-only:
+        it does not create or update a device, change the account revision, store
+        a bootstrap resolution, or publish a revision event.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current canonical account snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/bootstrap/resolve:
+    post:
+      tags: [Timer]
+      operationId: resolveBootstrapHistory
+      summary: Resolve local and remote bootstrap history
+      description: |
+        Resolves bootstrap history under an account-scoped lock and transaction.
+        `expectedRevision` is compared before first execution. A stale revision
+        returns `409 revision conflict` without mutation.
+
+        `keep_remote` requires all operation arrays to be empty and records the
+        returned remote snapshot without changing revision. `merge` applies the
+        supplied immutable local operations on top of remote history.
+        `replace_remote` atomically clears timer commands and projections, task
+        operations, and duration operations before applying local history.
+
+        `requestId` provides durable idempotency. An exact retry returns the exact
+        stored canonical result without another revision increment or event. Reuse
+        with a changed normalized payload returns `409 request ID conflict`.
+        A changed merge or replacement increments revision exactly once and
+        publishes one revision event only on first execution. Replacing populated
+        remote history with empty local history counts as a change.
+
+        Bearer-authenticated clients may only resolve the device bound to their
+        access-token session. Web clients must supply both conditional CSRF
+        headers.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapResolutionRequest"
+      responses:
+        "200":
+          description: Resolution recorded and canonical snapshot returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          description: Envelope, strategy, or any supplied operation is invalid; no mutation is stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: invalid bootstrap resolution request
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: CSRF validation failed or bearer session device mismatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Expected revision is stale or request ID was reused with a changed normalized payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                revisionConflict:
+                  value:
+                    error: revision conflict
+                requestIDConflict:
+                  value:
+                    error: request ID conflict
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/sync:
     post:
       tags: [Timer]
@@ -319,9 +422,10 @@ paths:
       summary: Submit commands and read canonical timer state
       description: |
         Accepts up to 256 immutable timer commands, 256 immutable task operations,
-        and 256 immutable duration operations. Repeating an ID is idempotent.
-        Duplicate duration IDs within one request are invalid. Retrying a stored
-        duration ID requires an identical immutable payload and device ID.
+        and 256 immutable duration operations. Repeating a stored ID is idempotent
+        only when immutable payload and device ID match. A changed stored payload
+        is rejected. Duplicate timer command, task operation, or duration operation
+        IDs within one request invalidate the entire request before mutation.
         Reusing a timer device sequence for a different command produces a
         rejected acknowledgement. Mutations are ordered by `hlcWallMs`,
         `hlcCounter`, device ID, then operation ID; latest valid intent wins.
@@ -411,8 +515,10 @@ paths:
       description: |
         Sends current revision immediately, then sends a `revision` event whenever
         a sync request inserts at least one new timer command, task operation, or
-        duration operation. Sends a comment keepalive every 20 seconds. Events are
-        hints; reconnect and call sync to retrieve authoritative state.
+        duration operation, or a first bootstrap merge/replacement changes logical
+        history. Sends a comment keepalive every 20 seconds. Events are hints;
+        reconnect and fetch a bootstrap snapshot or sync to retrieve authoritative
+        state.
       security:
         - cookieAuth: []
         - bearerAuth: []
@@ -674,6 +780,14 @@ components:
       maxLength: 128
       example: device-01J2YKB4E6T8V9R0X1C3M5N7P9
 
+    BootstrapRequestID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      description: Durable idempotency key for one normalized bootstrap resolution payload.
+      example: resolution-01J2YKB4E6T8V9R0X1C3M5N7P9
+
     CommandID:
       type: string
       pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
@@ -879,6 +993,52 @@ components:
         occurredAt: "2026-07-15T16:55:00.125Z"
         hlcWallMs: 1784134500125
         hlcCounter: 0
+
+    BootstrapResolutionStrategy:
+      type: string
+      enum: [keep_remote, replace_remote, merge]
+
+    BootstrapResolutionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - deviceId
+        - expectedRevision
+        - strategy
+        - commands
+        - taskOperations
+        - durationOperations
+      properties:
+        requestId:
+          $ref: "#/components/schemas/BootstrapRequestID"
+        deviceId:
+          $ref: "#/components/schemas/DeviceID"
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Revision returned by bootstrap preview and compared on first execution.
+        strategy:
+          $ref: "#/components/schemas/BootstrapResolutionStrategy"
+        commands:
+          type: array
+          maxItems: 4096
+          description: Complete immutable local timer command history; must be empty for `keep_remote`.
+          items:
+            $ref: "#/components/schemas/TimerCommand"
+        taskOperations:
+          type: array
+          maxItems: 4096
+          description: Complete immutable local task history; must be empty for `keep_remote`.
+          items:
+            $ref: "#/components/schemas/TaskOperation"
+        durationOperations:
+          type: array
+          maxItems: 4096
+          description: Complete immutable local duration history; must be empty for `keep_remote`.
+          items:
+            $ref: "#/components/schemas/DurationOperation"
 
     SyncRequest:
       type: object

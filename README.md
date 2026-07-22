@@ -150,16 +150,17 @@ SQLite-aware online backup process so WAL contents are included.
 | Native authentication | `POST /api/v1/auth/google/challenge`, `POST /api/v1/auth/google/exchange` |
 | Sessions | `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/revoke-device` |
 | Account | `GET /api/v1/me`, `GET /api/v1/history` |
-| Synchronization | `POST /api/v1/sync`, `GET /api/v1/stream` |
+| Synchronization | `GET /api/v1/bootstrap`, `POST /api/v1/bootstrap/resolve`, `POST /api/v1/sync`, `GET /api/v1/stream` |
 
 See [`web/openapi.yaml`](web/openapi.yaml) for schemas, validation constraints,
 and response contracts.
 
-## Client repositories
+## Pomodorough projects
 
-- [Apple platforms](https://github.com/egigoka/pomodorough-ios)
-- [Android](https://github.com/egigoka/pomodorough-android)
-- [Linux](https://github.com/egigoka/pomodorough-linux)
+- [`pomodorough-server`](https://github.com/Pomodoro-Everywhere/pomodorough-server) - Web/PWA + sync server
+- [`pomodorough-ios`](https://github.com/Pomodoro-Everywhere/pomodorough-ios) - iOS client
+- [`pomodorough-android`](https://github.com/Pomodoro-Everywhere/pomodorough-android) - Android client
+- [`pomodorough-linux`](https://github.com/Pomodoro-Everywhere/pomodorough-linux) - Linux client
 
 ## License
 

@@ -15,12 +15,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 var (
-	ErrNotFound     = errors.New("user database not found")
-	ErrUnauthorized = errors.New("unauthorized")
-	ErrRefreshReuse = errors.New("refresh token reuse detected")
+	ErrNotFound          = errors.New("user database not found")
+	ErrUnauthorized      = errors.New("unauthorized")
+	ErrRefreshReuse      = errors.New("refresh token reuse detected")
+	ErrRevisionConflict  = errors.New("revision conflict")
+	ErrRequestIDConflict = errors.New("request ID conflict")
 )
 
 type Store struct {
@@ -280,8 +282,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
 		)
 	}
-	statements = append(statements,
-		`CREATE TABLE duration_operations (
+	if version < 3 {
+		statements = append(statements,
+			`CREATE TABLE duration_operations (
 			id TEXT PRIMARY KEY,
 			device_id TEXT NOT NULL,
 			phase TEXT NOT NULL CHECK (phase IN ('focus', 'short_break', 'long_break')),
@@ -291,17 +294,62 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			hlc_wall_ms INTEGER NOT NULL CHECK (hlc_wall_ms >= 0),
 			hlc_counter INTEGER NOT NULL CHECK (hlc_counter >= 0)
 		) STRICT`,
-		`CREATE INDEX duration_operations_order_idx ON duration_operations(phase, hlc_wall_ms, hlc_counter, device_id, id)`,
-		`CREATE TRIGGER duration_operations_no_update BEFORE UPDATE ON duration_operations
+			`CREATE INDEX duration_operations_order_idx ON duration_operations(phase, hlc_wall_ms, hlc_counter, device_id, id)`,
+			`CREATE TRIGGER duration_operations_no_update BEFORE UPDATE ON duration_operations
 		BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
-		`CREATE TRIGGER duration_operations_no_delete BEFORE DELETE ON duration_operations
+			`CREATE TRIGGER duration_operations_no_delete BEFORE DELETE ON duration_operations
 		BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
-		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion),
-	)
+		)
+	}
+	if version < 4 {
+		statements = append(statements,
+			`CREATE TABLE maintenance_flags (
+			name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')
+		) STRICT`,
+			`CREATE TABLE bootstrap_resolutions (
+			request_id TEXT PRIMARY KEY,
+			payload_hash BLOB NOT NULL CHECK (length(payload_hash) = 32),
+			response_json TEXT NOT NULL CHECK (json_valid(response_json)),
+			created_at_ms INTEGER NOT NULL
+		) STRICT`,
+		)
+	}
 	for _, statement := range statements {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate user database: %w", err)
 		}
+	}
+	if version < 4 {
+		immutableTables := []struct {
+			table   string
+			trigger string
+			message string
+		}{
+			{table: "timer_commands", trigger: "timer_commands_no_delete", message: "timer commands are immutable"},
+			{table: "task_operations", trigger: "task_operations_no_delete", message: "task operations are immutable"},
+			{table: "duration_operations", trigger: "duration_operations_no_delete", message: "duration operations are immutable"},
+		}
+		for _, immutable := range immutableTables {
+			var tableCount int
+			if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?`, immutable.table).Scan(&tableCount); err != nil {
+				return fmt.Errorf("inspect immutable table %s: %w", immutable.table, err)
+			}
+			if tableCount == 0 {
+				continue
+			}
+			if _, err := conn.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+immutable.trigger); err != nil {
+				return fmt.Errorf("replace immutable trigger %s: %w", immutable.trigger, err)
+			}
+			statement := fmt.Sprintf(`CREATE TRIGGER %s BEFORE DELETE ON %s
+			WHEN NOT EXISTS (SELECT 1 FROM maintenance_flags WHERE name = 'bootstrap_replace')
+			BEGIN SELECT RAISE(ABORT, '%s'); END`, immutable.trigger, immutable.table, immutable.message)
+			if _, err := conn.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("create immutable trigger %s: %w", immutable.trigger, err)
+			}
+		}
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

@@ -3,6 +3,8 @@
 
   const DB_NAME = "pomodorough";
   const DB_VERSION = 3;
+  const syncCore = globalThis.PomodoroughSync;
+  const syncStorage = globalThis.PomodoroughStorage;
   const META_STORE = "meta";
   const PENDING_STORE = "pending";
   const TASK_PENDING_STORE = "pendingTasks";
@@ -12,6 +14,7 @@
   const DIAL_RADIUS = 108;
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const RETRY_MAX_MS = 60000;
+  const BOOTSTRAP_LEASE_MS = 5 * 60_000;
   const PHASES = {
     focus: { label: "Focus", short: "F", defaultMinutes: 25 },
     short_break: { label: "Short break", short: "SB", defaultMinutes: 5 },
@@ -36,6 +39,19 @@
     conflictReason: document.querySelector("#conflictReason"),
     conflictDismiss: document.querySelector("#conflictDismiss"),
     notice: document.querySelector("#notice"),
+    bootstrapDialog: document.querySelector("#bootstrapDialog"),
+    bootstrapTitle: document.querySelector("#bootstrapTitle"),
+    bootstrapSummary: document.querySelector("#bootstrapSummary"),
+    bootstrapChoices: document.querySelector("#bootstrapChoices"),
+    bootstrapChoiceButtons: [...document.querySelectorAll("[data-bootstrap-strategy]")],
+    bootstrapConfirmation: document.querySelector("#bootstrapConfirmation"),
+    bootstrapConfirmationTitle: document.querySelector("#bootstrapConfirmationTitle"),
+    bootstrapConfirmationMessage: document.querySelector("#bootstrapConfirmationMessage"),
+    bootstrapConfirm: document.querySelector("#bootstrapConfirm"),
+    bootstrapCancel: document.querySelector("#bootstrapCancel"),
+    bootstrapError: document.querySelector("#bootstrapError"),
+    bootstrapRetry: document.querySelector("#bootstrapRetry"),
+    bootstrapSignOut: document.querySelector("#bootstrapSignOut"),
     screenButtons: [...document.querySelectorAll("[data-screen-button]")],
     timerScreen: document.querySelector("#timerScreen"),
     tasksScreen: document.querySelector("#tasksScreen"),
@@ -79,10 +95,13 @@
   let noticeTimer = null;
   let redirecting = false;
   let inFlightDurationOperationIds = new Set();
+  let bootstrapPromise = null;
 
   const state = {
     ready: false,
     authenticated: false,
+    sessionIdentityValidated: false,
+    offlineOwnerMode: false,
     user: null,
     csrfToken: null,
     deviceId: null,
@@ -108,7 +127,21 @@
     durationSyncBootstrapped: false,
     syncing: false,
     retrying: false,
-    conflict: null
+    conflict: null,
+    localOwnerId: null,
+    bootstrapBlocked: true,
+    bootstrapPreview: null,
+    bootstrapPlan: null,
+    bootstrapStrategy: null,
+    bootstrapPending: null,
+    bootstrapSubmitting: false,
+    bootstrapConflict: false,
+    bootstrapError: null,
+    bootstrapLimitError: null,
+    bootstrapGatePersisted: false,
+    bootstrapGateOwned: false,
+    quarantinedLocal: null,
+    bootstrapFocusTarget: null
   };
 
   function emptyTimer(phase, plannedDurationMs) {
@@ -126,6 +159,10 @@
 
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function controlsBlocked() {
+    return !state.ready || needsBootstrapResolution();
   }
 
   function normalizeTimer(timer) {
@@ -349,6 +386,97 @@
     if (state.selectedTaskId && !tasks.has(state.selectedTaskId)) state.selectedTaskId = null;
   }
 
+  function ownerStateValue() {
+    return {
+      revision: state.revision,
+      selectedPhase: state.selectedPhase,
+      selectedTaskId: state.selectedTaskId,
+      autoStartBreaks: state.autoStartBreaks,
+      baseDurationsMs: clone(state.baseDurationsMs),
+      durationsMs: clone(state.durationsMs),
+      baseTimer: clone(state.baseTimer),
+      timer: clone(state.timer),
+      baseHistory: clone(state.baseHistory),
+      history: clone(state.history),
+      baseTasks: clone(state.baseTasks),
+      tasks: clone(state.tasks),
+      pending: clone(state.pending),
+      pendingTaskOperations: clone(state.pendingTaskOperations),
+      pendingDurationOperations: clone(state.pendingDurationOperations),
+      user: clone(state.user)
+    };
+  }
+
+  function resetOwnerState() {
+    state.revision = 0;
+    state.selectedPhase = "focus";
+    state.selectedTaskId = null;
+    state.autoStartBreaks = false;
+    state.baseDurationsMs = clone(DEFAULT_DURATIONS_MS);
+    state.durationsMs = clone(DEFAULT_DURATIONS_MS);
+    state.baseTimer = emptyTimer("focus", DEFAULT_DURATIONS_MS.focus);
+    state.timer = emptyTimer("focus", DEFAULT_DURATIONS_MS.focus);
+    state.baseHistory = [];
+    state.history = [];
+    state.baseTasks = [];
+    state.tasks = [];
+    state.pending = [];
+    state.pendingTaskOperations = [];
+    state.pendingDurationOperations = [];
+    state.user = null;
+  }
+
+  function quarantineOwnerState(preserveValidatedUser = false) {
+    const user = preserveValidatedUser ? state.user : null;
+    if (!state.quarantinedLocal) state.quarantinedLocal = ownerStateValue();
+    resetOwnerState();
+    if (user) state.user = user;
+  }
+
+  function restoreOwnerState(local) {
+    state.revision = local.revision;
+    state.selectedPhase = local.selectedPhase;
+    state.selectedTaskId = local.selectedTaskId;
+    state.autoStartBreaks = local.autoStartBreaks;
+    state.baseDurationsMs = local.baseDurationsMs;
+    state.durationsMs = local.durationsMs;
+    state.baseTimer = local.baseTimer;
+    state.timer = local.timer;
+    state.baseHistory = local.baseHistory;
+    state.history = local.history;
+    state.baseTasks = local.baseTasks;
+    state.tasks = local.tasks;
+    state.pending = local.pending;
+    state.pendingTaskOperations = local.pendingTaskOperations;
+    state.pendingDurationOperations = local.pendingDurationOperations;
+    state.user = local.user;
+  }
+
+  async function activateCachedOwnerOffline() {
+    const local = state.quarantinedLocal;
+    if (!syncCore.canUseCachedOwnerOffline({
+      sessionValidated: state.sessionIdentityValidated,
+      cachedUserId: local?.user?.id,
+      localOwnerId: state.localOwnerId,
+      gateOwned: state.bootstrapGateOwned,
+      pending: state.bootstrapPending
+    })) return false;
+    try {
+      await syncStorage.clearBootstrapGate(db, TAB_ID);
+    } catch {
+      return false;
+    }
+    restoreOwnerState(local);
+    state.quarantinedLocal = null;
+    state.authenticated = false;
+    state.csrfToken = null;
+    state.offlineOwnerMode = true;
+    state.bootstrapBlocked = false;
+    state.bootstrapGatePersisted = false;
+    state.bootstrapGateOwned = false;
+    return true;
+  }
+
   function openDatabase() {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -392,12 +520,6 @@
     });
   }
 
-  async function writeMeta(key, value) {
-    const transaction = db.transaction(META_STORE, "readwrite");
-    transaction.objectStore(META_STORE).put({ key, value });
-    await transactionDone(transaction);
-  }
-
   function settingsValue(overrides = {}) {
     return {
       selectedPhase: state.selectedPhase,
@@ -418,10 +540,6 @@
       user: clone(state.user),
       ...overrides
     };
-  }
-
-  async function persistSnapshot(overrides = {}) {
-    await writeMeta("snapshot", snapshotValue(overrides));
   }
 
   async function migrateDurationQueueFromSettings() {
@@ -485,20 +603,31 @@
   async function loadLocalState() {
     db = await openDatabase();
 
-    await migrateDurationQueueFromSettings();
-    await bootstrapLegacyDurations();
+    const lease = await syncStorage.acquireBootstrapGate(db, {
+      token: TAB_ID,
+      nowMs: Date.now(),
+      leaseMs: BOOTSTRAP_LEASE_MS
+    });
+    state.bootstrapGatePersisted = true;
+    state.bootstrapGateOwned = lease.acquired;
+    const bootstrapState = await syncStorage.readBootstrapState(db);
+    if (state.bootstrapGateOwned && !bootstrapState.resolution) {
+      await migrateDurationQueueFromSettings();
+      await bootstrapLegacyDurations();
+    }
 
     const transaction = db.transaction([META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE], "readonly");
     const metaStore = transaction.objectStore(META_STORE);
     const pendingStore = transaction.objectStore(PENDING_STORE);
     const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
     const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
-    const [deviceId, deviceSequence, hlc, settings, snapshot, pending, pendingTaskOperations, pendingDurationOperations] = await Promise.all([
+    const [deviceId, deviceSequence, hlc, settings, snapshot, bootstrapResolution, pending, pendingTaskOperations, pendingDurationOperations] = await Promise.all([
       requestResult(metaStore.get("deviceId")),
       requestResult(metaStore.get("deviceSequence")),
       requestResult(metaStore.get("hlc")),
       requestResult(metaStore.get("settings")),
       requestResult(metaStore.get("snapshot")),
+      requestResult(metaStore.get("bootstrapResolution")),
       requestResult(pendingStore.getAll()),
       requestResult(taskPendingStore.getAll()),
       requestResult(durationPendingStore.getAll())
@@ -512,6 +641,7 @@
     state.pendingTaskOperations = pendingTaskOperations || [];
     state.pendingDurationOperations = (pendingDurationOperations || []).sort(compareDurationOperations);
     state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
+    state.bootstrapPending = bootstrapResolution?.value || null;
 
     if (settings?.value) {
       state.selectedPhase = PHASES[settings.value.selectedPhase]
@@ -528,6 +658,7 @@
       state.baseTasks = Array.isArray(snapshot.value.tasks) ? snapshot.value.tasks : [];
       state.baseDurationsMs = normalizeDurationsMs(snapshot.value.durationsMs);
       state.user = snapshot.value.user || null;
+      state.localOwnerId = snapshot.value.user?.id || null;
     } else {
       state.baseTimer = emptyTimer(state.selectedPhase, selectedDurationMs());
     }
@@ -549,20 +680,20 @@
     }
 
     rebuildOptimisticState();
+    quarantineOwnerState();
   }
 
   async function persistSettings() {
     while (actionLocked) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
-    await writeMeta("settings", settingsValue());
+    await syncStorage.guardedMutation(db, [], (transaction) => {
+      transaction.objectStore(META_STORE).put({ key: "settings", value: settingsValue() });
+    });
   }
 
   async function persistCommand(type, options = {}) {
     const now = Date.now();
-    const wallMs = Math.max(now, state.hlcWallMs);
-    const counter = wallMs === state.hlcWallMs ? state.hlcCounter + 1 : 0;
-    const sequence = state.deviceSequence + 1;
     const activeTimer = state.timer;
     const starting = type === "start";
     const timerId = starting ? crypto.randomUUID() : activeTimer.id;
@@ -572,122 +703,125 @@
       ? state.durationsMs[startingPhase]
       : activeTimer.plannedDurationMs;
     const observedElapsedMs = starting ? 0 : Math.round(elapsedFor(activeTimer, now));
-    const command = {
-      id: crypto.randomUUID(),
-      deviceSequence: sequence,
-      timerId,
-      type,
-      phase,
-      plannedDurationMs,
-      occurredAt: new Date(now).toISOString(),
-      hlcWallMs: wallMs,
-      hlcCounter: counter,
-      observedElapsedMs
-    };
-    if (starting && startingPhase === "focus" && state.selectedTaskId) {
-      command.taskId = state.selectedTaskId;
-    }
 
     if (!timerId) throw new Error("No timer is available for this action.");
 
-    const transaction = db.transaction([PENDING_STORE, META_STORE], "readwrite");
-    transaction.objectStore(PENDING_STORE).add(command);
-    const metaStore = transaction.objectStore(META_STORE);
-    metaStore.put({ key: "deviceSequence", value: sequence });
-    metaStore.put({ key: "hlc", value: { wallMs, counter } });
-    await transactionDone(transaction);
+    const command = await syncStorage.allocateMutation(db, {
+      storeName: PENDING_STORE,
+      nowMs: now,
+      withDeviceSequence: true,
+      build: ({ wallMs, counter, deviceSequence }) => {
+        const value = {
+          id: crypto.randomUUID(),
+          deviceSequence,
+          timerId,
+          type,
+          phase,
+          plannedDurationMs,
+          occurredAt: new Date(now).toISOString(),
+          hlcWallMs: wallMs,
+          hlcCounter: counter,
+          observedElapsedMs
+        };
+        if (starting && startingPhase === "focus" && state.selectedTaskId) {
+          value.taskId = state.selectedTaskId;
+        }
+        return value;
+      }
+    });
 
-    state.deviceSequence = sequence;
-    state.hlcWallMs = wallMs;
-    state.hlcCounter = counter;
+    state.deviceSequence = command.deviceSequence;
+    state.hlcWallMs = command.hlcWallMs;
+    state.hlcCounter = command.hlcCounter;
     return command;
   }
 
   async function persistTaskOperation(type, task) {
     const now = Date.now();
-    const wallMs = Math.max(now, state.hlcWallMs);
-    const counter = wallMs === state.hlcWallMs ? state.hlcCounter + 1 : 0;
-    const operation = {
-      id: crypto.randomUUID(),
-      taskId: task.id,
-      type,
-      occurredAt: new Date(now).toISOString(),
-      hlcWallMs: wallMs,
-      hlcCounter: counter
-    };
-    if (type === "upsert") operation.title = task.title;
+    const operation = await syncStorage.allocateMutation(db, {
+      storeName: TASK_PENDING_STORE,
+      nowMs: now,
+      withDeviceSequence: false,
+      build: ({ wallMs, counter }) => {
+        const value = {
+          id: crypto.randomUUID(),
+          taskId: task.id,
+          type,
+          occurredAt: new Date(now).toISOString(),
+          hlcWallMs: wallMs,
+          hlcCounter: counter
+        };
+        if (type === "upsert") value.title = task.title;
+        return value;
+      }
+    });
 
-    const transaction = db.transaction([TASK_PENDING_STORE, META_STORE], "readwrite");
-    transaction.objectStore(TASK_PENDING_STORE).add(operation);
-    transaction.objectStore(META_STORE).put({ key: "hlc", value: { wallMs, counter } });
-    await transactionDone(transaction);
-
-    state.hlcWallMs = wallMs;
-    state.hlcCounter = counter;
+    state.hlcWallMs = operation.hlcWallMs;
+    state.hlcCounter = operation.hlcCounter;
     return operation;
   }
 
   async function persistDurationOperation(phase, durationMs) {
     const now = Date.now();
-    const transaction = db.transaction([DURATION_PENDING_STORE, META_STORE], "readwrite");
-    const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
-    const metaStore = transaction.objectStore(META_STORE);
-    const operationsRequest = durationStore.getAll();
-    const hlcRequest = metaStore.get("hlc");
     let existingOperations;
     let storedHlc;
     let operation;
     let pendingDurationOperations;
-    const persist = () => {
-      if (!existingOperations || storedHlc === undefined) return;
-      const storedWallMs = Number(storedHlc?.wallMs) || 0;
-      const pendingWallMs = existingOperations.reduce(
-        (maximum, existing) => Math.max(maximum, Number(existing.hlcWallMs) || 0),
-        0
-      );
-      const previousWallMs = Math.max(state.hlcWallMs, storedWallMs, pendingWallMs);
-      const wallMs = Math.max(now, previousWallMs);
-      const pendingCounter = existingOperations.reduce(
-        (maximum, existing) => Number(existing.hlcWallMs) === wallMs
-          ? Math.max(maximum, Number(existing.hlcCounter) || 0)
-          : maximum,
-        0
-      );
-      const previousCounter = Math.max(
-        wallMs === state.hlcWallMs ? state.hlcCounter : 0,
-        wallMs === storedWallMs ? Number(storedHlc?.counter) || 0 : 0,
-        pendingCounter
-      );
-      const counter = wallMs === previousWallMs ? previousCounter + 1 : 0;
-      operation = {
-        id: crypto.randomUUID(),
-        ownerId: TAB_ID,
-        phase,
-        durationMs,
-        occurredAt: new Date(now).toISOString(),
-        hlcWallMs: wallMs,
-        hlcCounter: counter
+    await syncStorage.guardedMutation(db, [DURATION_PENDING_STORE], (transaction) => {
+      const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+      const metaStore = transaction.objectStore(META_STORE);
+      const operationsRequest = durationStore.getAll();
+      const hlcRequest = metaStore.get("hlc");
+      const persist = () => {
+        if (!existingOperations || storedHlc === undefined) return;
+        const storedWallMs = Number(storedHlc?.wallMs) || 0;
+        const pendingWallMs = existingOperations.reduce(
+          (maximum, existing) => Math.max(maximum, Number(existing.hlcWallMs) || 0),
+          0
+        );
+        const previousWallMs = Math.max(state.hlcWallMs, storedWallMs, pendingWallMs);
+        const wallMs = Math.max(now, previousWallMs);
+        const pendingCounter = existingOperations.reduce(
+          (maximum, existing) => Number(existing.hlcWallMs) === wallMs
+            ? Math.max(maximum, Number(existing.hlcCounter) || 0)
+            : maximum,
+          0
+        );
+        const previousCounter = Math.max(
+          wallMs === state.hlcWallMs ? state.hlcCounter : 0,
+          wallMs === storedWallMs ? Number(storedHlc?.counter) || 0 : 0,
+          pendingCounter
+        );
+        const counter = wallMs === previousWallMs ? previousCounter + 1 : 0;
+        operation = {
+          id: crypto.randomUUID(),
+          ownerId: TAB_ID,
+          phase,
+          durationMs,
+          occurredAt: new Date(now).toISOString(),
+          hlcWallMs: wallMs,
+          hlcCounter: counter
+        };
+        const superseded = new Set(existingOperations
+          .filter((existing) => existing.phase === phase && existing.ownerId === TAB_ID && !inFlightDurationOperationIds.has(existing.id))
+          .map((existing) => existing.id));
+        for (const operationID of superseded) durationStore.delete(operationID);
+        durationStore.put(operation);
+        pendingDurationOperations = existingOperations
+          .filter((existing) => !superseded.has(existing.id))
+          .concat(operation)
+          .sort(compareDurationOperations);
+        metaStore.put({ key: "hlc", value: { wallMs, counter } });
       };
-      const superseded = new Set(existingOperations
-        .filter((existing) => existing.phase === phase && existing.ownerId === TAB_ID && !inFlightDurationOperationIds.has(existing.id))
-        .map((existing) => existing.id));
-      for (const operationID of superseded) durationStore.delete(operationID);
-      durationStore.put(operation);
-      pendingDurationOperations = existingOperations
-        .filter((existing) => !superseded.has(existing.id))
-        .concat(operation)
-        .sort(compareDurationOperations);
-      metaStore.put({ key: "hlc", value: { wallMs, counter } });
-    };
-    operationsRequest.onsuccess = () => {
-      existingOperations = operationsRequest.result || [];
-      persist();
-    };
-    hlcRequest.onsuccess = () => {
-      storedHlc = hlcRequest.result?.value || null;
-      persist();
-    };
-    await transactionDone(transaction);
+      operationsRequest.onsuccess = () => {
+        existingOperations = operationsRequest.result || [];
+        persist();
+      };
+      hlcRequest.onsuccess = () => {
+        storedHlc = hlcRequest.result?.value || null;
+        persist();
+      };
+    });
 
     state.hlcWallMs = operation.hlcWallMs;
     state.hlcCounter = operation.hlcCounter;
@@ -695,7 +829,7 @@
   }
 
   async function issueDurationOperation(phase, durationMs) {
-    if (!state.ready || actionLocked || state.durationsMs[phase] === durationMs) return false;
+    if (controlsBlocked() || actionLocked || state.durationsMs[phase] === durationMs) return false;
     actionLocked = true;
     try {
       const persisted = await persistDurationOperation(phase, durationMs);
@@ -713,7 +847,7 @@
   }
 
   async function issueTaskOperation(type, task) {
-    if (!state.ready || actionLocked) return false;
+    if (controlsBlocked() || actionLocked) return false;
     actionLocked = true;
     try {
       const operation = await persistTaskOperation(type, task);
@@ -766,7 +900,7 @@
   }
 
   async function issueCommand(type, options = {}) {
-    if (!state.ready || actionLocked) return false;
+    if (controlsBlocked() || actionLocked) return false;
 
     actionLocked = true;
     try {
@@ -817,132 +951,138 @@
     );
   }
 
-  function durationRequestOperation(operation) {
-    return {
-      id: operation.id,
-      phase: operation.phase,
-      durationMs: operation.durationMs,
-      occurredAt: operation.occurredAt,
-      hlcWallMs: operation.hlcWallMs,
-      hlcCounter: operation.hlcCounter
-    };
+  async function reloadPersistedState(persisted = null) {
+    const syncState = persisted || await syncStorage.readSyncState(db);
+    if (!syncState.snapshot) throw new Error("Canonical timer snapshot is unavailable.");
+    const snapshot = syncState.snapshot;
+    state.revision = Number(snapshot.revision) || 0;
+    state.baseDurationsMs = normalizeDurationsMs(snapshot.durationsMs);
+    state.durationsMs = clone(state.baseDurationsMs);
+    state.baseTimer = snapshot.canonicalTimer
+      ? normalizeTimer(snapshot.canonicalTimer)
+      : emptyTimer(state.selectedPhase, state.baseDurationsMs[state.selectedPhase]);
+    state.baseHistory = Array.isArray(snapshot.history) ? snapshot.history : [];
+    state.baseTasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+    state.localOwnerId = snapshot.user?.id || state.localOwnerId;
+    state.hlcWallMs = Number(syncState.hlc?.wallMs) || state.hlcWallMs;
+    state.hlcCounter = Number(syncState.hlc?.counter) || 0;
+    state.pending = (syncState.commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
+    state.pendingTaskOperations = syncState.taskOperations || [];
+    state.pendingDurationOperations = (syncState.durationOperations || []).sort(compareDurationOperations);
+    rebuildOptimisticState();
   }
 
-  function exactAcknowledgements(payload, field, sentItems, idField) {
-    const acknowledgements = payload[field];
-    if (!Array.isArray(acknowledgements)) {
-      throw new Error(`Sync response omitted ${field}.`);
-    }
-    const expectedIds = new Set(sentItems.map((item) => item.id));
-    if (expectedIds.size !== sentItems.length || acknowledgements.length !== expectedIds.size) {
-      throw new Error(`Sync response returned an invalid ${field} set.`);
-    }
-    const acknowledgedIds = new Set();
-    for (const acknowledgement of acknowledgements) {
-      const id = acknowledgement?.[idField];
-      if (typeof id !== "string" || !expectedIds.has(id) || acknowledgedIds.has(id)) {
-        throw new Error(`Sync response returned an invalid ${field} set.`);
-      }
-      acknowledgedIds.add(id);
-    }
-    return { acknowledgements, acknowledgedIds };
-  }
-
-  async function acceptSyncResponse(payload, sent) {
+  async function acceptSyncResponse(payload, sent, expectedUserId) {
+    syncCore.validateCanonicalResponse(payload, sent);
     while (actionLocked) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
     actionLocked = true;
     try {
 
-      const { acknowledgements, acknowledgedIds } = exactAcknowledgements(
-        payload, "acknowledgements", sent.commands, "commandId"
-      );
-      const { acknowledgedIds: acknowledgedTaskOperationIds } = exactAcknowledgements(
-        payload, "taskAcknowledgements", sent.taskOperations, "operationId"
-      );
-      const { acknowledgements: durationAcknowledgements, acknowledgedIds: acknowledgedDurationOperationIds } = exactAcknowledgements(
-        payload, "durationAcknowledgements", sent.durationOperations, "operationId"
-      );
-      const remainingPending = state.pending.filter((command) => !acknowledgedIds.has(command.id));
-      const remainingTaskOperations = state.pendingTaskOperations.filter(
-        (operation) => !acknowledgedTaskOperationIds.has(operation.id)
-      );
-      const canonicalTimer = Object.prototype.hasOwnProperty.call(payload, "canonicalTimer")
-        ? payload.canonicalTimer
-          ? normalizeTimer(payload.canonicalTimer)
+      const rebased = syncCore.rebaseSyncState({
+        commands: state.pending,
+        taskOperations: state.pendingTaskOperations,
+        durationOperations: state.pendingDurationOperations,
+        baseTimer: state.baseTimer,
+        baseHistory: state.baseHistory,
+        baseTasks: state.baseTasks,
+        baseDurationsMs: state.baseDurationsMs,
+        revision: state.revision
+      }, payload, sent);
+      const validated = rebased.acknowledgements;
+      const { acknowledgements, acknowledgedIds } = validated.commands;
+      const { acknowledgements: taskAcknowledgements, acknowledgedIds: acknowledgedTaskOperationIds } = validated.tasks;
+      const { acknowledgements: durationAcknowledgements, acknowledgedIds: acknowledgedDurationOperationIds } = validated.durations;
+      const canonicalTimer = Object.prototype.hasOwnProperty.call(rebased, "baseTimer")
+        ? rebased.baseTimer
+          ? normalizeTimer(rebased.baseTimer)
           : emptyTimer(state.selectedPhase, selectedDurationMs())
         : state.baseTimer;
-      const history = Array.isArray(payload.history) ? payload.history : state.baseHistory;
-      const tasks = Array.isArray(payload.tasks) ? payload.tasks : state.baseTasks;
-      const durationsMs = Object.prototype.hasOwnProperty.call(payload, "durationsMs")
-        ? normalizeDurationsMs(payload.durationsMs)
-        : state.baseDurationsMs;
-      const revision = payload.revision ?? state.revision;
+      const history = rebased.baseHistory;
+      const tasks = rebased.baseTasks;
+      const durationsMs = normalizeDurationsMs(rebased.baseDurationsMs);
+      const revision = rebased.revision;
       const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
       const conflicts = acknowledgements.filter((acknowledgement) => {
         const outcome = String(acknowledgement.outcome || "").toLowerCase();
         return outcome && !ACK_SUCCESS.has(outcome);
-      }).concat(durationAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"));
+      }).concat(
+        taskAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"),
+        durationAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected")
+      );
 
-      const transaction = db.transaction([PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, META_STORE], "readwrite");
-      const pendingStore = transaction.objectStore(PENDING_STORE);
-      for (const commandId of acknowledgedIds) pendingStore.delete(commandId);
-      const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
-      for (const operationId of acknowledgedTaskOperationIds) taskPendingStore.delete(operationId);
-      const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
-      for (const operationId of acknowledgedDurationOperationIds) durationPendingStore.delete(operationId);
       const nextSnapshot = snapshotValue({
         revision,
+        serverTime: payload.serverTime,
         canonicalTimer: clone(canonicalTimer),
         history: clone(history),
         tasks: clone(tasks),
         durationsMs: clone(durationsMs)
       });
-      const metaStore = transaction.objectStore(META_STORE);
-      metaStore.put({ key: "snapshot", value: nextSnapshot });
-      metaStore.put({ key: "hlc", value: hlc });
-      await transactionDone(transaction);
+      const outcome = await syncStorage.applySyncResponse(db, {
+        expectedUserId,
+        snapshot: nextSnapshot,
+        hlc,
+        queueIds: {
+          commands: [...acknowledgedIds],
+          taskOperations: [...acknowledgedTaskOperationIds],
+          durationOperations: [...acknowledgedDurationOperationIds]
+        }
+      });
+      await reloadPersistedState();
 
-      state.pending = remainingPending;
-      state.pendingTaskOperations = remainingTaskOperations;
-      await refreshPendingDurationOperations();
-      state.baseTimer = canonicalTimer;
-      state.baseHistory = history;
-      state.baseTasks = tasks;
-      state.baseDurationsMs = durationsMs;
-      state.revision = revision;
-      state.hlcWallMs = hlc.wallMs;
-      state.hlcCounter = hlc.counter;
-
-      if (conflicts.length) {
+      if (outcome.applied && conflicts.length) {
         const conflict = conflicts[0];
         state.conflict = conflict.reason || `Command outcome: ${conflict.outcome}`;
       }
-
-      rebuildOptimisticState();
     } finally {
       actionLocked = false;
     }
   }
 
   async function syncNow(force = false) {
+    if (!state.ready || needsBootstrapResolution() || !state.sessionIdentityValidated
+      || !state.authenticated || !state.csrfToken || !navigator.onLine) {
+      renderSyncStatus();
+      return;
+    }
     if (syncPromise) {
       syncAgain = true;
       syncAgainForce ||= force;
       return syncPromise;
     }
-    if (!state.ready || !state.authenticated || !state.csrfToken || !navigator.onLine) {
-      renderSyncStatus();
-      return;
-    }
+    let bootstrapState;
     try {
-      await refreshPendingDurationOperations();
+      bootstrapState = await syncStorage.readBootstrapState(db);
     } catch (error) {
       state.retrying = true;
       renderSyncStatus();
       scheduleRetry();
-      console.warn("Pomodorough duration queue unavailable:", error);
+      console.warn("Pomodorough bootstrap gate unavailable:", error);
+      return;
+    }
+    if (bootstrapState.gate || bootstrapState.resolution) {
+      closeRevisionStream();
+      state.sessionIdentityValidated = false;
+      state.bootstrapGatePersisted = true;
+      state.bootstrapGateOwned = false;
+      state.bootstrapPending = bootstrapState.resolution;
+      state.bootstrapBlocked = true;
+      quarantineOwnerState(true);
+      state.retrying = true;
+      scheduleRetry();
+      render();
+      renderSyncStatus();
+      return;
+    }
+    try {
+      await refreshAllPendingOperations();
+    } catch (error) {
+      state.retrying = true;
+      renderSyncStatus();
+      scheduleRetry();
+      console.warn("Pomodorough pending queues unavailable:", error);
       return;
     }
     if (!force && state.pending.length === 0 && state.pendingTaskOperations.length === 0 && state.pendingDurationOperations.length === 0) {
@@ -957,27 +1097,21 @@
       renderSyncStatus();
 
       try {
-        const sent = {
-          commands: clone(state.pending.slice(0, 256)),
-          taskOperations: clone(state.pendingTaskOperations.slice(0, 256)),
-          durationOperations: state.pendingDurationOperations.slice(0, 256).map(durationRequestOperation)
-        };
-        inFlightDurationOperationIds = new Set(sent.durationOperations.map((operation) => operation.id));
-        const response = await fetch("/api/v1/sync", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": state.csrfToken
-          },
-          body: JSON.stringify({
-            deviceId: state.deviceId,
-            lastRevision: state.revision,
-            commands: sent.commands,
-            taskOperations: sent.taskOperations,
-            durationOperations: sent.durationOperations
-          })
+        const expectedUserId = state.user.id;
+        const sent = syncCore.buildSyncBatch({
+          commands: state.pending,
+          taskOperations: state.pendingTaskOperations,
+          durationOperations: state.pendingDurationOperations
         });
+        inFlightDurationOperationIds = new Set(sent.durationOperations.map((operation) => operation.id));
+        const body = JSON.stringify({
+          deviceId: state.deviceId,
+          lastRevision: state.revision,
+          commands: sent.commands,
+          taskOperations: sent.taskOperations,
+          durationOperations: sent.durationOperations
+        });
+        const response = await postMutation("/api/v1/sync", body, expectedUserId);
 
         if (response.status === 401) {
           redirectToLogin();
@@ -986,13 +1120,17 @@
         if (!response.ok) throw new Error(`Sync failed (${response.status}).`);
 
         const payload = await response.json();
-        await acceptSyncResponse(payload, sent);
+        await acceptSyncResponse(payload, sent, expectedUserId);
         if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length) {
           syncAgain = true;
         }
         retryDelayMs = 1000;
         state.retrying = false;
       } catch (error) {
+        if (error instanceof syncStorage.AccountOwnershipError) {
+          queueSessionRevalidation();
+          return;
+        }
         state.retrying = true;
         scheduleRetry();
         console.warn("Pomodorough sync deferred:", error);
@@ -1024,13 +1162,23 @@
     if (!navigator.onLine) return;
     window.clearTimeout(retryTimer);
     retryTimer = window.setTimeout(() => {
-      if (state.authenticated && state.csrfToken) syncNow(false);
+      if (state.authenticated && state.csrfToken && !needsBootstrapResolution()) syncNow(false);
       else restoreSessionAndSync();
     }, retryDelayMs);
     retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
   }
 
-  async function loadSession() {
+  function needsBootstrapResolution() {
+    return syncCore.requiresBootstrapResolution({
+      blocked: state.bootstrapBlocked,
+      persistedGate: state.bootstrapGatePersisted,
+      pending: state.bootstrapPending,
+      currentUserId: state.user?.id,
+      localOwnerId: state.localOwnerId
+    });
+  }
+
+  async function fetchSessionPayload() {
     const response = await fetch("/api/v1/me", {
       credentials: "same-origin",
       cache: "no-store"
@@ -1038,21 +1186,97 @@
 
     if (response.status === 401) {
       redirectToLogin();
-      return false;
+      return null;
     }
     if (!response.ok) throw new Error(`Session check failed (${response.status}).`);
+    return response.json();
+  }
 
-    const payload = await response.json();
+  function applySessionPayload(payload) {
+    closeRevisionStreamForIdentityChange(payload.user?.id);
     state.user = payload.user || null;
     state.csrfToken = payload.csrfToken || null;
     state.authenticated = true;
-    await persistSnapshot();
+    state.sessionIdentityValidated = true;
+    state.offlineOwnerMode = false;
     renderProfile();
+  }
+
+  async function loadSession() {
+    const payload = await fetchSessionPayload();
+    if (!payload) return false;
+    const previousOwnerId = state.user?.id || state.localOwnerId;
+    if (previousOwnerId && payload.user?.id !== previousOwnerId) {
+      closeRevisionStreamForIdentityChange(payload.user?.id);
+      quarantineOwnerState();
+      state.localOwnerId = previousOwnerId;
+      state.bootstrapBlocked = true;
+      applySessionPayload(payload);
+      await restartBootstrapForCurrentAccount();
+      render();
+      return true;
+    }
+    applySessionPayload(payload);
     return true;
   }
 
-  async function loadHistory() {
-    const response = await fetch("/api/v1/history", {
+  async function refreshMutationCsrf(expectedUserId) {
+    const payload = await fetchSessionPayload();
+    if (!payload) throw new Error("Session refresh requires sign-in.");
+    if (!payload.user?.id || payload.user.id !== expectedUserId) {
+      closeRevisionStreamForIdentityChange(payload.user?.id);
+      quarantineOwnerState();
+      state.localOwnerId = expectedUserId;
+      state.bootstrapBlocked = true;
+      applySessionPayload(payload);
+      await restartBootstrapForCurrentAccount();
+      render();
+      throw new Error("Signed-in account changed during mutation retry.");
+    }
+    applySessionPayload(payload);
+    return state.csrfToken;
+  }
+
+  function postMutation(url, body, expectedUserId) {
+    return syncCore.postJSONWithCsrfRetry({
+      fetcher: fetch,
+      url,
+      body,
+      csrfToken: state.csrfToken,
+      refreshCsrf: () => refreshMutationCsrf(expectedUserId)
+    });
+  }
+
+  async function restartBootstrapForCurrentAccount() {
+    if (!state.user?.id) return;
+    const restarted = await syncStorage.invalidateForeignResolution(db, {
+      currentUserId: state.user.id,
+      gateToken: TAB_ID,
+      nowMs: Date.now(),
+      leaseMs: BOOTSTRAP_LEASE_MS
+    });
+    state.bootstrapPending = restarted.resolution;
+    state.bootstrapPreview = null;
+    state.bootstrapPlan = null;
+    state.bootstrapStrategy = null;
+    state.bootstrapError = null;
+    state.bootstrapLimitError = null;
+    state.bootstrapConflict = false;
+    state.bootstrapBlocked = true;
+    state.bootstrapGatePersisted = true;
+    state.bootstrapGateOwned = restarted.acquired;
+  }
+
+  function queueBootstrapPreparation() {
+    window.setTimeout(() => prepareBootstrap().catch((error) => {
+      state.retrying = true;
+      scheduleRetry();
+      console.warn("Pomodorough bootstrap restart deferred:", error);
+    }), 0);
+  }
+
+  async function loadBootstrapPreview() {
+    const response = await fetch("/api/v1/bootstrap", {
       credentials: "same-origin",
       cache: "no-store"
     });
@@ -1061,20 +1285,424 @@
       redirectToLogin();
       return;
     }
-    if (!response.ok) throw new Error(`History failed (${response.status}).`);
-
+    if (!response.ok) throw new Error(`Bootstrap failed (${response.status}).`);
     const payload = await response.json();
-    const history = Array.isArray(payload)
-      ? payload
-      : Array.isArray(payload.history)
-        ? payload.history
-        : Array.isArray(payload.items)
-          ? payload.items
-          : [];
-    state.baseHistory = history;
-    await persistSnapshot();
-    rebuildOptimisticState();
-    renderHistory();
+    syncCore.validateCanonicalResponse(payload, {
+      commands: [],
+      taskOperations: [],
+      durationOperations: []
+    });
+    return payload;
+  }
+
+  function localBootstrapState() {
+    const local = state.quarantinedLocal || state;
+    return {
+      history: local.history,
+      timer: local.timer,
+      tasks: local.tasks,
+      durationsMs: local.durationsMs,
+      defaultDurationsMs: DEFAULT_DURATIONS_MS,
+      commands: local.pending,
+      taskOperations: local.pendingTaskOperations,
+      durationOperations: local.pendingDurationOperations
+    };
+  }
+
+  async function persistBootstrapResolution(strategy, replaceExisting = false) {
+    if (!syncCore.isResolutionStrategy(strategy)) {
+      throw new syncStorage.BootstrapGateError("History resolution changed in another tab.");
+    }
+    const lease = await syncStorage.acquireBootstrapGate(db, {
+      token: TAB_ID,
+      nowMs: Date.now(),
+      leaseMs: BOOTSTRAP_LEASE_MS
+    });
+    if (!lease.acquired) throw new syncStorage.BootstrapGateError("Another tab owns history resolution.");
+    const pending = await syncStorage.captureResolution(db, {
+      userId: state.user.id,
+      requestId: crypto.randomUUID(),
+      deviceId: state.deviceId,
+      expectedRevision: state.bootstrapPreview.revision,
+      strategy
+    }, {
+      replaceExisting,
+      gateToken: TAB_ID
+    });
+    state.bootstrapPending = pending;
+    state.bootstrapGatePersisted = true;
+    state.bootstrapGateOwned = true;
+    state.bootstrapStrategy = strategy;
+    state.bootstrapConflict = false;
+    state.bootstrapError = null;
+    state.bootstrapLimitError = null;
+    return pending;
+  }
+
+  function handleResolutionLimit(error) {
+    if (!(error instanceof syncStorage.ResolutionLimitError)) return false;
+    state.bootstrapSubmitting = false;
+    state.bootstrapError = null;
+    state.bootstrapLimitError = error.message;
+    state.bootstrapStrategy = null;
+    state.bootstrapFocusTarget = elements.bootstrapChoiceButtons.find(
+      (button) => button.dataset.bootstrapStrategy === "keep_remote"
+    );
+    render();
+    return true;
+  }
+
+  async function refreshAllPendingOperations() {
+    const { commands, taskOperations, durationOperations } = await syncStorage.readQueues(db);
+    state.pending = (commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
+    state.pendingTaskOperations = taskOperations || [];
+    state.pendingDurationOperations = (durationOperations || []).sort(compareDurationOperations);
+  }
+
+  function bootstrapConflicts(validated) {
+    return validated.commands.acknowledgements
+      .concat(validated.tasks.acknowledgements, validated.durations.acknowledgements)
+      .filter((acknowledgement) => {
+        const outcome = String(acknowledgement.outcome || "").toLowerCase();
+        return outcome && !ACK_SUCCESS.has(outcome) && outcome !== "ignored";
+      });
+  }
+
+  async function acceptBootstrapResponse(payload, pending) {
+    syncCore.validateCanonicalResponse(payload, pending.payload);
+    while (actionLocked) {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+    actionLocked = true;
+    try {
+      const local = state.quarantinedLocal || state;
+      const applied = syncCore.applyResolutionState({
+        commands: local.pending,
+        taskOperations: local.pendingTaskOperations,
+        durationOperations: local.pendingDurationOperations,
+        baseTimer: local.baseTimer,
+        baseHistory: local.baseHistory,
+        baseTasks: local.baseTasks,
+        baseDurationsMs: local.baseDurationsMs,
+        revision: local.revision
+      }, payload, pending);
+      const validated = applied.acknowledgements;
+      const history = applied.baseHistory;
+      const tasks = applied.baseTasks;
+      const durationsMs = normalizeDurationsMs(applied.baseDurationsMs);
+      const canonicalTimer = applied.baseTimer
+        ? normalizeTimer(applied.baseTimer)
+        : emptyTimer(state.selectedPhase, durationsMs[state.selectedPhase]);
+      const revision = Number(applied.revision);
+      if (!Number.isFinite(revision) || revision < 0) throw new Error("Bootstrap response omitted revision.");
+      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
+      const queueIds = pending.queueIds || { commands: [], taskOperations: [], durationOperations: [] };
+      const snapshot = {
+        revision,
+        serverTime: payload.serverTime,
+        canonicalTimer: clone(canonicalTimer),
+        history: clone(history),
+        tasks: clone(tasks),
+        durationsMs: clone(durationsMs),
+        user: clone(state.user)
+      };
+
+      const outcome = await syncStorage.applyResolution(db, { ...pending, queueIds }, { snapshot, hlc });
+      await reloadPersistedState();
+      state.localOwnerId = state.user.id;
+      state.bootstrapPending = null;
+      state.bootstrapPreview = null;
+      state.bootstrapPlan = null;
+      state.bootstrapStrategy = null;
+      state.bootstrapError = null;
+      state.bootstrapConflict = false;
+      state.bootstrapBlocked = false;
+      state.bootstrapLimitError = null;
+      state.bootstrapGatePersisted = false;
+      state.bootstrapGateOwned = false;
+      state.quarantinedLocal = null;
+      state.retrying = false;
+      retryDelayMs = 1000;
+      window.clearTimeout(retryTimer);
+
+      const conflicts = bootstrapConflicts(validated);
+      if (outcome.applied && conflicts.length) {
+        state.conflict = conflicts[0].reason || `Operation outcome: ${conflicts[0].outcome}`;
+      }
+    } finally {
+      actionLocked = false;
+    }
+    render();
+    openRevisionStream();
+    if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length) {
+      scheduleSync(0);
+    }
+  }
+
+  async function submitBootstrapResolution() {
+    if (state.bootstrapSubmitting || !state.bootstrapPending || !navigator.onLine) return;
+    const pending = state.bootstrapPending;
+    if (!syncCore.pendingResolutionCanSubmit(pending, state.user?.id)) {
+      queueSessionRevalidation();
+      return;
+    }
+    try {
+      await syncStorage.validatePendingForSend(db, {
+        pending,
+        currentUserId: state.user.id,
+        gateToken: TAB_ID,
+        nowMs: Date.now(),
+        leaseMs: BOOTSTRAP_LEASE_MS
+      });
+    } catch (error) {
+      const persisted = await syncStorage.readBootstrapState(db);
+      if (!syncCore.pendingMatchesUser(persisted.resolution, state.user.id)) {
+        queueSessionRevalidation();
+      } else {
+        state.bootstrapPending = persisted.resolution;
+        state.bootstrapGateOwned = false;
+        queueBootstrapPreparation();
+      }
+      return;
+    }
+    state.bootstrapSubmitting = true;
+    state.bootstrapError = null;
+    renderBootstrapDialog();
+    try {
+      const body = JSON.stringify(pending.payload);
+      const response = await postMutation("/api/v1/bootstrap/resolve", body, pending.userId);
+      if (response.status === 401) {
+        redirectToLogin();
+        return;
+      }
+      if (response.status === 409) {
+        const conflict = await response.json().catch(() => ({}));
+        state.bootstrapConflict = true;
+        state.bootstrapError = conflict.error === "request ID conflict"
+          ? "This resolution ID was already used. Retry with a fresh remote snapshot."
+          : "Remote history changed before this choice was applied. Retry with the latest snapshot.";
+        state.bootstrapFocusTarget = elements.bootstrapRetry;
+        return;
+      }
+      if (!response.ok) throw new Error(`History resolution failed (${response.status}).`);
+      await acceptBootstrapResponse(await response.json(), pending);
+    } catch (error) {
+      if (!syncCore.pendingMatchesUser(state.bootstrapPending, state.user?.id)) {
+        state.bootstrapError = null;
+        queueBootstrapPreparation();
+        return;
+      }
+      state.bootstrapError = `${error.message || "History resolution was interrupted."} Retry sends the exact saved request.`;
+      state.bootstrapFocusTarget = elements.bootstrapRetry;
+      console.warn("Pomodorough bootstrap resolution deferred:", error);
+    } finally {
+      state.bootstrapSubmitting = false;
+      render();
+    }
+  }
+
+  async function retryBootstrapResolution() {
+    if (state.bootstrapSubmitting) return;
+    try {
+      if (state.bootstrapConflict) {
+        const strategy = state.bootstrapStrategy || state.bootstrapPending?.payload?.strategy;
+        if (!syncCore.isResolutionStrategy(strategy)) {
+          queueSessionRevalidation();
+          return;
+        }
+        state.bootstrapSubmitting = true;
+        renderBootstrapDialog();
+        state.bootstrapPreview = await loadBootstrapPreview();
+        await persistBootstrapResolution(strategy, true);
+        state.bootstrapSubmitting = false;
+      }
+      await submitBootstrapResolution();
+    } catch (error) {
+      if (handleResolutionLimit(error)) return;
+      state.bootstrapSubmitting = false;
+      state.bootstrapError = error.message || "History resolution could not be retried.";
+      state.bootstrapFocusTarget = elements.bootstrapRetry;
+      renderBootstrapDialog();
+    }
+  }
+
+  async function chooseBootstrapStrategy(strategy, confirmed = false) {
+    if (state.bootstrapSubmitting || state.bootstrapPending) return;
+    if (state.bootstrapLimitError && strategy !== "keep_remote") return;
+    const selectionMode = state.bootstrapLimitError ? "choose" : state.bootstrapPlan?.mode;
+    if (!syncCore.canSubmitResolution(selectionMode, confirmed)) {
+      state.bootstrapStrategy = strategy;
+      state.bootstrapFocusTarget = elements.bootstrapConfirm;
+      renderBootstrapDialog();
+      return;
+    }
+    state.bootstrapSubmitting = true;
+    renderBootstrapDialog();
+    try {
+      await persistBootstrapResolution(strategy);
+    } catch (error) {
+      if (handleResolutionLimit(error)) return;
+      showNotice(error.message || "History choice could not be saved.");
+      state.bootstrapFocusTarget = elements.bootstrapConfirm;
+      state.bootstrapSubmitting = false;
+      renderBootstrapDialog();
+      return;
+    }
+    state.bootstrapSubmitting = false;
+    await submitBootstrapResolution();
+  }
+
+  async function prepareBootstrap() {
+    if (bootstrapPromise) return bootstrapPromise;
+    bootstrapPromise = prepareBootstrapOnce();
+    try {
+      return await bootstrapPromise;
+    } finally {
+      bootstrapPromise = null;
+    }
+  }
+
+  async function resumeNormalSyncFromBootstrap(persisted) {
+    await reloadPersistedState(persisted);
+    state.quarantinedLocal = null;
+    await syncStorage.clearBootstrapGate(db, TAB_ID);
+    state.bootstrapPending = null;
+    state.bootstrapGatePersisted = false;
+    state.bootstrapGateOwned = false;
+    state.bootstrapBlocked = false;
+    state.retrying = false;
+    render();
+    await syncNow(true);
+    openRevisionStream();
+  }
+
+  async function prepareBootstrapOnce() {
+    state.bootstrapBlocked = true;
+    render();
+
+    if (state.bootstrapError || state.bootstrapLimitError
+      || state.bootstrapPlan?.mode === "choose" && !state.bootstrapPending) return;
+
+    if (state.bootstrapPending && !syncCore.pendingMatchesUser(state.bootstrapPending, state.user?.id)) {
+      if (!state.sessionIdentityValidated) {
+        queueSessionRevalidation();
+        return;
+      }
+      await restartBootstrapForCurrentAccount();
+    }
+
+    if (!state.bootstrapGateOwned) {
+      const lease = await syncStorage.acquireBootstrapGate(db, {
+        token: TAB_ID,
+        nowMs: Date.now(),
+        leaseMs: BOOTSTRAP_LEASE_MS
+      });
+      if (!lease.acquired) {
+        state.retrying = true;
+        scheduleRetry();
+        render();
+        return;
+      }
+      state.bootstrapGateOwned = true;
+      state.bootstrapGatePersisted = true;
+      if (lease.resolution) state.bootstrapPending = lease.resolution;
+      if (state.bootstrapPending && !syncCore.pendingResolutionCanSubmit(state.bootstrapPending, state.user?.id)) {
+        if (!state.sessionIdentityValidated) {
+          queueSessionRevalidation();
+          return;
+        }
+        await restartBootstrapForCurrentAccount();
+      }
+      if (!state.bootstrapPending) {
+        const persisted = await syncStorage.readSyncState(db);
+        if (persisted.snapshot?.user?.id === state.user.id) {
+          await resumeNormalSyncFromBootstrap(persisted);
+          return;
+        }
+        if (persisted.snapshot?.user?.id) state.localOwnerId = persisted.snapshot.user.id;
+      }
+    }
+
+    if (state.bootstrapPending?.userId === state.user.id) {
+      state.bootstrapStrategy = state.bootstrapPending.payload.strategy;
+      await submitBootstrapResolution();
+      return;
+    }
+
+    if (!state.bootstrapPending && syncCore.canExposeOwnerState({
+      sessionValidated: state.sessionIdentityValidated,
+      localOwnerId: state.localOwnerId,
+      currentUserId: state.user.id
+    })) {
+      const bootstrapState = await syncStorage.readBootstrapState(db);
+      if (bootstrapState.resolution) {
+        state.bootstrapPending = bootstrapState.resolution;
+        if (state.bootstrapPending.userId === state.user.id) {
+          state.bootstrapStrategy = state.bootstrapPending.payload.strategy;
+          await submitBootstrapResolution();
+          return;
+        }
+      }
+      if (!state.bootstrapPending && bootstrapState.gate && !state.bootstrapGateOwned) {
+        state.retrying = true;
+        scheduleRetry();
+        render();
+        return;
+      }
+      if (!state.bootstrapPending && state.bootstrapGateOwned) {
+        const persisted = await syncStorage.readSyncState(db);
+        if (persisted.snapshot?.user?.id === state.user.id) {
+          await resumeNormalSyncFromBootstrap(persisted);
+          return;
+        }
+      }
+    }
+
+    state.bootstrapPreview = await loadBootstrapPreview();
+    const local = localBootstrapState();
+    state.bootstrapPlan = syncCore.decideBootstrap({
+      localOwnerId: state.localOwnerId,
+      currentUserId: state.user.id,
+      localHistory: local.history,
+      remoteHistory: state.bootstrapPreview.history,
+      hasLocalState: syncCore.hasLocalState(local)
+    });
+    if (state.bootstrapPlan.mode === "normal_sync") {
+      const persisted = await syncStorage.readSyncState(db);
+      if (persisted.snapshot?.user?.id === state.user.id) {
+        await resumeNormalSyncFromBootstrap(persisted);
+        return;
+      }
+      state.localOwnerId = persisted.snapshot?.user?.id || null;
+      state.bootstrapPlan = syncCore.decideBootstrap({
+        localOwnerId: state.localOwnerId,
+        currentUserId: state.user.id,
+        localHistory: local.history,
+        remoteHistory: state.bootstrapPreview.history,
+        hasLocalState: syncCore.hasLocalState(local)
+      });
+    }
+    if (state.bootstrapPlan.mode === "choose") {
+      state.bootstrapStrategy = null;
+      state.bootstrapFocusTarget = elements.bootstrapChoiceButtons[0];
+      render();
+      return;
+    }
+
+    try {
+      if (!syncCore.isResolutionStrategy(state.bootstrapPlan.strategy)) {
+        queueSessionRevalidation();
+        return;
+      }
+      await persistBootstrapResolution(
+        state.bootstrapPlan.strategy,
+        Boolean(state.bootstrapPending && state.bootstrapPending.userId !== state.user.id)
+      );
+    } catch (error) {
+      if (handleResolutionLimit(error)) return;
+      throw error;
+    }
+    await submitBootstrapResolution();
   }
 
   function redirectToLogin() {
@@ -1084,7 +1712,8 @@
   }
 
   function openRevisionStream() {
-    if (!state.authenticated || !navigator.onLine || eventSource) return;
+    if (!state.sessionIdentityValidated || !state.authenticated
+      || needsBootstrapResolution() || !navigator.onLine || eventSource) return;
 
     eventSource = new EventSource("/api/v1/stream");
     const receiveRevision = (event) => {
@@ -1106,21 +1735,44 @@
     };
   }
 
+  function closeRevisionStreamForIdentityChange(nextUserId) {
+    if (state.user?.id && nextUserId && state.user.id !== nextUserId) closeRevisionStream();
+  }
+
   function closeRevisionStream() {
     eventSource?.close();
     eventSource = null;
   }
 
+  function queueSessionRevalidation() {
+    state.bootstrapSubmitting = false;
+    state.bootstrapPending = null;
+    state.bootstrapStrategy = null;
+    state.bootstrapConflict = false;
+    state.bootstrapError = null;
+    state.bootstrapLimitError = null;
+    state.bootstrapBlocked = true;
+    state.bootstrapGateOwned = false;
+    state.sessionIdentityValidated = false;
+    closeRevisionStream();
+    render();
+    window.setTimeout(() => restoreSessionAndSync(), 0);
+  }
+
   async function restoreSessionAndSync() {
     try {
-      if (!state.authenticated || !state.csrfToken) await loadSession();
+      if (!state.sessionIdentityValidated || !state.authenticated || !state.csrfToken) await loadSession();
       if (state.authenticated) {
-        openRevisionStream();
-        await syncNow(true);
+        if (needsBootstrapResolution()) await prepareBootstrap();
+        else {
+          openRevisionStream();
+          await syncNow(true);
+        }
       }
     } catch (error) {
+      await activateCachedOwnerOffline();
       state.retrying = true;
-      renderSyncStatus();
+      render();
       scheduleRetry();
       console.warn("Pomodorough remains offline:", error);
     }
@@ -1142,9 +1794,9 @@
 
   async function logout() {
     try {
-      await refreshPendingDurationOperations();
+      await refreshAllPendingOperations();
     } catch (error) {
-      console.warn("Pomodorough duration queue unavailable before logout:", error);
+      console.warn("Pomodorough pending queues unavailable before logout:", error);
     }
     const pendingCount = state.pending.length + state.pendingTaskOperations.length + state.pendingDurationOperations.length;
     if (pendingCount > 0) {
@@ -1218,6 +1870,7 @@
     renderProfile();
     renderSyncStatus();
     renderConflict();
+    renderBootstrapDialog();
   }
 
   function renderScreens() {
@@ -1233,20 +1886,21 @@
 
   function renderDurations() {
     const active = ["running", "paused"].includes(state.timer.status);
+    const blocked = controlsBlocked();
 
     for (const button of elements.phaseButtons) {
       const selected = button.dataset.phase === state.selectedPhase;
       button.setAttribute("aria-pressed", String(selected));
-      button.disabled = !state.ready || active;
+      button.disabled = blocked || active;
     }
 
     for (const input of elements.durationInputs) {
       if (document.activeElement !== input) input.value = String(state.durationsMs[input.name] / 60_000);
-      input.disabled = !state.ready || active;
+      input.disabled = blocked || active;
     }
-    for (const button of elements.stepButtons) button.disabled = !state.ready || active;
+    for (const button of elements.stepButtons) button.disabled = blocked || active;
     elements.autoStartBreaks.checked = state.autoStartBreaks;
-    elements.autoStartBreaks.disabled = !state.ready;
+    elements.autoStartBreaks.disabled = blocked;
   }
 
   function renderTaskSelector() {
@@ -1264,7 +1918,7 @@
     }
     elements.taskSelector.value = state.tasks.some((task) => task.id === previous) ? previous : "";
     const active = ["running", "paused"].includes(state.timer.status);
-    elements.taskSelector.disabled = !state.ready || active || state.selectedPhase !== "focus";
+    elements.taskSelector.disabled = controlsBlocked() || active || state.selectedPhase !== "focus";
   }
 
   function displayTimer() {
@@ -1314,12 +1968,13 @@
             : "Choose a pattern, then start the clock.";
     }
 
-    elements.timerToggle.disabled = !state.ready;
-    elements.finishButton.disabled = !state.ready || !active;
-    elements.cancelButton.disabled = !state.ready || !active;
-    elements.clearButton.disabled = !state.ready || ["idle", "running", "paused"].includes(status);
+    const blocked = controlsBlocked();
+    elements.timerToggle.disabled = blocked;
+    elements.finishButton.disabled = blocked || !active;
+    elements.cancelButton.disabled = blocked || !active;
+    elements.clearButton.disabled = blocked || ["idle", "running", "paused"].includes(status);
 
-    if (status === "running" && remaining <= 0 && completionQueuedFor !== timer.id) {
+    if (!blocked && status === "running" && remaining <= 0 && completionQueuedFor !== timer.id) {
       completionQueuedFor = timer.id;
       finishTimer().then((saved) => {
         if (!saved) completionQueuedFor = null;
@@ -1391,8 +2046,11 @@
   }
 
   function renderTasks() {
+    const blocked = controlsBlocked();
     elements.taskCount.textContent = String(state.tasks.length).padStart(2, "0");
     elements.taskList.replaceChildren();
+    elements.taskInput.disabled = blocked;
+    elements.taskForm.querySelector("button[type='submit']").disabled = blocked;
 
     if (state.tasks.length === 0) {
       const empty = document.createElement("p");
@@ -1427,7 +2085,7 @@
       remove.type = "button";
       remove.textContent = "Delete";
       remove.setAttribute("aria-label", `Delete ${task.title}`);
-      remove.disabled = !state.ready;
+      remove.disabled = blocked;
       remove.addEventListener("click", () => deleteTask(task));
 
       row.append(name, count, duration, remove);
@@ -1508,6 +2166,15 @@
     if (!navigator.onLine) {
       syncState = "offline";
       label = count ? `Offline / ${count} queued` : "Offline / local";
+    } else if (state.bootstrapSubmitting) {
+      syncState = "syncing";
+      label = "Resolving history";
+    } else if (state.bootstrapError || state.bootstrapLimitError) {
+      syncState = "error";
+      label = "History choice needed";
+    } else if (state.bootstrapBlocked) {
+      syncState = "loading";
+      label = state.bootstrapPlan?.mode === "choose" ? "Choose history" : "Checking history";
     } else if (state.conflict) {
       syncState = "conflict";
       label = count ? `Conflict / ${count} queued` : "Conflict";
@@ -1532,6 +2199,64 @@
   function renderConflict() {
     elements.conflictPanel.hidden = !state.conflict;
     if (state.conflict) elements.conflictReason.textContent = state.conflict;
+  }
+
+  function renderBootstrapDialog() {
+    const limitRecovery = Boolean(state.bootstrapLimitError);
+    const view = syncCore.bootstrapDialogView({
+      planMode: limitRecovery ? "choose" : state.bootstrapPlan?.mode,
+      strategy: state.bootstrapStrategy,
+      pending: state.bootstrapPending,
+      error: state.bootstrapError,
+      submitting: state.bootstrapSubmitting,
+      blocked: state.bootstrapBlocked,
+      authenticated: state.authenticated
+    });
+
+    if (!view.open) {
+      if (elements.bootstrapDialog.open) elements.bootstrapDialog.close();
+      return;
+    }
+
+    const localCount = state.bootstrapPlan?.localHistoryCount ?? syncCore.completedHistoryCount(localBootstrapState().history);
+    const remoteCount = state.bootstrapPlan?.remoteHistoryCount ?? syncCore.completedHistoryCount(state.bootstrapPreview?.history);
+    elements.bootstrapTitle.textContent = limitRecovery ? "Local queue too large" : "Choose your history";
+    elements.bootstrapSummary.textContent = limitRecovery
+      ? "Upload stopped before any local or remote data changed."
+      : `${localCount} local completed run${localCount === 1 ? "" : "s"}; ${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}.`;
+    elements.bootstrapDialog.setAttribute("aria-busy", String(view.busy));
+    elements.bootstrapChoices.hidden = !view.choosing;
+    elements.bootstrapConfirmation.hidden = !view.confirming;
+    elements.bootstrapError.hidden = !view.failed && !limitRecovery;
+    elements.bootstrapRetry.hidden = !view.failed;
+    elements.bootstrapSignOut.hidden = !limitRecovery;
+    elements.bootstrapSignOut.disabled = state.bootstrapSubmitting || !navigator.onLine;
+    elements.bootstrapRetry.disabled = state.bootstrapSubmitting || !navigator.onLine;
+    elements.bootstrapRetry.textContent = state.bootstrapConflict ? "Refresh and retry" : "Retry saved choice";
+    if (view.failed || limitRecovery) {
+      elements.bootstrapError.textContent = state.bootstrapError || state.bootstrapLimitError;
+    }
+
+    for (const button of elements.bootstrapChoiceButtons) {
+      button.hidden = limitRecovery && button.dataset.bootstrapStrategy !== "keep_remote";
+      button.disabled = state.bootstrapSubmitting;
+    }
+    elements.bootstrapConfirm.disabled = state.bootstrapSubmitting;
+    elements.bootstrapCancel.disabled = state.bootstrapSubmitting;
+    if (view.confirming) {
+      const confirmation = syncCore.confirmationFor(state.bootstrapStrategy);
+      elements.bootstrapConfirmationTitle.textContent = confirmation.title;
+      elements.bootstrapConfirmationMessage.textContent = confirmation.message;
+      elements.bootstrapConfirm.textContent = state.bootstrapSubmitting ? "Applying choice" : confirmation.confirmLabel;
+    }
+    if (!elements.bootstrapDialog.open) elements.bootstrapDialog.showModal();
+    if (state.bootstrapFocusTarget) {
+      const target = state.bootstrapFocusTarget;
+      state.bootstrapFocusTarget = null;
+      window.setTimeout(() => {
+        if (elements.bootstrapDialog.open && !target.hidden) target.focus();
+      }, 0);
+    }
   }
 
   function showNotice(message) {
@@ -1643,6 +2368,34 @@
       renderConflict();
       renderSyncStatus();
     });
+    for (const button of elements.bootstrapChoiceButtons) {
+      button.addEventListener("click", () => chooseBootstrapStrategy(button.dataset.bootstrapStrategy));
+    }
+    elements.bootstrapConfirm.addEventListener("click", () => {
+      chooseBootstrapStrategy(state.bootstrapStrategy, true);
+    });
+    elements.bootstrapCancel.addEventListener("click", () => {
+      const strategy = state.bootstrapStrategy;
+      state.bootstrapStrategy = null;
+      state.bootstrapError = null;
+      state.bootstrapFocusTarget = elements.bootstrapChoiceButtons.find(
+        (button) => button.dataset.bootstrapStrategy === strategy
+      ) || elements.bootstrapChoiceButtons[0];
+      renderBootstrapDialog();
+    });
+    elements.bootstrapRetry.addEventListener("click", retryBootstrapResolution);
+    elements.bootstrapSignOut.addEventListener("click", logout);
+    elements.bootstrapDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      if (state.bootstrapStrategy && !state.bootstrapPending) {
+        const strategy = state.bootstrapStrategy;
+        state.bootstrapStrategy = null;
+        state.bootstrapFocusTarget = elements.bootstrapChoiceButtons.find(
+          (button) => button.dataset.bootstrapStrategy === strategy
+        ) || elements.bootstrapChoiceButtons[0];
+        renderBootstrapDialog();
+      }
+    });
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
@@ -1650,7 +2403,7 @@
       if (document.visibilityState !== "visible") return;
       renderTimer();
       if (navigator.onLine) {
-        if (state.authenticated && state.csrfToken) scheduleSync(0, true);
+        if (state.authenticated && state.csrfToken && !needsBootstrapResolution()) scheduleSync(0, true);
         else handleOnline();
       }
     });
@@ -1701,17 +2454,14 @@
 
     try {
       if (await loadSession()) {
-        try {
-          await loadHistory();
-        } catch (error) {
-          console.warn("Pomodorough history deferred:", error);
-        }
-        await syncNow(true);
-        openRevisionStream();
+        await prepareBootstrap();
       }
     } catch (error) {
-      state.authenticated = false;
-      state.csrfToken = null;
+      if (!state.sessionIdentityValidated) {
+        state.authenticated = false;
+        state.csrfToken = null;
+        await activateCachedOwnerOffline();
+      }
       if (navigator.onLine) state.retrying = true;
       render();
       scheduleRetry();

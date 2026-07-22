@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"pomodorough/internal/authn"
+	"pomodorough/internal/store"
 	"pomodorough/internal/timer"
 )
 
@@ -182,6 +183,66 @@ func TestBearerDurationSyncReturnsCanonicalDurationsAndPublishesRevision(t *test
 		t.Fatalf("POST duplicate duration sync status=%d body=%s", response.Code, response.Body.String())
 	}
 	assertNoRevision(t, revisions)
+}
+
+func TestBearerTaskUpsertDeleteRetainsTimerHistoryAssociation(t *testing.T) {
+	fixture := newServerFixture(t)
+	now := time.Now().UTC()
+	upsert := validTaskOperationJSON(now, "HTTP task")
+	start := validSyncRequestJSON(now)
+	start.TaskOperations = []syncTaskOperationJSON{upsert}
+	start.Commands[0].TaskID = upsert.TaskID
+	firstResponse := postAuthenticatedJSON(t, fixture, "/api/v1/sync", start)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("task upsert status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+	var first store.SyncResult
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision != 1 || len(first.Tasks) != 1 || first.Tasks[0].ID != upsert.TaskID || first.CanonicalTimer == nil || first.CanonicalTimer.TaskID != upsert.TaskID || first.TaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("task upsert response = %#v", first)
+	}
+
+	finish := validSyncRequestJSON(now.Add(time.Second))
+	finish.LastRevision = int64Pointer(1)
+	finish.Commands = []syncCommandJSON{{
+		ID: "command-0002", DeviceSequence: int64Pointer(2), TimerID: "timer-000001", Type: "finish", Phase: "focus",
+		PlannedDurationMs: int64Pointer(25 * 60_000), OccurredAt: now.Add(time.Second).Format(time.RFC3339Nano),
+		HLCWallMs: int64Pointer(now.Add(time.Second).UnixMilli()), HLCCounter: int64Pointer(0), ObservedElapsedMs: int64Pointer(1_000),
+	}}
+	finish.TaskOperations = []syncTaskOperationJSON{{
+		ID: "task-operation-0002", TaskID: upsert.TaskID, Type: "delete",
+		OccurredAt: now.Add(time.Second).Format(time.RFC3339Nano), HLCWallMs: int64Pointer(now.Add(time.Second).UnixMilli()), HLCCounter: int64Pointer(0),
+	}}
+	secondResponse := postAuthenticatedJSON(t, fixture, "/api/v1/sync", finish)
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf("task delete status=%d body=%s", secondResponse.Code, secondResponse.Body.String())
+	}
+	var second store.SyncResult
+	if err := json.Unmarshal(secondResponse.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Revision != 2 || len(second.Tasks) != 0 || len(second.History) != 1 || second.History[0].TaskID != upsert.TaskID || second.TaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("task delete response = %#v", second)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/api/v1/history", nil)
+	request.Header.Set("Authorization", "Bearer "+fixture.accessToken)
+	historyResponse := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(historyResponse, request)
+	if historyResponse.Code != http.StatusOK {
+		t.Fatalf("task history status=%d body=%s", historyResponse.Code, historyResponse.Body.String())
+	}
+	var history struct {
+		Items []timer.HistoryItem `json:"history"`
+	}
+	if err := json.NewDecoder(historyResponse.Body).Decode(&history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Items) != 1 || history.Items[0].TaskID != upsert.TaskID || history.Items[0].Status != "completed" {
+		t.Fatalf("task history = %#v", history.Items)
+	}
 }
 
 func TestCookieLogoutWithValidCSRF(t *testing.T) {

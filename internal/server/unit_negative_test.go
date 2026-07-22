@@ -207,6 +207,16 @@ func TestParseSyncRequestRejectsTooManyDurationOperations(t *testing.T) {
 	}
 }
 
+func TestParseBootstrapResolutionRejectsKeepRemoteOperations(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	payload := emptyBootstrapResolutionJSON("resolution-keep-invalid", "device-0001", 0, "keep_remote")
+	payload.Commands = validSyncRequestJSON(now).Commands
+	request, response := newJSONRequest(t, http.MethodPost, "/api/v1/bootstrap/resolve", payload)
+	if _, err := parseBootstrapResolutionRequest(response, request, now); err == nil {
+		t.Fatal("parseBootstrapResolutionRequest accepted keep_remote operations")
+	}
+}
+
 func TestValidPlatformRejectsInvalidShape(t *testing.T) {
 	for _, platform := range []string{"", "i", "has space", strings.Repeat("x", 33)} {
 		if validPlatform(platform) {
