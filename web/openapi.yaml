@@ -1,14 +1,14 @@
 openapi: 3.0.3
 info:
   title: Pomodorough API
-  version: 1.0.0
+  version: 1.3.0
   description: |
     Local-first Pomodoro timer synchronization API.
 
-    Timer mutations are immutable, idempotent commands. The server orders them by
-    hybrid logical clock, device ID, and command ID, then returns the canonical
-    projection. Clients must retain unacknowledged commands and retry them with
-    the same command IDs and device sequence numbers.
+    Timer, task, and duration preference mutations are immutable and idempotent.
+    The server orders them by hybrid logical clock, device ID, and operation ID,
+    then returns canonical timer, task, and duration projections. Clients must
+    retain unacknowledged mutations and retry them with the same IDs.
 
     Web clients authenticate with the session cookie created by Google OAuth.
     Cookie-authenticated mutations must also send the exact public origin and an
@@ -17,7 +17,7 @@ info:
     not send CSRF credentials.
 
     Revision events are hints only. Clients must use `POST /api/v1/sync` as the
-    authoritative source of timer state.
+    authoritative source of timer, task, and duration preference state.
 servers:
   - url: https://pomodorough.egigoka.me
     description: Production
@@ -31,7 +31,7 @@ tags:
   - name: Account
     description: Current account, session, and device controls.
   - name: Timer
-    description: Timer command synchronization, history, and revision hints.
+    description: Timer, task, and duration synchronization, history, and revision hints.
 paths:
   /openapi.yaml:
     get:
@@ -318,14 +318,19 @@ paths:
       operationId: syncTimer
       summary: Submit commands and read canonical timer state
       description: |
-        Accepts up to 256 immutable commands. Repeating a command ID is
-        idempotent. Reusing a device sequence for a different command produces a
-        rejected acknowledgement. Commands are ordered by `hlcWallMs`,
-        `hlcCounter`, device ID, then command ID; latest valid intent wins.
+        Accepts up to 256 immutable timer commands, 256 immutable task operations,
+        and 256 immutable duration operations. Repeating an ID is idempotent.
+        Duplicate duration IDs within one request are invalid. Retrying a stored
+        duration ID requires an identical immutable payload and device ID.
+        Reusing a timer device sequence for a different command produces a
+        rejected acknowledgement. Mutations are ordered by `hlcWallMs`,
+        `hlcCounter`, device ID, then operation ID; latest valid intent wins.
+        Duration preferences resolve independently for each phase.
 
         `lastRevision` reports the client's last observed revision. This version
         always returns the complete canonical snapshot and history. A revision is
-        incremented once per request that inserts at least one new command.
+        incremented once per request that inserts at least one new timer command,
+        task operation, or duration operation.
 
         Bearer-authenticated clients may only sync the device bound to their
         access-token session. Web clients must supply both conditional CSRF
@@ -344,13 +349,13 @@ paths:
               $ref: "#/components/schemas/SyncRequest"
       responses:
         "200":
-          description: Commands reconciled and canonical snapshot returned.
+          description: Mutations reconciled and canonical snapshot returned.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SyncResponse"
         "400":
-          description: Envelope or any command is invalid; no command is stored.
+          description: Envelope or any mutation is invalid; no mutation is stored.
           content:
             application/json:
               schema:
@@ -405,9 +410,9 @@ paths:
       summary: Stream timer revision hints
       description: |
         Sends current revision immediately, then sends a `revision` event whenever
-        a sync request containing commands completes. Sends a comment keepalive
-        every 20 seconds. Events are hints; reconnect and call sync to retrieve
-        authoritative state.
+        a sync request inserts at least one new timer command, task operation, or
+        duration operation. Sends a comment keepalive every 20 seconds. Events are
+        hints; reconnect and call sync to retrieve authoritative state.
       security:
         - cookieAuth: []
         - bearerAuth: []
@@ -683,6 +688,31 @@ components:
       maxLength: 128
       example: timer-01J2YKD8Q2W4E6R8T0Y1U3I5O7
 
+    TaskID:
+      type: string
+      format: uuid
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      description: |
+        Deterministic UUIDv8 derived from SHA-256 of the normalized UTF-8 task
+        title prefixed by `pomodorough.task.v1` and a NUL byte.
+      example: aaf83054-24b2-8c0e-901f-a974147bfe82
+
+    TaskOperationID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: task-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+
+    DurationOperationID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: duration-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+
     TimerPhase:
       type: string
       enum: [focus, short_break, long_break]
@@ -715,6 +745,9 @@ components:
           description: Monotonic sequence unique within one device ID.
         timerId:
           $ref: "#/components/schemas/TimerID"
+        taskId:
+          $ref: "#/components/schemas/TaskID"
+          description: Optional task association. Valid only for a `start` command.
         type:
           $ref: "#/components/schemas/CommandType"
         phase:
@@ -756,6 +789,97 @@ components:
         hlcCounter: 0
         observedElapsedMs: 420125
 
+    TaskOperationType:
+      type: string
+      enum: [upsert, delete]
+
+    TaskOperation:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - taskId
+        - type
+        - occurredAt
+        - hlcWallMs
+        - hlcCounter
+      properties:
+        id:
+          $ref: "#/components/schemas/TaskOperationID"
+        taskId:
+          $ref: "#/components/schemas/TaskID"
+        type:
+          $ref: "#/components/schemas/TaskOperationType"
+        title:
+          type: string
+          maxLength: 512
+          description: |
+            Required for `upsert` and forbidden for `delete`. The server normalizes
+            to NFC and strips non-printable Unicode code points from both ends.
+            UTF-8 encoding must not exceed 512 bytes.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Client-observed intent time in RFC 3339 format.
+        hlcWallMs:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Hybrid logical clock wall component in Unix milliseconds. Must not be
+            more than five minutes ahead of server time.
+        hlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+      example:
+        id: task-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+        taskId: aaf83054-24b2-8c0e-901f-a974147bfe82
+        type: upsert
+        title: Café
+        occurredAt: "2026-07-15T16:55:00.125Z"
+        hlcWallMs: 1784134500125
+        hlcCounter: 0
+
+    DurationOperation:
+      type: object
+      additionalProperties: false
+      required: [id, phase, durationMs, occurredAt, hlcWallMs, hlcCounter]
+      properties:
+        id:
+          $ref: "#/components/schemas/DurationOperationID"
+        phase:
+          $ref: "#/components/schemas/TimerPhase"
+        durationMs:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 10800000
+          multipleOf: 60000
+        occurredAt:
+          type: string
+          format: date-time
+          description: Client-observed preference change time in RFC 3339 format.
+        hlcWallMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Hybrid logical clock wall component in Unix milliseconds. Must not be
+            more than five minutes ahead of server time. Legacy preference
+            bootstrap operations use the sentinel tuple `(0, 0)`.
+        hlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+      example:
+        id: duration-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+        phase: focus
+        durationMs: 1500000
+        occurredAt: "2026-07-15T16:55:00.125Z"
+        hlcWallMs: 1784134500125
+        hlcCounter: 0
+
     SyncRequest:
       type: object
       additionalProperties: false
@@ -773,6 +897,19 @@ components:
           maxItems: 256
           items:
             $ref: "#/components/schemas/TimerCommand"
+        taskOperations:
+          type: array
+          maxItems: 256
+          default: []
+          items:
+            $ref: "#/components/schemas/TaskOperation"
+        durationOperations:
+          type: array
+          maxItems: 256
+          default: []
+          description: Optional for compatibility with clients predating duration sync.
+          items:
+            $ref: "#/components/schemas/DurationOperation"
 
     Acknowledgement:
       type: object
@@ -787,6 +924,72 @@ components:
         reason:
           type: string
           description: Empty for applied commands; explanatory text otherwise.
+
+    TaskAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [operationId, outcome, reason]
+      properties:
+        operationId:
+          $ref: "#/components/schemas/TaskOperationID"
+        outcome:
+          type: string
+          enum: [applied, ignored, rejected]
+        reason:
+          type: string
+          description: Empty for the winning operation; explanatory text otherwise.
+
+    DurationAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [operationId, outcome, reason]
+      properties:
+        operationId:
+          $ref: "#/components/schemas/DurationOperationID"
+        outcome:
+          type: string
+          enum: [applied, ignored, rejected]
+        reason:
+          type: string
+          description: Empty for the canonical phase winner; explanatory text otherwise.
+
+    DurationsMs:
+      type: object
+      additionalProperties: false
+      required: [focus, short_break, long_break]
+      properties:
+        focus:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 10800000
+          multipleOf: 60000
+          default: 1500000
+        short_break:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 10800000
+          multipleOf: 60000
+          default: 300000
+        long_break:
+          type: integer
+          format: int64
+          minimum: 60000
+          maximum: 10800000
+          multipleOf: 60000
+          default: 900000
+
+    Task:
+      type: object
+      additionalProperties: false
+      required: [id, title]
+      properties:
+        id:
+          $ref: "#/components/schemas/TaskID"
+        title:
+          type: string
+          maxLength: 512
 
     TimerIntent:
       type: object
@@ -814,6 +1017,8 @@ components:
       properties:
         id:
           $ref: "#/components/schemas/TimerID"
+        taskId:
+          $ref: "#/components/schemas/TaskID"
         phase:
           $ref: "#/components/schemas/TimerPhase"
         status:
@@ -846,6 +1051,8 @@ components:
           $ref: "#/components/schemas/TimerID"
         timerId:
           $ref: "#/components/schemas/TimerID"
+        taskId:
+          $ref: "#/components/schemas/TaskID"
         commandId:
           $ref: "#/components/schemas/CommandID"
         phase:
@@ -871,17 +1078,32 @@ components:
       additionalProperties: false
       required:
         - acknowledgements
+        - taskAcknowledgements
+        - durationAcknowledgements
         - revision
         - canonicalTimer
         - history
+        - tasks
+        - durationsMs
         - serverTime
         - serverHlcWallMs
+        - serverHlcCounter
       properties:
         acknowledgements:
           type: array
           description: One entry for each command in request order.
           items:
             $ref: "#/components/schemas/Acknowledgement"
+        taskAcknowledgements:
+          type: array
+          description: One entry for each task operation in request order.
+          items:
+            $ref: "#/components/schemas/TaskAcknowledgement"
+        durationAcknowledgements:
+          type: array
+          description: One entry for each duration operation in request order.
+          items:
+            $ref: "#/components/schemas/DurationAcknowledgement"
         revision:
           type: integer
           format: int64
@@ -896,6 +1118,13 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HistoryItem"
+        tasks:
+          type: array
+          description: Active task projection sorted by title and ID.
+          items:
+            $ref: "#/components/schemas/Task"
+        durationsMs:
+          $ref: "#/components/schemas/DurationsMs"
         serverTime:
           type: string
           format: date-time
@@ -903,6 +1132,12 @@ components:
           type: integer
           format: int64
           minimum: 1
+          description: Wall component of the maximum server, persisted, or observed account HLC tuple.
+        serverHlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Counter component paired with `serverHlcWallMs`.
 
     HistoryResponse:
       type: object

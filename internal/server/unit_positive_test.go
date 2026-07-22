@@ -47,6 +47,20 @@ func TestRevisionHubFansOutIsolatesAndCoalesces(t *testing.T) {
 	receiveRevision(t, second, 3)
 }
 
+func TestRevisionHubNeverPublishesRegressingRevision(t *testing.T) {
+	hub := newRevisionHub()
+	revisions, unsubscribe := hub.subscribe("user-a")
+	t.Cleanup(unsubscribe)
+
+	hub.publish("user-a", 5)
+	hub.publish("user-a", 4)
+	receiveRevision(t, revisions, 5)
+	assertNoRevision(t, revisions)
+
+	hub.publish("user-a", 6)
+	receiveRevision(t, revisions, 6)
+}
+
 func TestRevisionHubUnsubscribeKeepsOtherSubscribers(t *testing.T) {
 	hub := newRevisionHub()
 	removed, unsubscribeRemoved := hub.subscribe("user-a")
@@ -88,6 +102,51 @@ func TestParseSyncRequestAcceptsBoundaryValues(t *testing.T) {
 				t.Fatalf("parsed command = %#v", command)
 			}
 		})
+	}
+}
+
+func TestParseSyncRequestNormalizesTaskOperationsAndAssociations(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	title := "\x00Cafe\u0301\x1f"
+	payload := validSyncRequestJSON(now)
+	payload.TaskOperations = []syncTaskOperationJSON{validTaskOperationJSON(now, title)}
+	payload.Commands[0].TaskID = payload.TaskOperations[0].TaskID
+	request, response := newJSONRequest(t, http.MethodPost, "/api/v1/sync", payload)
+	result, err := parseSyncRequest(response, request, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.TaskOperations) != 1 || result.TaskOperations[0].Title != "Café" || result.Commands[0].TaskID != payload.TaskOperations[0].TaskID {
+		t.Fatalf("parsed task sync = %#v", result)
+	}
+}
+
+func TestParseSyncRequestAcceptsDurationOperationsAndOmission(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	payload := validSyncRequestJSON(now)
+	request, response := newJSONRequest(t, http.MethodPost, "/api/v1/sync", payload)
+	result, err := parseSyncRequest(response, request, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DurationOperations) != 0 {
+		t.Fatalf("omitted duration operations = %#v", result.DurationOperations)
+	}
+
+	payload.DurationOperations = []syncDurationOperationJSON{
+		validDurationOperationJSON(now, "focus", 60_000),
+		validDurationOperationJSON(now, "long_break", 10_800_000),
+	}
+	payload.DurationOperations[0].HLCWallMs = int64Pointer(0)
+	payload.DurationOperations[0].HLCCounter = int64Pointer(0)
+	payload.DurationOperations[1].ID = "duration-operation-0002"
+	request, response = newJSONRequest(t, http.MethodPost, "/api/v1/sync", payload)
+	result, err = parseSyncRequest(response, request, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DurationOperations) != 2 || result.DurationOperations[0].DurationMs != 60_000 || result.DurationOperations[0].HLCWallMs != 0 || result.DurationOperations[1].DurationMs != 10_800_000 || result.DurationOperations[1].Phase != "long_break" {
+		t.Fatalf("parsed duration operations = %#v", result.DurationOperations)
 	}
 }
 

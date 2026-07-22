@@ -37,13 +37,15 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
 button,
 a,
-input {
+input,
+select {
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -58,7 +60,8 @@ a {
 
 button:focus-visible,
 a:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 3px solid var(--signal);
   outline-offset: 4px;
 }
@@ -315,6 +318,54 @@ main {
   padding: clamp(1.25rem, 3.5vw, 3.5rem) clamp(0.9rem, 4vw, 4.5rem) 5rem;
 }
 
+.screen-nav {
+  margin-bottom: 1.5rem;
+  border-bottom: 3px solid var(--track);
+}
+
+.screen-nav [role="tablist"] {
+  display: flex;
+  align-items: end;
+  gap: 0.4rem;
+}
+
+.screen-nav button {
+  min-width: 8.5rem;
+  padding: 0.7rem 1rem 0.6rem;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-left: 0.35rem solid var(--steel);
+  text-align: left;
+}
+
+.screen-nav button span,
+.screen-nav button strong {
+  display: block;
+}
+
+.screen-nav button span {
+  font-family: var(--utility);
+  font-size: 0.56rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.screen-nav button strong {
+  margin-top: 0.1rem;
+  font-family: var(--display);
+  font-size: 1.25rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.screen-nav button[aria-selected="true"] {
+  color: var(--porcelain);
+  background: var(--platform);
+  border-left-color: var(--signal);
+}
+
 .conflict-panel,
 .notice {
   margin: 0 0 1.25rem;
@@ -422,6 +473,57 @@ main {
   margin: 1.7rem 0 0;
   padding: 0;
   border: 0;
+}
+
+.task-selector-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(9rem, 1.2fr);
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 1.35rem;
+  padding: 0.9rem 0;
+  border-top: 2px solid var(--track);
+  border-bottom: 1px solid var(--steel);
+}
+
+.task-selector-row span,
+.task-selector-row strong,
+.task-selector-row small {
+  display: block;
+}
+
+.task-selector-row strong {
+  font-family: var(--display);
+  font-size: 1rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.task-selector-row small {
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-family: var(--utility);
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.task-selector-row select {
+  width: 100%;
+  min-height: 3.25rem;
+  padding: 0.65rem 2.3rem 0.65rem 0.75rem;
+  color: var(--track);
+  background: var(--sky);
+  border: 2px solid var(--track);
+  border-radius: 0;
+  font-family: var(--utility);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.task-selector-row select:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
 }
 
 .duration-row {
@@ -1020,6 +1122,19 @@ main {
   text-transform: uppercase;
 }
 
+.history-task {
+  display: block;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--utility);
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .history-date,
 .history-duration,
 .history-pending {
@@ -1061,6 +1176,161 @@ main {
   background: var(--signal);
   border: 2px solid var(--platform);
   border-radius: 50%;
+}
+
+.tasks-screen {
+  border-top: 3px solid var(--track);
+}
+
+.tasks-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2rem;
+  padding: 1.5rem 0 1.75rem;
+  border-bottom: 1px solid var(--track);
+}
+
+.tasks-heading h1 {
+  margin: 0.25rem 0 0;
+  font-family: var(--display);
+  font-size: clamp(3rem, 8vw, 7rem);
+  letter-spacing: 0.025em;
+  line-height: 0.85;
+  text-transform: uppercase;
+}
+
+.tasks-heading p {
+  max-width: 42rem;
+  margin: 0.9rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.task-form {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.35fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem;
+  background: var(--platform);
+  border: 2px solid var(--track);
+  border-top: 0;
+  box-shadow: 7px 7px 0 var(--signal);
+}
+
+.task-form > label {
+  color: var(--ticket);
+  font-family: var(--display);
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.task-form > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.task-form input,
+.task-form button {
+  min-height: 3.4rem;
+  border: 2px solid var(--porcelain);
+  border-radius: 0;
+}
+
+.task-form input {
+  min-width: 0;
+  padding: 0.75rem;
+  color: var(--track);
+  background: var(--porcelain);
+  font-weight: 800;
+}
+
+.task-form button {
+  padding: 0.75rem 1.25rem;
+  color: var(--track);
+  background: var(--ticket);
+  border-left: 0;
+  font-family: var(--display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.task-board {
+  margin-top: clamp(2.5rem, 5vw, 5rem);
+  border-top: 3px solid var(--track);
+}
+
+.task-board-head,
+.task-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1.7fr) minmax(11rem, 0.8fr) minmax(9rem, 0.7fr) auto;
+  align-items: center;
+  gap: 1rem;
+}
+
+.task-board-head {
+  padding: 0.75rem 0;
+  color: var(--porcelain);
+  background: var(--track);
+  font-family: var(--utility);
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.task-board-head span,
+.task-row > * {
+  min-width: 0;
+  padding-inline: 0.8rem;
+}
+
+.task-row {
+  min-height: 5rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--steel);
+}
+
+.task-name {
+  overflow-wrap: anywhere;
+  font-family: var(--display);
+  font-size: 1.2rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.task-stat {
+  font-family: var(--utility);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.task-delete {
+  margin-right: 0.8rem;
+  padding: 0.55rem 0;
+  color: var(--danger);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  font-family: var(--utility);
+  font-size: 0.65rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.task-empty {
+  margin: 0;
+  padding: 2rem 0.8rem;
+  color: var(--muted);
+  font-family: var(--utility);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .site-footer {
@@ -1138,6 +1408,12 @@ main {
   .rail-note {
     max-width: 39rem;
   }
+
+  .task-board-head,
+  .task-row {
+    grid-template-columns: minmax(10rem, 1.4fr) minmax(9rem, 0.8fr) minmax(8rem, 0.7fr) auto;
+    gap: 0.5rem;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1178,6 +1454,18 @@ main {
 
   main {
     padding: 1rem 0.75rem 3.5rem;
+  }
+
+  .screen-nav {
+    margin-bottom: 1.25rem;
+  }
+
+  .screen-nav [role="tablist"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .screen-nav button {
+    padding: 0.7rem 0.8rem;
   }
 
   .conflict-panel {
@@ -1223,6 +1511,15 @@ main {
 
   .rail-note {
     display: none;
+  }
+
+  .task-selector-row {
+    grid-template-columns: 1fr;
+    gap: 0.65rem;
+  }
+
+  .task-selector-row select {
+    width: 100%;
   }
 
   .timer-machine {
@@ -1283,6 +1580,73 @@ main {
 
   .history-stamp {
     grid-row: 1 / 3;
+  }
+
+  .tasks-heading {
+    align-items: center;
+    gap: 1rem;
+    padding-top: 1rem;
+  }
+
+  .tasks-heading h1 {
+    font-size: clamp(2.7rem, 16vw, 4.5rem);
+  }
+
+  .task-form {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+    padding: 1rem;
+    box-shadow: 5px 5px 0 var(--signal);
+  }
+
+  .task-form > div {
+    grid-template-columns: 1fr;
+    gap: 0.55rem;
+  }
+
+  .task-form button {
+    border-left: 2px solid var(--porcelain);
+  }
+
+  .task-board {
+    margin-top: 3rem;
+  }
+
+  .task-board-head {
+    display: none;
+  }
+
+  .task-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem 0.5rem;
+    padding: 1rem 0;
+  }
+
+  .task-name {
+    grid-column: 1 / -1;
+  }
+
+  .task-stat::before {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--muted);
+    font-size: 0.55rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .task-stat:nth-child(2)::before {
+    content: "Finished today";
+  }
+
+  .task-stat:nth-child(3)::before {
+    content: "Time today";
+  }
+
+  .task-delete {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin: 0 0 0 0.8rem;
   }
 
   .site-footer {

@@ -124,6 +124,66 @@ func TestBearerSyncAndHistoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBearerDurationSyncReturnsCanonicalDurationsAndPublishesRevision(t *testing.T) {
+	fixture := newServerFixture(t)
+	now := time.Now().UTC()
+	payload := validSyncRequestJSON(now)
+	payload.DeviceID = fixture.deviceID
+	payload.Commands = []syncCommandJSON{}
+	payload.DurationOperations = []syncDurationOperationJSON{validDurationOperationJSON(now, "short_break", 600_000)}
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	defer unsubscribe()
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://pomodorough.egigoka.me/api/v1/sync", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+fixture.accessToken)
+	response := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST duration sync status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Revision                 int64  `json:"revision"`
+		ServerHLCCounter         *int64 `json:"serverHlcCounter"`
+		DurationAcknowledgements []struct {
+			OperationID string `json:"operationId"`
+			Outcome     string `json:"outcome"`
+		} `json:"durationAcknowledgements"`
+		DurationsMs struct {
+			Focus      int64 `json:"focus"`
+			ShortBreak int64 `json:"short_break"`
+			LongBreak  int64 `json:"long_break"`
+		} `json:"durationsMs"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Revision != 1 || len(result.DurationAcknowledgements) != 1 || result.DurationAcknowledgements[0].OperationID != "duration-operation-0001" || result.DurationAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("duration sync response = %#v", result)
+	}
+	if result.ServerHLCCounter == nil {
+		t.Fatal("duration sync response omitted serverHlcCounter")
+	}
+	if result.DurationsMs.Focus != 1_500_000 || result.DurationsMs.ShortBreak != 600_000 || result.DurationsMs.LongBreak != 900_000 {
+		t.Fatalf("canonical durations = %#v", result.DurationsMs)
+	}
+	receiveRevision(t, revisions, 1)
+
+	request = httptest.NewRequest(http.MethodPost, "https://pomodorough.egigoka.me/api/v1/sync", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+fixture.accessToken)
+	response = httptest.NewRecorder()
+	fixture.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST duplicate duration sync status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertNoRevision(t, revisions)
+}
+
 func TestCookieLogoutWithValidCSRF(t *testing.T) {
 	fixture := newServerFixture(t)
 	request := httptest.NewRequest(http.MethodPost, "https://pomodorough.egigoka.me/api/v1/auth/logout", nil)

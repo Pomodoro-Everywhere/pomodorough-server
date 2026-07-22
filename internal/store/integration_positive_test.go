@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"pomodorough/internal/authn"
+	"pomodorough/internal/task"
 	"pomodorough/internal/timer"
 )
 
@@ -113,6 +114,301 @@ func TestSyncBatchRevisionAndHistoryPersist(t *testing.T) {
 	}
 	if empty.Revision != 1 || len(empty.Acknowledgements) != 0 || empty.History == nil {
 		t.Fatalf("empty sync changed state: %#v", empty)
+	}
+}
+
+func TestSyncTasksAreIdempotentLWWAndRetainHistoryAssociation(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-task-subject")
+	defer db.Close()
+	deviceID := "device-0001"
+	title := "Write tests"
+	taskID := task.ID(title)
+	upsert := task.Operation{
+		ID: "task-operation-0001", DeviceID: deviceID, TaskID: taskID, Type: "upsert", Title: title,
+		OccurredAt: now, HLCWallMs: now.UnixMilli(),
+	}
+	start := testTimerCommand("command-0001", deviceID, "timer-000001", "start", 1, now)
+	start.TaskID = taskID
+	first, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: deviceID, Commands: []timer.Command{start}, TaskOperations: []task.Operation{upsert},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision != 1 || len(first.Tasks) != 1 || first.Tasks[0].ID != taskID || first.CanonicalTimer == nil || first.CanonicalTimer.TaskID != taskID {
+		t.Fatalf("first task sync = %#v", first)
+	}
+	if len(first.TaskAcknowledgements) != 1 || first.TaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("first task acknowledgement = %#v", first.TaskAcknowledgements)
+	}
+
+	duplicate, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: deviceID, TaskOperations: []task.Operation{upsert}}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Revision != 1 || len(duplicate.Tasks) != 1 || duplicate.TaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("duplicate task sync = %#v", duplicate)
+	}
+
+	finish := testTimerCommand("command-0002", deviceID, "timer-000001", "finish", 2, now.Add(2*time.Second))
+	deleteOperation := task.Operation{
+		ID: "task-operation-0002", DeviceID: deviceID, TaskID: taskID, Type: "delete",
+		OccurredAt: now.Add(2 * time.Second), HLCWallMs: now.Add(2 * time.Second).UnixMilli(),
+	}
+	deleted, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: deviceID, Commands: []timer.Command{finish}, TaskOperations: []task.Operation{deleteOperation},
+	}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Revision != 2 || len(deleted.Tasks) != 0 || len(deleted.History) != 1 || deleted.History[0].TaskID != taskID {
+		t.Fatalf("deleted task sync = %#v", deleted)
+	}
+
+	staleUpsert := upsert
+	staleUpsert.ID = "task-operation-0003"
+	stale, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: deviceID, TaskOperations: []task.Operation{staleUpsert}}, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Revision != 3 || len(stale.Tasks) != 0 || stale.TaskAcknowledgements[0].Outcome != "ignored" {
+		t.Fatalf("stale recreation won LWW: %#v", stale)
+	}
+
+	recreate := upsert
+	recreate.ID = "task-operation-0004"
+	recreate.OccurredAt = now.Add(4 * time.Second)
+	recreate.HLCWallMs = recreate.OccurredAt.UnixMilli()
+	recreated, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: deviceID, TaskOperations: []task.Operation{recreate}}, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recreated.Revision != 4 || len(recreated.Tasks) != 1 || recreated.Tasks[0].ID != taskID || recreated.History[0].TaskID != taskID {
+		t.Fatalf("task recreation did not restore identity: %#v", recreated)
+	}
+}
+
+func TestSyncDurationsMergeIndependentlyAndRetryDeterministically(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-duration-subject")
+	defer db.Close()
+	operation := func(id, phase string, durationMs, wallMs int64) DurationOperation {
+		return DurationOperation{ID: id, Phase: phase, DurationMs: durationMs, OccurredAt: now, HLCWallMs: wallMs}
+	}
+
+	empty, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-0001"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Changed || empty.DurationsMs != (DurationsMs{Focus: 1_500_000, ShortBreak: 300_000, LongBreak: 900_000}) || len(empty.DurationAcknowledgements) != 0 {
+		t.Fatalf("default durations = %#v", empty)
+	}
+
+	firstRequest := SyncRequest{DeviceID: "device-0001", DurationOperations: []DurationOperation{
+		operation("duration-operation-old", "focus", 1_200_000, now.UnixMilli()),
+		operation("duration-operation-new", "focus", 1_800_000, now.UnixMilli()+1),
+		operation("duration-operation-short", "short_break", 420_000, now.UnixMilli()),
+	}}
+	first, err := userStore.Sync(ctx, db, userID, firstRequest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Changed || first.Revision != 1 || first.DurationsMs != (DurationsMs{Focus: 1_800_000, ShortBreak: 420_000, LongBreak: 900_000}) {
+		t.Fatalf("first duration sync = %#v", first)
+	}
+	if first.DurationAcknowledgements[0].Outcome != "ignored" || first.DurationAcknowledgements[1].Outcome != "applied" || first.DurationAcknowledgements[2].Outcome != "applied" {
+		t.Fatalf("first duration acknowledgements = %#v", first.DurationAcknowledgements)
+	}
+
+	retry, err := userStore.Sync(ctx, db, userID, firstRequest, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Changed || retry.Revision != first.Revision || retry.DurationsMs != first.DurationsMs || len(retry.DurationAcknowledgements) != len(first.DurationAcknowledgements) {
+		t.Fatalf("duration retry changed result: first=%#v retry=%#v", first, retry)
+	}
+	for index := range first.DurationAcknowledgements {
+		if retry.DurationAcknowledgements[index] != first.DurationAcknowledgements[index] {
+			t.Fatalf("retry acknowledgement %d = %#v, want %#v", index, retry.DurationAcknowledgements[index], first.DurationAcknowledgements[index])
+		}
+	}
+	var operationCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM duration_operations`).Scan(&operationCount); err != nil || operationCount != 3 {
+		t.Fatalf("duration operation count after retry = %d, %v; want 3", operationCount, err)
+	}
+
+	second, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-0002", DurationOperations: []DurationOperation{
+		operation("duration-operation-stale", "focus", 600_000, now.UnixMilli()-1),
+		operation("duration-operation-long", "long_break", 1_200_000, now.UnixMilli()+2),
+	}}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Revision != 2 || second.DurationsMs != (DurationsMs{Focus: 1_800_000, ShortBreak: 420_000, LongBreak: 1_200_000}) {
+		t.Fatalf("independent duration merge = %#v", second)
+	}
+	if second.DurationAcknowledgements[0].Outcome != "ignored" || second.DurationAcknowledgements[0].Reason == "" || second.DurationAcknowledgements[1].Outcome != "applied" {
+		t.Fatalf("second duration acknowledgements = %#v", second.DurationAcknowledgements)
+	}
+	var deviceID string
+	if err := db.QueryRowContext(ctx, `SELECT device_id FROM duration_operations WHERE id = 'duration-operation-long'`).Scan(&deviceID); err != nil || deviceID != "device-0002" {
+		t.Fatalf("stored duration device = %q, %v", deviceID, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE duration_operations SET duration_ms = 60000 WHERE id = 'duration-operation-long'`); err == nil {
+		t.Fatal("duration operation was mutable")
+	}
+}
+
+func TestSyncDurationsUseFullPhaseScopedOrder(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-duration-order-subject")
+	defer db.Close()
+	operation := func(id, phase string, durationMs, counter int64) DurationOperation {
+		return DurationOperation{ID: id, DeviceID: "untrusted-device", Phase: phase, DurationMs: durationMs, OccurredAt: now, HLCWallMs: now.UnixMilli(), HLCCounter: counter}
+	}
+
+	first, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-0001", DurationOperations: []DurationOperation{
+		operation("duration-operation-focus-a", "focus", 1_200_000, 0),
+		operation("duration-operation-focus-z", "focus", 1_440_000, 0),
+		operation("duration-operation-short-z", "short_break", 360_000, 0),
+	}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DurationsMs.Focus != 1_440_000 || first.DurationsMs.ShortBreak != 360_000 {
+		t.Fatalf("initial durations = %#v", first.DurationsMs)
+	}
+
+	second, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-0002", DurationOperations: []DurationOperation{
+		operation("duration-operation-focus-b", "focus", 1_800_000, 0),
+		operation("duration-operation-short-a", "short_break", 420_000, 1),
+	}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DurationsMs != (DurationsMs{Focus: 1_800_000, ShortBreak: 420_000, LongBreak: 900_000}) {
+		t.Fatalf("tuple-ordered durations = %#v", second.DurationsMs)
+	}
+	for _, acknowledgement := range second.DurationAcknowledgements {
+		if acknowledgement.Outcome != "applied" || acknowledgement.Reason != "" {
+			t.Fatalf("winning acknowledgement = %#v", acknowledgement)
+		}
+	}
+	var deviceID string
+	if err := db.QueryRowContext(ctx, `SELECT device_id FROM duration_operations WHERE id = 'duration-operation-focus-b'`).Scan(&deviceID); err != nil || deviceID != "device-0002" {
+		t.Fatalf("request device ID = %q, %v; want device-0002", deviceID, err)
+	}
+}
+
+func TestSyncDurationDuplicateIDRequiresIdenticalImmutablePayload(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-duration-idempotency-subject")
+	defer db.Close()
+	operation := DurationOperation{
+		ID: "duration-operation-0001", Phase: "focus", DurationMs: 1_200_000,
+		OccurredAt: now, HLCWallMs: now.UnixMilli(), HLCCounter: 2,
+	}
+	request := SyncRequest{DeviceID: "device-0001", DurationOperations: []DurationOperation{operation}}
+	first, err := userStore.Sync(ctx, db, userID, request, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := userStore.Sync(ctx, db, userID, request, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Changed || retry.Revision != first.Revision || retry.DurationAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("identical retry = %#v", retry)
+	}
+
+	changedPayload := operation
+	changedPayload.DurationMs = 1_800_000
+	conflict, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0001", DurationOperations: []DurationOperation{changedPayload},
+	}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Changed || conflict.Revision != first.Revision || conflict.DurationsMs.Focus != 1_200_000 || conflict.DurationAcknowledgements[0].Outcome != "rejected" || conflict.DurationAcknowledgements[0].Reason == "" {
+		t.Fatalf("payload conflict = %#v", conflict)
+	}
+
+	deviceConflict, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0002", DurationOperations: []DurationOperation{operation},
+	}, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deviceConflict.DurationAcknowledgements[0].Outcome != "rejected" || deviceConflict.Revision != first.Revision {
+		t.Fatalf("device conflict = %#v", deviceConflict)
+	}
+}
+
+func TestSyncReturnsFutureAccountHLCForNextClientEdit(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-account-hlc-subject")
+	defer db.Close()
+	remoteWallMs := now.Add(4 * time.Minute).UnixMilli()
+	title := "Future task"
+	first, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0002",
+		TaskOperations: []task.Operation{{
+			ID: "task-operation-future", TaskID: task.ID(title), Type: "upsert", Title: title,
+			OccurredAt: now, HLCWallMs: remoteWallMs, HLCCounter: 7,
+		}},
+		DurationOperations: []DurationOperation{{
+			ID: "duration-operation-remote", Phase: "focus", DurationMs: 1_200_000,
+			OccurredAt: now, HLCWallMs: remoteWallMs, HLCCounter: 6,
+		}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ServerHLCWallMs != remoteWallMs || first.ServerHLCCounter != 7 {
+		t.Fatalf("server HLC = (%d,%d), want (%d,7)", first.ServerHLCWallMs, first.ServerHLCCounter, remoteWallMs)
+	}
+
+	second, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0001",
+		DurationOperations: []DurationOperation{{
+			ID: "duration-operation-local", Phase: "focus", DurationMs: 1_800_000,
+			OccurredAt: now.Add(time.Second), HLCWallMs: first.ServerHLCWallMs, HLCCounter: first.ServerHLCCounter + 1,
+		}},
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DurationsMs.Focus != 1_800_000 || second.DurationAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("post-merge duration edit = %#v", second)
+	}
+}
+
+func TestSyncLegacyDurationSentinelCannotSupersedeRealEdit(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-duration-sentinel-subject")
+	defer db.Close()
+	realOperation := DurationOperation{
+		ID: "duration-operation-real", Phase: "focus", DurationMs: 1_800_000,
+		OccurredAt: now, HLCWallMs: now.UnixMilli(),
+	}
+	if _, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0001", DurationOperations: []DurationOperation{realOperation},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	sentinel, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0002",
+		DurationOperations: []DurationOperation{{
+			ID: "duration-operation-bootstrap", Phase: "focus", DurationMs: 1_200_000,
+			OccurredAt: now.Add(time.Second), HLCWallMs: 0, HLCCounter: 0,
+		}},
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentinel.DurationsMs.Focus != 1_800_000 || sentinel.DurationAcknowledgements[0].Outcome != "ignored" {
+		t.Fatalf("sentinel duration superseded real edit: %#v", sentinel)
 	}
 }
 

@@ -17,9 +17,11 @@ import (
 	"pomodorough/internal/authn"
 	"pomodorough/internal/config"
 	"pomodorough/internal/store"
+	"pomodorough/internal/task"
 )
 
 type serverFixture struct {
+	application  *Server
 	handler      http.Handler
 	userStore    *store.Store
 	userID       string
@@ -96,7 +98,7 @@ func newServerFixture(t *testing.T) serverFixture {
 	}
 
 	return serverFixture{
-		handler: application.Handler(), userStore: userStore, userID: userID, webToken: webToken,
+		application: application, handler: application.Handler(), userStore: userStore, userID: userID, webToken: webToken,
 		accessToken: accessToken, refreshToken: refreshToken, csrfToken: csrfToken, deviceID: deviceID,
 	}
 }
@@ -113,6 +115,20 @@ func validSyncRequestJSON(now time.Time) syncRequestJSON {
 			PlannedDurationMs: int64Pointer(25 * 60_000), OccurredAt: now.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(now.UnixMilli()),
 			HLCCounter: int64Pointer(0), ObservedElapsedMs: int64Pointer(0),
 		}},
+	}
+}
+
+func validTaskOperationJSON(now time.Time, title string) syncTaskOperationJSON {
+	return syncTaskOperationJSON{
+		ID: "task-operation-0001", TaskID: task.ID(title), Type: "upsert", Title: title,
+		OccurredAt: now.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(now.UnixMilli()), HLCCounter: int64Pointer(0),
+	}
+}
+
+func validDurationOperationJSON(now time.Time, phase string, durationMs int64) syncDurationOperationJSON {
+	return syncDurationOperationJSON{
+		ID: "duration-operation-0001", Phase: phase, DurationMs: int64Pointer(durationMs),
+		OccurredAt: now.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(now.UnixMilli()), HLCCounter: int64Pointer(0),
 	}
 }
 

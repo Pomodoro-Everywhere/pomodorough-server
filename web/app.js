@@ -2,9 +2,12 @@
   "use strict";
 
   const DB_NAME = "pomodorough";
-  const DB_VERSION = 1;
+  const DB_VERSION = 3;
   const META_STORE = "meta";
   const PENDING_STORE = "pending";
+  const TASK_PENDING_STORE = "pendingTasks";
+  const DURATION_PENDING_STORE = "pendingDurations";
+  const TAB_ID = crypto.randomUUID();
   const CACHE_PREFIX = "pomodorough-shell-";
   const DIAL_RADIUS = 108;
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
@@ -13,6 +16,11 @@
     focus: { label: "Focus", short: "F", defaultMinutes: 25 },
     short_break: { label: "Short break", short: "SB", defaultMinutes: 5 },
     long_break: { label: "Long break", short: "LB", defaultMinutes: 15 }
+  };
+  const DEFAULT_DURATIONS_MS = {
+    focus: 1_500_000,
+    short_break: 300_000,
+    long_break: 900_000
   };
   const ACK_SUCCESS = new Set(["accepted", "acknowledged", "applied", "duplicate", "ok"]);
 
@@ -28,11 +36,15 @@
     conflictReason: document.querySelector("#conflictReason"),
     conflictDismiss: document.querySelector("#conflictDismiss"),
     notice: document.querySelector("#notice"),
+    screenButtons: [...document.querySelectorAll("[data-screen-button]")],
+    timerScreen: document.querySelector("#timerScreen"),
+    tasksScreen: document.querySelector("#tasksScreen"),
     durationForm: document.querySelector("#durationForm"),
     phaseButtons: [...document.querySelectorAll(".phase-button")],
     durationInputs: [...document.querySelectorAll(".stepper input")],
     stepButtons: [...document.querySelectorAll("[data-step]")],
     autoStartBreaks: document.querySelector("#autoStartBreaks"),
+    taskSelector: document.querySelector("#taskSelector"),
     dial: document.querySelector("#dial"),
     dialTicks: document.querySelector("#dialTicks"),
     dialProgress: document.querySelector("#dialProgress"),
@@ -47,6 +59,10 @@
     clearButton: document.querySelector("#clearButton"),
     historyList: document.querySelector("#historyList"),
     historyCount: document.querySelector("#historyCount"),
+    taskForm: document.querySelector("#taskForm"),
+    taskInput: document.querySelector("#taskInput"),
+    taskList: document.querySelector("#taskList"),
+    taskCount: document.querySelector("#taskCount"),
     deviceMark: document.querySelector("#deviceMark")
   };
 
@@ -62,6 +78,7 @@
   let completionQueuedFor = null;
   let noticeTimer = null;
   let redirecting = false;
+  let inFlightDurationOperationIds = new Set();
 
   const state = {
     ready: false,
@@ -73,16 +90,22 @@
     hlcWallMs: 0,
     hlcCounter: 0,
     revision: 0,
+    activeScreen: "timer",
     selectedPhase: "focus",
+    selectedTaskId: null,
     autoStartBreaks: false,
-    durations: Object.fromEntries(
-      Object.entries(PHASES).map(([phase, config]) => [phase, config.defaultMinutes])
-    ),
+    baseDurationsMs: clone(DEFAULT_DURATIONS_MS),
+    durationsMs: clone(DEFAULT_DURATIONS_MS),
     baseTimer: emptyTimer("focus", 25 * 60000),
     timer: emptyTimer("focus", 25 * 60000),
     baseHistory: [],
     history: [],
+    baseTasks: [],
+    tasks: [],
     pending: [],
+    pendingTaskOperations: [],
+    pendingDurationOperations: [],
+    durationSyncBootstrapped: false,
     syncing: false,
     retrying: false,
     conflict: null
@@ -96,7 +119,8 @@
       plannedDurationMs,
       elapsedAtAnchorMs: 0,
       anchorAt: null,
-      lastIntent: null
+      lastIntent: null,
+      taskId: null
     };
   }
 
@@ -112,7 +136,7 @@
     const phase = PHASES[timer.phase] ? timer.phase : "focus";
     const plannedDurationMs = positiveNumber(
       timer.plannedDurationMs,
-      state.durations[phase] * 60000
+      state.durationsMs[phase]
     );
 
     return {
@@ -125,8 +149,30 @@
       plannedDurationMs,
       elapsedAtAnchorMs: clampNumber(timer.elapsedAtAnchorMs, 0, plannedDurationMs),
       anchorAt: timer.anchorAt || null,
-      lastIntent: timer.lastIntent || null
+      lastIntent: timer.lastIntent || null,
+      taskId: timer.taskId || null
     };
+  }
+
+  function normalizeTaskTitle(value) {
+    const characters = [...String(value || "").normalize("NFC")];
+    const printable = (character) => character === " " || !/[\p{C}\p{Z}]/u.test(character);
+    let start = 0;
+    let end = characters.length;
+    while (start < end && !printable(characters[start])) start += 1;
+    while (end > start && !printable(characters[end - 1])) end -= 1;
+    return characters.slice(start, end).join("");
+  }
+
+  async function deterministicTaskId(title) {
+    const normalized = normalizeTaskTitle(title);
+    const bytes = new TextEncoder().encode(`pomodorough.task.v1\u0000${normalized}`);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const uuid = digest.slice(0, 16);
+    uuid[6] = (uuid[6] & 0x0f) | 0x80;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    const hex = [...uuid].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
   function positiveNumber(value, fallback) {
@@ -141,7 +187,21 @@
   }
 
   function selectedDurationMs() {
-    return state.durations[state.selectedPhase] * 60000;
+    return state.durationsMs[state.selectedPhase];
+  }
+
+  function normalizeDurationsMs(value) {
+    return Object.fromEntries(Object.keys(PHASES).map((phase) => [phase, Math.round(clampNumber(
+      value?.[phase] ?? DEFAULT_DURATIONS_MS[phase],
+      60_000,
+      10_800_000
+    ))]));
+  }
+
+  function compareDurationOperations(left, right) {
+    return Number(left.hlcWallMs) - Number(right.hlcWallMs)
+      || Number(left.hlcCounter) - Number(right.hlcCounter)
+      || String(left.id).localeCompare(String(right.id));
   }
 
   function elapsedFor(timer, now = Date.now()) {
@@ -177,7 +237,8 @@
             plannedDurationMs: command.plannedDurationMs,
             elapsedAtAnchorMs: 0,
             anchorAt: command.occurredAt,
-            lastIntent: intent
+            lastIntent: intent,
+            taskId: command.taskId || null
           },
           history: nextHistory
         };
@@ -221,6 +282,7 @@
             status: "completed",
             plannedDurationMs: command.plannedDurationMs,
             completedAt: command.occurredAt,
+            taskId: nextTimer.taskId || null,
             pending: true
           });
         }
@@ -250,6 +312,7 @@
   }
 
   function rebuildOptimisticState() {
+    rebuildOptimisticDurations();
     let timer = normalizeTimer(state.baseTimer);
     let history = clone(state.baseHistory || []);
 
@@ -261,6 +324,29 @@
 
     state.timer = timer;
     state.history = history;
+    rebuildOptimisticTasks();
+  }
+
+  function rebuildOptimisticDurations() {
+    const durationsMs = normalizeDurationsMs(state.baseDurationsMs);
+    const operations = [...state.pendingDurationOperations].sort(compareDurationOperations);
+    for (const operation of operations) durationsMs[operation.phase] = operation.durationMs;
+    state.durationsMs = durationsMs;
+  }
+
+  function rebuildOptimisticTasks() {
+    const tasks = new Map((state.baseTasks || []).map((task) => [task.id, clone(task)]));
+    const operations = [...state.pendingTaskOperations].sort((left, right) =>
+      left.hlcWallMs - right.hlcWallMs || left.hlcCounter - right.hlcCounter || left.id.localeCompare(right.id)
+    );
+    for (const operation of operations) {
+      if (operation.type === "upsert") tasks.set(operation.taskId, { id: operation.taskId, title: operation.title });
+      if (operation.type === "delete") tasks.delete(operation.taskId);
+    }
+    state.tasks = [...tasks.values()].sort((left, right) =>
+      left.title.localeCompare(right.title) || left.id.localeCompare(right.id)
+    );
+    if (state.selectedTaskId && !tasks.has(state.selectedTaskId)) state.selectedTaskId = null;
   }
 
   function openDatabase() {
@@ -275,8 +361,17 @@
         if (!database.objectStoreNames.contains(PENDING_STORE)) {
           database.createObjectStore(PENDING_STORE, { keyPath: "id" });
         }
+        if (!database.objectStoreNames.contains(TASK_PENDING_STORE)) {
+          database.createObjectStore(TASK_PENDING_STORE, { keyPath: "id" });
+        }
+        if (!database.objectStoreNames.contains(DURATION_PENDING_STORE)) {
+          database.createObjectStore(DURATION_PENDING_STORE, { keyPath: "id" });
+        }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        request.result.onversionchange = () => request.result.close();
+        resolve(request.result);
+      };
       request.onerror = () => reject(request.error);
       request.onblocked = () => reject(new Error("Timer storage is open in another outdated tab."));
     });
@@ -303,11 +398,23 @@
     await transactionDone(transaction);
   }
 
+  function settingsValue(overrides = {}) {
+    return {
+      selectedPhase: state.selectedPhase,
+      selectedTaskId: state.selectedTaskId,
+      autoStartBreaks: state.autoStartBreaks,
+      durationSyncBootstrapped: state.durationSyncBootstrapped,
+      ...overrides
+    };
+  }
+
   function snapshotValue(overrides = {}) {
     return {
       revision: state.revision,
       canonicalTimer: clone(state.baseTimer),
       history: clone(state.baseHistory),
+      tasks: clone(state.baseTasks),
+      durationsMs: clone(state.baseDurationsMs),
       user: clone(state.user),
       ...overrides
     };
@@ -317,19 +424,84 @@
     await writeMeta("snapshot", snapshotValue(overrides));
   }
 
+  async function migrateDurationQueueFromSettings() {
+    const transaction = db.transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
+    const metaStore = transaction.objectStore(META_STORE);
+    const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+    const request = metaStore.get("settings");
+    request.onsuccess = () => {
+      const record = request.result;
+      const pending = record?.value?.pendingDurationOperations;
+      if (!Array.isArray(pending)) return;
+      for (const operation of pending) durationStore.put(operation);
+      const { pendingDurationOperations, ...settings } = record.value;
+      metaStore.put({ key: "settings", value: settings });
+    };
+    await transactionDone(transaction);
+  }
+
+  async function bootstrapLegacyDurations() {
+    const transaction = db.transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
+    const metaStore = transaction.objectStore(META_STORE);
+    const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+    const request = metaStore.get("settings");
+    request.onsuccess = () => {
+      const settings = request.result?.value || {};
+      if (settings.durationSyncBootstrapped === true) return;
+      const now = Date.now();
+      for (const phase of Object.keys(PHASES)) {
+        if (settings.durations?.[phase] == null) continue;
+        const durationMs = Math.round(clampNumber(settings.durations[phase], 1, 180)) * 60_000;
+        if (durationMs === DEFAULT_DURATIONS_MS[phase]) continue;
+        durationStore.put({
+          id: crypto.randomUUID(),
+          ownerId: "bootstrap",
+          phase,
+          durationMs,
+          occurredAt: new Date(now).toISOString(),
+          hlcWallMs: 0,
+          hlcCounter: 0
+        });
+      }
+      const { durations, ...localSettings } = settings;
+      metaStore.put({
+        key: "settings",
+        value: { ...localSettings, durationSyncBootstrapped: true }
+      });
+    };
+    await transactionDone(transaction);
+  }
+
+  async function readPendingDurationOperations() {
+    const transaction = db.transaction(DURATION_PENDING_STORE, "readonly");
+    const operations = await requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll());
+    return (operations || []).sort(compareDurationOperations);
+  }
+
+  async function refreshPendingDurationOperations() {
+    state.pendingDurationOperations = await readPendingDurationOperations();
+  }
+
   async function loadLocalState() {
     db = await openDatabase();
 
-    const transaction = db.transaction([META_STORE, PENDING_STORE], "readonly");
+    await migrateDurationQueueFromSettings();
+    await bootstrapLegacyDurations();
+
+    const transaction = db.transaction([META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE], "readonly");
     const metaStore = transaction.objectStore(META_STORE);
     const pendingStore = transaction.objectStore(PENDING_STORE);
-    const [deviceId, deviceSequence, hlc, settings, snapshot, pending] = await Promise.all([
+    const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
+    const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
+    const [deviceId, deviceSequence, hlc, settings, snapshot, pending, pendingTaskOperations, pendingDurationOperations] = await Promise.all([
       requestResult(metaStore.get("deviceId")),
       requestResult(metaStore.get("deviceSequence")),
       requestResult(metaStore.get("hlc")),
       requestResult(metaStore.get("settings")),
       requestResult(metaStore.get("snapshot")),
-      requestResult(pendingStore.getAll())
+      requestResult(pendingStore.getAll()),
+      requestResult(taskPendingStore.getAll()),
+      requestResult(durationPendingStore.getAll())
     ]);
 
     state.deviceId = deviceId?.value || crypto.randomUUID();
@@ -337,25 +509,24 @@
     state.hlcWallMs = Number(hlc?.value?.wallMs) || 0;
     state.hlcCounter = Number(hlc?.value?.counter) || 0;
     state.pending = (pending || []).sort((a, b) => a.deviceSequence - b.deviceSequence);
+    state.pendingTaskOperations = pendingTaskOperations || [];
+    state.pendingDurationOperations = (pendingDurationOperations || []).sort(compareDurationOperations);
+    state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
 
     if (settings?.value) {
       state.selectedPhase = PHASES[settings.value.selectedPhase]
         ? settings.value.selectedPhase
         : "focus";
       state.autoStartBreaks = settings.value.autoStartBreaks === true;
-      for (const phase of Object.keys(PHASES)) {
-        state.durations[phase] = Math.round(clampNumber(
-          settings.value.durations?.[phase] ?? PHASES[phase].defaultMinutes,
-          1,
-          180
-        ));
-      }
+      state.selectedTaskId = settings.value.selectedTaskId || null;
     }
 
     if (snapshot?.value) {
       state.revision = snapshot.value.revision ?? 0;
       state.baseTimer = normalizeTimer(snapshot.value.canonicalTimer);
       state.baseHistory = Array.isArray(snapshot.value.history) ? snapshot.value.history : [];
+      state.baseTasks = Array.isArray(snapshot.value.tasks) ? snapshot.value.tasks : [];
+      state.baseDurationsMs = normalizeDurationsMs(snapshot.value.durationsMs);
       state.user = snapshot.value.user || null;
     } else {
       state.baseTimer = emptyTimer(state.selectedPhase, selectedDurationMs());
@@ -373,14 +544,7 @@
       store.put({ key: "deviceId", value: state.deviceId });
       store.put({ key: "deviceSequence", value: state.deviceSequence });
       store.put({ key: "hlc", value: { wallMs: state.hlcWallMs, counter: state.hlcCounter } });
-      store.put({
-        key: "settings",
-        value: {
-          selectedPhase: state.selectedPhase,
-          durations: state.durations,
-          autoStartBreaks: state.autoStartBreaks
-        }
-      });
+      store.put({ key: "settings", value: settingsValue() });
       await transactionDone(writeTransaction);
     }
 
@@ -388,11 +552,10 @@
   }
 
   async function persistSettings() {
-    await writeMeta("settings", {
-      selectedPhase: state.selectedPhase,
-      durations: state.durations,
-      autoStartBreaks: state.autoStartBreaks
-    });
+    while (actionLocked) {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+    await writeMeta("settings", settingsValue());
   }
 
   async function persistCommand(type, options = {}) {
@@ -406,7 +569,7 @@
     const startingPhase = PHASES[options.phase] ? options.phase : state.selectedPhase;
     const phase = starting ? startingPhase : activeTimer.phase;
     const plannedDurationMs = starting
-      ? state.durations[startingPhase] * 60000
+      ? state.durationsMs[startingPhase]
       : activeTimer.plannedDurationMs;
     const observedElapsedMs = starting ? 0 : Math.round(elapsedFor(activeTimer, now));
     const command = {
@@ -421,6 +584,9 @@
       hlcCounter: counter,
       observedElapsedMs
     };
+    if (starting && startingPhase === "focus" && state.selectedTaskId) {
+      command.taskId = state.selectedTaskId;
+    }
 
     if (!timerId) throw new Error("No timer is available for this action.");
 
@@ -435,6 +601,168 @@
     state.hlcWallMs = wallMs;
     state.hlcCounter = counter;
     return command;
+  }
+
+  async function persistTaskOperation(type, task) {
+    const now = Date.now();
+    const wallMs = Math.max(now, state.hlcWallMs);
+    const counter = wallMs === state.hlcWallMs ? state.hlcCounter + 1 : 0;
+    const operation = {
+      id: crypto.randomUUID(),
+      taskId: task.id,
+      type,
+      occurredAt: new Date(now).toISOString(),
+      hlcWallMs: wallMs,
+      hlcCounter: counter
+    };
+    if (type === "upsert") operation.title = task.title;
+
+    const transaction = db.transaction([TASK_PENDING_STORE, META_STORE], "readwrite");
+    transaction.objectStore(TASK_PENDING_STORE).add(operation);
+    transaction.objectStore(META_STORE).put({ key: "hlc", value: { wallMs, counter } });
+    await transactionDone(transaction);
+
+    state.hlcWallMs = wallMs;
+    state.hlcCounter = counter;
+    return operation;
+  }
+
+  async function persistDurationOperation(phase, durationMs) {
+    const now = Date.now();
+    const transaction = db.transaction([DURATION_PENDING_STORE, META_STORE], "readwrite");
+    const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+    const metaStore = transaction.objectStore(META_STORE);
+    const operationsRequest = durationStore.getAll();
+    const hlcRequest = metaStore.get("hlc");
+    let existingOperations;
+    let storedHlc;
+    let operation;
+    let pendingDurationOperations;
+    const persist = () => {
+      if (!existingOperations || storedHlc === undefined) return;
+      const storedWallMs = Number(storedHlc?.wallMs) || 0;
+      const pendingWallMs = existingOperations.reduce(
+        (maximum, existing) => Math.max(maximum, Number(existing.hlcWallMs) || 0),
+        0
+      );
+      const previousWallMs = Math.max(state.hlcWallMs, storedWallMs, pendingWallMs);
+      const wallMs = Math.max(now, previousWallMs);
+      const pendingCounter = existingOperations.reduce(
+        (maximum, existing) => Number(existing.hlcWallMs) === wallMs
+          ? Math.max(maximum, Number(existing.hlcCounter) || 0)
+          : maximum,
+        0
+      );
+      const previousCounter = Math.max(
+        wallMs === state.hlcWallMs ? state.hlcCounter : 0,
+        wallMs === storedWallMs ? Number(storedHlc?.counter) || 0 : 0,
+        pendingCounter
+      );
+      const counter = wallMs === previousWallMs ? previousCounter + 1 : 0;
+      operation = {
+        id: crypto.randomUUID(),
+        ownerId: TAB_ID,
+        phase,
+        durationMs,
+        occurredAt: new Date(now).toISOString(),
+        hlcWallMs: wallMs,
+        hlcCounter: counter
+      };
+      const superseded = new Set(existingOperations
+        .filter((existing) => existing.phase === phase && existing.ownerId === TAB_ID && !inFlightDurationOperationIds.has(existing.id))
+        .map((existing) => existing.id));
+      for (const operationID of superseded) durationStore.delete(operationID);
+      durationStore.put(operation);
+      pendingDurationOperations = existingOperations
+        .filter((existing) => !superseded.has(existing.id))
+        .concat(operation)
+        .sort(compareDurationOperations);
+      metaStore.put({ key: "hlc", value: { wallMs, counter } });
+    };
+    operationsRequest.onsuccess = () => {
+      existingOperations = operationsRequest.result || [];
+      persist();
+    };
+    hlcRequest.onsuccess = () => {
+      storedHlc = hlcRequest.result?.value || null;
+      persist();
+    };
+    await transactionDone(transaction);
+
+    state.hlcWallMs = operation.hlcWallMs;
+    state.hlcCounter = operation.hlcCounter;
+    return { operation, pendingDurationOperations };
+  }
+
+  async function issueDurationOperation(phase, durationMs) {
+    if (!state.ready || actionLocked || state.durationsMs[phase] === durationMs) return false;
+    actionLocked = true;
+    try {
+      const persisted = await persistDurationOperation(phase, durationMs);
+      state.pendingDurationOperations = persisted.pendingDurationOperations;
+      rebuildOptimisticDurations();
+      render();
+      scheduleSync(0);
+      return true;
+    } catch (error) {
+      showNotice(error.message || "Duration change could not be saved.");
+      return false;
+    } finally {
+      actionLocked = false;
+    }
+  }
+
+  async function issueTaskOperation(type, task) {
+    if (!state.ready || actionLocked) return false;
+    actionLocked = true;
+    try {
+      const operation = await persistTaskOperation(type, task);
+      state.pendingTaskOperations.push(operation);
+      rebuildOptimisticTasks();
+      render();
+      scheduleSync(0);
+      return true;
+    } catch (error) {
+      showNotice(error.message || "Task change could not be saved.");
+      return false;
+    } finally {
+      actionLocked = false;
+    }
+  }
+
+  async function addTask(title) {
+    const normalized = normalizeTaskTitle(title);
+    if (!normalized) throw new Error("Enter a printable task name.");
+    if (new TextEncoder().encode(normalized).length > 512) {
+      throw new Error("Task name is too long.");
+    }
+    const id = await deterministicTaskId(normalized);
+    const existing = state.tasks.find((task) => task.id === id);
+    if (existing) {
+      state.selectedTaskId = existing.id;
+      await persistSettings();
+      render();
+      showNotice("Task already exists and is now selected.");
+      return true;
+    }
+    const saved = await issueTaskOperation("upsert", { id, title: normalized });
+    if (saved) {
+      state.selectedTaskId = id;
+      await persistSettings();
+      render();
+    }
+    return saved;
+  }
+
+  async function deleteTask(task) {
+    const wasSelected = state.selectedTaskId === task.id;
+    const saved = await issueTaskOperation("delete", task);
+    if (saved && wasSelected) {
+      state.selectedTaskId = null;
+      await persistSettings();
+      render();
+    }
+    return saved;
   }
 
   async function issueCommand(type, options = {}) {
@@ -476,63 +804,126 @@
     return saved;
   }
 
-  function mergeServerHlc(serverWallMs) {
-    const wallMs = Math.max(Date.now(), state.hlcWallMs, Number(serverWallMs) || 0);
-    const counter = wallMs === state.hlcWallMs ? state.hlcCounter : 0;
-    return { wallMs, counter };
+  function mergeServerHlc(serverWallMs, serverCounter) {
+    const candidates = [
+      { wallMs: Date.now(), counter: 0 },
+      { wallMs: state.hlcWallMs, counter: state.hlcCounter },
+      { wallMs: Number(serverWallMs) || 0, counter: Number(serverCounter) || 0 }
+    ];
+    return candidates.reduce((latest, candidate) =>
+      candidate.wallMs > latest.wallMs || candidate.wallMs === latest.wallMs && candidate.counter > latest.counter
+        ? candidate
+        : latest
+    );
   }
 
-  async function acceptSyncResponse(payload) {
+  function durationRequestOperation(operation) {
+    return {
+      id: operation.id,
+      phase: operation.phase,
+      durationMs: operation.durationMs,
+      occurredAt: operation.occurredAt,
+      hlcWallMs: operation.hlcWallMs,
+      hlcCounter: operation.hlcCounter
+    };
+  }
+
+  function exactAcknowledgements(payload, field, sentItems, idField) {
+    const acknowledgements = payload[field];
+    if (!Array.isArray(acknowledgements)) {
+      throw new Error(`Sync response omitted ${field}.`);
+    }
+    const expectedIds = new Set(sentItems.map((item) => item.id));
+    if (expectedIds.size !== sentItems.length || acknowledgements.length !== expectedIds.size) {
+      throw new Error(`Sync response returned an invalid ${field} set.`);
+    }
+    const acknowledgedIds = new Set();
+    for (const acknowledgement of acknowledgements) {
+      const id = acknowledgement?.[idField];
+      if (typeof id !== "string" || !expectedIds.has(id) || acknowledgedIds.has(id)) {
+        throw new Error(`Sync response returned an invalid ${field} set.`);
+      }
+      acknowledgedIds.add(id);
+    }
+    return { acknowledgements, acknowledgedIds };
+  }
+
+  async function acceptSyncResponse(payload, sent) {
     while (actionLocked) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
+    actionLocked = true;
+    try {
 
-    const acknowledgements = Array.isArray(payload.acknowledgements)
-      ? payload.acknowledgements
-      : [];
-    const acknowledgedIds = new Set(
-      acknowledgements.map((acknowledgement) => acknowledgement.commandId).filter(Boolean)
-    );
-    const remainingPending = state.pending.filter((command) => !acknowledgedIds.has(command.id));
-    const canonicalTimer = Object.prototype.hasOwnProperty.call(payload, "canonicalTimer")
-      ? payload.canonicalTimer
-        ? normalizeTimer(payload.canonicalTimer)
-        : emptyTimer(state.selectedPhase, selectedDurationMs())
-      : state.baseTimer;
-    const history = Array.isArray(payload.history) ? payload.history : state.baseHistory;
-    const revision = payload.revision ?? state.revision;
-    const hlc = mergeServerHlc(payload.serverHlcWallMs);
-    const conflicts = acknowledgements.filter((acknowledgement) => {
-      const outcome = String(acknowledgement.outcome || "").toLowerCase();
-      return outcome && !ACK_SUCCESS.has(outcome);
-    });
+      const { acknowledgements, acknowledgedIds } = exactAcknowledgements(
+        payload, "acknowledgements", sent.commands, "commandId"
+      );
+      const { acknowledgedIds: acknowledgedTaskOperationIds } = exactAcknowledgements(
+        payload, "taskAcknowledgements", sent.taskOperations, "operationId"
+      );
+      const { acknowledgements: durationAcknowledgements, acknowledgedIds: acknowledgedDurationOperationIds } = exactAcknowledgements(
+        payload, "durationAcknowledgements", sent.durationOperations, "operationId"
+      );
+      const remainingPending = state.pending.filter((command) => !acknowledgedIds.has(command.id));
+      const remainingTaskOperations = state.pendingTaskOperations.filter(
+        (operation) => !acknowledgedTaskOperationIds.has(operation.id)
+      );
+      const canonicalTimer = Object.prototype.hasOwnProperty.call(payload, "canonicalTimer")
+        ? payload.canonicalTimer
+          ? normalizeTimer(payload.canonicalTimer)
+          : emptyTimer(state.selectedPhase, selectedDurationMs())
+        : state.baseTimer;
+      const history = Array.isArray(payload.history) ? payload.history : state.baseHistory;
+      const tasks = Array.isArray(payload.tasks) ? payload.tasks : state.baseTasks;
+      const durationsMs = Object.prototype.hasOwnProperty.call(payload, "durationsMs")
+        ? normalizeDurationsMs(payload.durationsMs)
+        : state.baseDurationsMs;
+      const revision = payload.revision ?? state.revision;
+      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
+      const conflicts = acknowledgements.filter((acknowledgement) => {
+        const outcome = String(acknowledgement.outcome || "").toLowerCase();
+        return outcome && !ACK_SUCCESS.has(outcome);
+      }).concat(durationAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"));
 
-    const transaction = db.transaction([PENDING_STORE, META_STORE], "readwrite");
-    const pendingStore = transaction.objectStore(PENDING_STORE);
-    for (const commandId of acknowledgedIds) pendingStore.delete(commandId);
-    const nextSnapshot = snapshotValue({
-      revision,
-      canonicalTimer: clone(canonicalTimer),
-      history: clone(history)
-    });
-    const metaStore = transaction.objectStore(META_STORE);
-    metaStore.put({ key: "snapshot", value: nextSnapshot });
-    metaStore.put({ key: "hlc", value: hlc });
-    await transactionDone(transaction);
+      const transaction = db.transaction([PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, META_STORE], "readwrite");
+      const pendingStore = transaction.objectStore(PENDING_STORE);
+      for (const commandId of acknowledgedIds) pendingStore.delete(commandId);
+      const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
+      for (const operationId of acknowledgedTaskOperationIds) taskPendingStore.delete(operationId);
+      const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
+      for (const operationId of acknowledgedDurationOperationIds) durationPendingStore.delete(operationId);
+      const nextSnapshot = snapshotValue({
+        revision,
+        canonicalTimer: clone(canonicalTimer),
+        history: clone(history),
+        tasks: clone(tasks),
+        durationsMs: clone(durationsMs)
+      });
+      const metaStore = transaction.objectStore(META_STORE);
+      metaStore.put({ key: "snapshot", value: nextSnapshot });
+      metaStore.put({ key: "hlc", value: hlc });
+      await transactionDone(transaction);
 
-    state.pending = remainingPending;
-    state.baseTimer = canonicalTimer;
-    state.baseHistory = history;
-    state.revision = revision;
-    state.hlcWallMs = hlc.wallMs;
-    state.hlcCounter = hlc.counter;
+      state.pending = remainingPending;
+      state.pendingTaskOperations = remainingTaskOperations;
+      await refreshPendingDurationOperations();
+      state.baseTimer = canonicalTimer;
+      state.baseHistory = history;
+      state.baseTasks = tasks;
+      state.baseDurationsMs = durationsMs;
+      state.revision = revision;
+      state.hlcWallMs = hlc.wallMs;
+      state.hlcCounter = hlc.counter;
 
-    if (conflicts.length) {
-      const conflict = conflicts[0];
-      state.conflict = conflict.reason || `Command outcome: ${conflict.outcome}`;
+      if (conflicts.length) {
+        const conflict = conflicts[0];
+        state.conflict = conflict.reason || `Command outcome: ${conflict.outcome}`;
+      }
+
+      rebuildOptimisticState();
+    } finally {
+      actionLocked = false;
     }
-
-    rebuildOptimisticState();
   }
 
   async function syncNow(force = false) {
@@ -545,7 +936,16 @@
       renderSyncStatus();
       return;
     }
-    if (!force && state.pending.length === 0) {
+    try {
+      await refreshPendingDurationOperations();
+    } catch (error) {
+      state.retrying = true;
+      renderSyncStatus();
+      scheduleRetry();
+      console.warn("Pomodorough duration queue unavailable:", error);
+      return;
+    }
+    if (!force && state.pending.length === 0 && state.pendingTaskOperations.length === 0 && state.pendingDurationOperations.length === 0) {
       state.retrying = false;
       renderSyncStatus();
       return;
@@ -557,6 +957,12 @@
       renderSyncStatus();
 
       try {
+        const sent = {
+          commands: clone(state.pending.slice(0, 256)),
+          taskOperations: clone(state.pendingTaskOperations.slice(0, 256)),
+          durationOperations: state.pendingDurationOperations.slice(0, 256).map(durationRequestOperation)
+        };
+        inFlightDurationOperationIds = new Set(sent.durationOperations.map((operation) => operation.id));
         const response = await fetch("/api/v1/sync", {
           method: "POST",
           credentials: "same-origin",
@@ -567,7 +973,9 @@
           body: JSON.stringify({
             deviceId: state.deviceId,
             lastRevision: state.revision,
-            commands: clone(state.pending)
+            commands: sent.commands,
+            taskOperations: sent.taskOperations,
+            durationOperations: sent.durationOperations
           })
         });
 
@@ -578,7 +986,10 @@
         if (!response.ok) throw new Error(`Sync failed (${response.status}).`);
 
         const payload = await response.json();
-        await acceptSyncResponse(payload);
+        await acceptSyncResponse(payload, sent);
+        if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length) {
+          syncAgain = true;
+        }
         retryDelayMs = 1000;
         state.retrying = false;
       } catch (error) {
@@ -586,6 +997,7 @@
         scheduleRetry();
         console.warn("Pomodorough sync deferred:", error);
       } finally {
+        inFlightDurationOperationIds = new Set();
         state.syncing = false;
         render();
       }
@@ -729,9 +1141,15 @@
   }
 
   async function logout() {
-    if (state.pending.length > 0) {
+    try {
+      await refreshPendingDurationOperations();
+    } catch (error) {
+      console.warn("Pomodorough duration queue unavailable before logout:", error);
+    }
+    const pendingCount = state.pending.length + state.pendingTaskOperations.length + state.pendingDurationOperations.length;
+    if (pendingCount > 0) {
       const confirmed = window.confirm(
-        `${state.pending.length} timer action${state.pending.length === 1 ? " is" : "s are"} waiting to sync. Logging out will discard ${state.pending.length === 1 ? "it" : "them"}. Continue?`
+        `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Logging out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
       );
       if (!confirmed) return;
     }
@@ -763,9 +1181,11 @@
 
   async function clearLocalData() {
     if (db) {
-      const transaction = db.transaction([META_STORE, PENDING_STORE], "readwrite");
+      const transaction = db.transaction([META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE], "readwrite");
       transaction.objectStore(META_STORE).clear();
       transaction.objectStore(PENDING_STORE).clear();
+      transaction.objectStore(TASK_PENDING_STORE).clear();
+      transaction.objectStore(DURATION_PENDING_STORE).clear();
       await transactionDone(transaction);
       db.close();
     }
@@ -789,12 +1209,26 @@
   }
 
   function render() {
+    renderScreens();
     renderDurations();
+    renderTaskSelector();
     renderTimer();
     renderHistory();
+    renderTasks();
     renderProfile();
     renderSyncStatus();
     renderConflict();
+  }
+
+  function renderScreens() {
+    const showingTasks = state.activeScreen === "tasks";
+    elements.timerScreen.hidden = showingTasks;
+    elements.tasksScreen.hidden = !showingTasks;
+    for (const button of elements.screenButtons) {
+      const selected = button.dataset.screenButton === state.activeScreen;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
   }
 
   function renderDurations() {
@@ -807,12 +1241,30 @@
     }
 
     for (const input of elements.durationInputs) {
-      if (document.activeElement !== input) input.value = state.durations[input.name];
+      if (document.activeElement !== input) input.value = String(state.durationsMs[input.name] / 60_000);
       input.disabled = !state.ready || active;
     }
     for (const button of elements.stepButtons) button.disabled = !state.ready || active;
     elements.autoStartBreaks.checked = state.autoStartBreaks;
     elements.autoStartBreaks.disabled = !state.ready;
+  }
+
+  function renderTaskSelector() {
+    const previous = state.selectedTaskId || "";
+    elements.taskSelector.replaceChildren();
+    const noTask = document.createElement("option");
+    noTask.value = "";
+    noTask.textContent = "No task";
+    elements.taskSelector.append(noTask);
+    for (const task of state.tasks) {
+      const option = document.createElement("option");
+      option.value = task.id;
+      option.textContent = task.title;
+      elements.taskSelector.append(option);
+    }
+    elements.taskSelector.value = state.tasks.some((task) => task.id === previous) ? previous : "";
+    const active = ["running", "paused"].includes(state.timer.status);
+    elements.taskSelector.disabled = !state.ready || active || state.selectedPhase !== "focus";
   }
 
   function displayTimer() {
@@ -910,6 +1362,13 @@
       const phaseName = document.createElement("span");
       phaseName.className = "history-phase";
       phaseName.textContent = phase.label;
+      const task = state.tasks.find((candidate) => candidate.id === item.taskId);
+      if (task) {
+        const taskName = document.createElement("small");
+        taskName.className = "history-task";
+        taskName.textContent = task.title;
+        phaseName.append(taskName);
+      }
       if (item.pending) {
         const pending = document.createElement("small");
         pending.className = "history-pending";
@@ -929,6 +1388,81 @@
       listItem.append(stamp, phaseName, date, duration);
       elements.historyList.append(listItem);
     }
+  }
+
+  function renderTasks() {
+    elements.taskCount.textContent = String(state.tasks.length).padStart(2, "0");
+    elements.taskList.replaceChildren();
+
+    if (state.tasks.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "task-empty";
+      empty.textContent = "No tasks on the board. Add one for your next focus run.";
+      elements.taskList.append(empty);
+      return;
+    }
+
+    const summaries = taskSummariesToday();
+    for (const task of state.tasks) {
+      const summary = summaries.get(task.id) || { count: 0, durationMs: 0 };
+      const row = document.createElement("article");
+      row.className = "task-row";
+
+      const name = document.createElement("strong");
+      name.className = "task-name";
+      name.textContent = task.title;
+
+      const count = document.createElement("span");
+      count.className = "task-stat";
+      count.textContent = String(summary.count);
+      count.setAttribute("aria-label", `${summary.count} finished pomodoros today`);
+
+      const duration = document.createElement("span");
+      duration.className = "task-stat";
+      duration.textContent = formatTaskDuration(summary.durationMs);
+      duration.setAttribute("aria-label", `${formatTaskDuration(summary.durationMs)} spent today`);
+
+      const remove = document.createElement("button");
+      remove.className = "task-delete";
+      remove.type = "button";
+      remove.textContent = "Delete";
+      remove.setAttribute("aria-label", `Delete ${task.title}`);
+      remove.disabled = !state.ready;
+      remove.addEventListener("click", () => deleteTask(task));
+
+      row.append(name, count, duration, remove);
+      elements.taskList.append(row);
+    }
+  }
+
+  function taskSummariesToday() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    const summaries = new Map();
+    for (const item of state.history) {
+      if (item.phase !== "focus" || (item.status && item.status !== "completed") || !item.taskId) continue;
+      const completedAt = historyDateMs(item);
+      if (completedAt < start.getTime() || completedAt >= end.getTime()) continue;
+      const summary = summaries.get(item.taskId) || { count: 0, durationMs: 0 };
+      summary.count += 1;
+      summary.durationMs += positiveNumber(
+        item.plannedDurationMs ?? item.durationMs ?? item.timer?.plannedDurationMs,
+        0
+      );
+      summaries.set(item.taskId, summary);
+    }
+    return summaries;
+  }
+
+  function formatTaskDuration(durationMs) {
+    const totalMinutes = Math.round(Math.max(0, durationMs) / 60000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (!hours) return `${minutes} min`;
+    if (!minutes) return `${hours} hr`;
+    return `${hours} hr ${minutes} min`;
   }
 
   function historyDateMs(item) {
@@ -967,7 +1501,7 @@
   }
 
   function renderSyncStatus() {
-    const count = state.pending.length;
+    const count = state.pending.length + state.pendingTaskOperations.length + state.pendingDurationOperations.length;
     let syncState = "synced";
     let label = "In sync";
 
@@ -1035,9 +1569,9 @@
   function clampInput(input) {
     const value = Math.round(clampNumber(input.value, 1, 180));
     input.value = String(value);
-    state.durations[input.name] = value;
-    renderTimer();
-    persistSettings().catch(() => showNotice("Duration could not be saved."));
+    issueDurationOperation(input.name, value * 60_000).then((saved) => {
+      if (!saved) renderDurations();
+    });
   }
 
   function setupEvents() {
@@ -1048,6 +1582,7 @@
         if (!PHASES[button.dataset.phase]) return;
         state.selectedPhase = button.dataset.phase;
         renderDurations();
+        renderTaskSelector();
         renderTimer();
         persistSettings().catch(() => showNotice("Phase choice could not be saved."));
       });
@@ -1070,6 +1605,28 @@
     elements.autoStartBreaks.addEventListener("change", () => {
       state.autoStartBreaks = elements.autoStartBreaks.checked;
       persistSettings().catch(() => showNotice("Auto-start preference could not be saved."));
+    });
+
+    for (const button of elements.screenButtons) {
+      button.addEventListener("click", () => {
+        state.activeScreen = button.dataset.screenButton === "tasks" ? "tasks" : "timer";
+        renderScreens();
+      });
+    }
+
+    elements.taskSelector.addEventListener("change", () => {
+      state.selectedTaskId = elements.taskSelector.value || null;
+      persistSettings().catch(() => showNotice("Task choice could not be saved."));
+    });
+
+    elements.taskForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = elements.taskInput.value;
+      try {
+        if (await addTask(value)) elements.taskInput.value = "";
+      } catch (error) {
+        showNotice(error.message || "Task could not be added.");
+      }
     });
 
     elements.timerToggle.addEventListener("click", () => {

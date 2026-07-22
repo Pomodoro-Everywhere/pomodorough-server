@@ -15,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 3
 
 var (
 	ErrNotFound     = errors.New("user database not found")
@@ -142,13 +142,32 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return nil
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	conn, err := db.Conn(ctx)
 	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
-	defer tx.Rollback()
-	statements := []string{
-		`CREATE TABLE profile (
+	defer conn.ExecContext(context.Background(), `ROLLBACK`)
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("re-read schema version: %w", err)
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("user database schema %d is newer than supported schema %d", version, schemaVersion)
+	}
+	if version == schemaVersion {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return fmt.Errorf("commit migration check: %w", err)
+		}
+		return nil
+	}
+
+	var statements []string
+	if version == 0 {
+		statements = []string{
+			`CREATE TABLE profile (
 			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 			user_id TEXT NOT NULL UNIQUE,
 			issuer TEXT NOT NULL,
@@ -159,14 +178,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			avatar_url TEXT NOT NULL,
 			updated_at_ms INTEGER NOT NULL
 		) STRICT`,
-		`CREATE TABLE devices (
+			`CREATE TABLE devices (
 			id TEXT PRIMARY KEY,
 			platform TEXT NOT NULL,
 			created_at_ms INTEGER NOT NULL,
 			last_seen_at_ms INTEGER NOT NULL,
 			revoked_at_ms INTEGER
 		) STRICT`,
-		`CREATE TABLE auth_sessions (
+			`CREATE TABLE auth_sessions (
 			id TEXT PRIMARY KEY,
 			kind TEXT NOT NULL CHECK (kind IN ('web', 'native')),
 			device_id TEXT,
@@ -177,8 +196,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			revoked_at_ms INTEGER,
 			reuse_detected_at_ms INTEGER
 		) STRICT`,
-		`CREATE INDEX auth_sessions_device_idx ON auth_sessions(device_id)`,
-		`CREATE TABLE auth_tokens (
+			`CREATE INDEX auth_sessions_device_idx ON auth_sessions(device_id)`,
+			`CREATE TABLE auth_tokens (
 			token_hash BLOB PRIMARY KEY CHECK (length(token_hash) = 32),
 			session_id TEXT NOT NULL REFERENCES auth_sessions(id) ON DELETE CASCADE,
 			kind TEXT NOT NULL CHECK (kind IN ('web', 'access', 'refresh')),
@@ -187,12 +206,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			used_at_ms INTEGER,
 			revoked_at_ms INTEGER
 		) STRICT`,
-		`CREATE INDEX auth_tokens_session_idx ON auth_tokens(session_id)`,
-		`CREATE TABLE timer_commands (
+			`CREATE INDEX auth_tokens_session_idx ON auth_tokens(session_id)`,
+			`CREATE TABLE timer_commands (
 			id TEXT PRIMARY KEY,
 			device_id TEXT NOT NULL,
 			device_sequence INTEGER NOT NULL CHECK (device_sequence > 0),
 			timer_id TEXT NOT NULL,
+			task_id TEXT,
 			command_type TEXT NOT NULL,
 			phase TEXT NOT NULL,
 			planned_duration_ms INTEGER NOT NULL,
@@ -203,24 +223,25 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			observed_elapsed_ms INTEGER NOT NULL,
 			UNIQUE(device_id, device_sequence)
 		) STRICT`,
-		`CREATE INDEX timer_commands_order_idx ON timer_commands(hlc_wall_ms, hlc_counter, device_id, id)`,
-		`CREATE TRIGGER timer_commands_no_update BEFORE UPDATE ON timer_commands
+			`CREATE INDEX timer_commands_order_idx ON timer_commands(hlc_wall_ms, hlc_counter, device_id, id)`,
+			`CREATE TRIGGER timer_commands_no_update BEFORE UPDATE ON timer_commands
 		BEGIN SELECT RAISE(ABORT, 'timer commands are immutable'); END`,
-		`CREATE TRIGGER timer_commands_no_delete BEFORE DELETE ON timer_commands
+			`CREATE TRIGGER timer_commands_no_delete BEFORE DELETE ON timer_commands
 		BEGIN SELECT RAISE(ABORT, 'timer commands are immutable'); END`,
-		`CREATE TABLE command_outcomes (
+			`CREATE TABLE command_outcomes (
 			command_id TEXT PRIMARY KEY REFERENCES timer_commands(id) ON DELETE CASCADE,
 			outcome TEXT NOT NULL CHECK (outcome IN ('applied', 'ignored', 'rejected')),
 			reason TEXT NOT NULL
 		) STRICT`,
-		`CREATE TABLE account_state (
+			`CREATE TABLE account_state (
 			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 			revision INTEGER NOT NULL,
 			current_timer_id TEXT
 		) STRICT`,
-		`INSERT INTO account_state(singleton, revision, current_timer_id) VALUES (1, 0, NULL)`,
-		`CREATE TABLE timer_sessions (
+			`INSERT INTO account_state(singleton, revision, current_timer_id) VALUES (1, 0, NULL)`,
+			`CREATE TABLE timer_sessions (
 			timer_id TEXT PRIMARY KEY,
+			task_id TEXT,
 			phase TEXT NOT NULL,
 			status TEXT NOT NULL,
 			planned_duration_ms INTEGER NOT NULL,
@@ -232,14 +253,57 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			terminal_command_id TEXT,
 			superseded_by_timer_id TEXT
 		) STRICT`,
-		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion),
+		}
+	} else if version == 1 {
+		statements = []string{
+			`ALTER TABLE timer_commands ADD COLUMN task_id TEXT`,
+			`ALTER TABLE timer_sessions ADD COLUMN task_id TEXT`,
+		}
 	}
+	if version < 2 {
+		statements = append(statements,
+			`CREATE TABLE task_operations (
+			id TEXT PRIMARY KEY,
+			device_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			operation_type TEXT NOT NULL CHECK (operation_type IN ('upsert', 'delete')),
+			title TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			occurred_at_ms INTEGER NOT NULL,
+			hlc_wall_ms INTEGER NOT NULL,
+			hlc_counter INTEGER NOT NULL
+		) STRICT`,
+			`CREATE INDEX task_operations_order_idx ON task_operations(task_id, hlc_wall_ms, hlc_counter, device_id, id)`,
+			`CREATE TRIGGER task_operations_no_update BEFORE UPDATE ON task_operations
+		BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
+			`CREATE TRIGGER task_operations_no_delete BEFORE DELETE ON task_operations
+		BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
+		)
+	}
+	statements = append(statements,
+		`CREATE TABLE duration_operations (
+			id TEXT PRIMARY KEY,
+			device_id TEXT NOT NULL,
+			phase TEXT NOT NULL CHECK (phase IN ('focus', 'short_break', 'long_break')),
+			duration_ms INTEGER NOT NULL CHECK (duration_ms BETWEEN 60000 AND 10800000 AND duration_ms % 60000 = 0),
+			occurred_at TEXT NOT NULL,
+			occurred_at_ms INTEGER NOT NULL,
+			hlc_wall_ms INTEGER NOT NULL CHECK (hlc_wall_ms >= 0),
+			hlc_counter INTEGER NOT NULL CHECK (hlc_counter >= 0)
+		) STRICT`,
+		`CREATE INDEX duration_operations_order_idx ON duration_operations(phase, hlc_wall_ms, hlc_counter, device_id, id)`,
+		`CREATE TRIGGER duration_operations_no_update BEFORE UPDATE ON duration_operations
+		BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
+		`CREATE TRIGGER duration_operations_no_delete BEFORE DELETE ON duration_operations
+		BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
+		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion),
+	)
 	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate user database: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil

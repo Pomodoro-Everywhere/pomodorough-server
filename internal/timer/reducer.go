@@ -10,6 +10,7 @@ type Command struct {
 	DeviceID          string
 	DeviceSequence    int64
 	TimerID           string
+	TaskID            string
 	Type              string
 	Phase             string
 	PlannedDurationMs int64
@@ -27,6 +28,7 @@ type Intent struct {
 
 type CanonicalTimer struct {
 	ID                string  `json:"id"`
+	TaskID            string  `json:"taskId,omitempty"`
 	Phase             string  `json:"phase"`
 	Status            string  `json:"status"`
 	PlannedDurationMs int64   `json:"plannedDurationMs"`
@@ -38,6 +40,7 @@ type CanonicalTimer struct {
 type HistoryItem struct {
 	ID                string `json:"id"`
 	TimerID           string `json:"timerId"`
+	TaskID            string `json:"taskId,omitempty"`
 	CommandID         string `json:"commandId,omitempty"`
 	Phase             string `json:"phase"`
 	Status            string `json:"status"`
@@ -53,6 +56,7 @@ type Outcome struct {
 
 type Session struct {
 	TimerID             string
+	TaskID              string
 	Phase               string
 	Status              string
 	PlannedDurationMs   int64
@@ -109,6 +113,7 @@ func Reduce(input []Command, now time.Time) Result {
 			}
 			sessions[command.TimerID] = &Session{
 				TimerID:           command.TimerID,
+				TaskID:            command.TaskID,
 				Phase:             command.Phase,
 				Status:            "running",
 				PlannedDurationMs: command.PlannedDurationMs,
@@ -228,6 +233,7 @@ func Reduce(input []Command, now time.Time) Result {
 		item := HistoryItem{
 			ID:                session.TimerID,
 			TimerID:           session.TimerID,
+			TaskID:            session.TaskID,
 			CommandID:         session.TerminalCommandID,
 			Phase:             session.Phase,
 			Status:            session.Status,
@@ -246,6 +252,7 @@ func canonical(session *Session, now time.Time) *CanonicalTimer {
 	elapsed := session.ElapsedAtAnchorMs
 	return &CanonicalTimer{
 		ID:                session.TimerID,
+		TaskID:            session.TaskID,
 		Phase:             session.Phase,
 		Status:            session.Status,
 		PlannedDurationMs: session.PlannedDurationMs,

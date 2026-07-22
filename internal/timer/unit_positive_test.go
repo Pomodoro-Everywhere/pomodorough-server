@@ -196,6 +196,23 @@ func TestClearRemovesCanonicalButPreservesHistory(t *testing.T) {
 	}
 }
 
+func TestTaskAssociationFollowsTimerIntoCanonicalAndHistory(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	start := command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0)
+	start.TaskID = "task-0000001"
+	finish := command("command-b", "device-a", "timer-a", "finish", 2, 200, base.Add(time.Minute), 60_000)
+	finish.TaskID = "task-ignored"
+
+	running := Reduce([]Command{start}, base)
+	if running.Canonical == nil || running.Canonical.TaskID != start.TaskID {
+		t.Fatalf("canonical task = %#v, want %q", running.Canonical, start.TaskID)
+	}
+	finished := Reduce([]Command{start, finish}, base.Add(time.Minute))
+	if len(finished.History) != 1 || finished.History[0].TaskID != start.TaskID {
+		t.Fatalf("history task = %#v, want original start task", finished.History)
+	}
+}
+
 func command(id, deviceID, timerID, commandType string, sequence, wall int64, occurredAt time.Time, observed int64) Command {
 	return Command{
 		ID: id, DeviceID: deviceID, DeviceSequence: sequence, TimerID: timerID, Type: commandType,

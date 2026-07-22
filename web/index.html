@@ -45,6 +45,19 @@
   </div>
 
   <main>
+    <nav class="screen-nav" aria-label="Pomodorough screens">
+      <div role="tablist" aria-label="Workspace">
+        <button id="timerTab" type="button" role="tab" aria-selected="true" aria-controls="timerScreen" data-screen-button="timer">
+          <span>Clock</span>
+          <strong>Timer</strong>
+        </button>
+        <button id="tasksTab" type="button" role="tab" aria-selected="false" aria-controls="tasksScreen" data-screen-button="tasks" tabindex="-1">
+          <span>Board</span>
+          <strong>Tasks</strong>
+        </button>
+      </div>
+    </nav>
+
     <aside id="conflictPanel" class="conflict-panel" hidden>
       <div>
         <strong>Timer continued elsewhere</strong>
@@ -55,7 +68,8 @@
 
     <p id="notice" class="notice" role="alert" hidden></p>
 
-    <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title">
+    <div id="timerScreen" role="tabpanel" aria-labelledby="timerTab">
+      <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title">
       <h1 id="workbench-title" class="visually-hidden">Pomodoro timer</h1>
 
       <article class="timer-machine" aria-describedby="timerInstruction">
@@ -98,6 +112,16 @@
             <small>Choose a mode and duration</small>
           </div>
         </div>
+
+        <label class="task-selector-row" for="taskSelector">
+          <span>
+            <strong>Task on this run</strong>
+            <small>Optional / focus service only</small>
+          </span>
+          <select id="taskSelector">
+            <option value="">No task</option>
+          </select>
+        </label>
 
         <fieldset>
           <legend class="visually-hidden">Choose phase and duration</legend>
@@ -165,19 +189,51 @@
         </label>
 
       </div>
-    </section>
+      </section>
 
-    <section class="history-strip" aria-labelledby="history-title">
-      <header class="history-heading">
+      <section class="history-strip" aria-labelledby="history-title">
+        <header class="history-heading">
+          <div>
+            <span class="history-kicker">Run log / this account</span>
+            <h2 id="history-title">Recent arrivals</h2>
+          </div>
+          <output id="historyCount" class="history-count" aria-label="Completed timer count">000</output>
+        </header>
+        <ol id="historyList" class="history-list">
+          <li class="history-empty">No completed runs yet. Your first finish appears here.</li>
+        </ol>
+      </section>
+    </div>
+
+    <section id="tasksScreen" class="tasks-screen" role="tabpanel" aria-labelledby="tasksTab tasks-title" hidden>
+      <header class="tasks-heading">
         <div>
-          <span class="history-kicker">Run log / this account</span>
-          <h2 id="history-title">Recent arrivals</h2>
+          <span class="history-kicker">Focus manifest / today</span>
+          <h1 id="tasks-title">Task board</h1>
+          <p>Add a task, then assign it before starting a focus run. Recreating the same name restores its history.</p>
         </div>
-        <output id="historyCount" class="history-count" aria-label="Completed timer count">000</output>
+        <output id="taskCount" class="history-count" aria-label="Active task count">00</output>
       </header>
-      <ol id="historyList" class="history-list">
-        <li class="history-empty">No completed runs yet. Your first finish appears here.</li>
-      </ol>
+
+      <form id="taskForm" class="task-form">
+        <label for="taskInput">New task</label>
+        <div>
+          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Write release notes">
+          <button type="submit">Add task</button>
+        </div>
+      </form>
+
+      <div class="task-board" aria-live="polite">
+        <div class="task-board-head" aria-hidden="true">
+          <span>Task</span>
+          <span>Finished pomodoros today</span>
+          <span>Time today spent</span>
+          <span>Action</span>
+        </div>
+        <div id="taskList" class="task-list">
+          <p class="task-empty">No tasks on the board. Add one for your next focus run.</p>
+        </div>
+      </div>
     </section>
   </main>
 

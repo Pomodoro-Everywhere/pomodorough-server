@@ -111,6 +111,26 @@ func TestSyncRejectsReusedDeviceSequenceWithoutMutatingProjection(t *testing.T) 
 	}
 }
 
+func TestSyncRejectsDuplicateDurationIDsWithinBatch(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "sync-duration-duplicate-batch-subject")
+	defer db.Close()
+	operation := DurationOperation{
+		ID: "duration-operation-0001", Phase: "focus", DurationMs: 1_500_000,
+		OccurredAt: now, HLCWallMs: now.UnixMilli(),
+	}
+	_, err := userStore.Sync(ctx, db, userID, SyncRequest{
+		DeviceID: "device-0001", DurationOperations: []DurationOperation{operation, operation},
+	}, now)
+	if err == nil {
+		t.Fatal("Sync accepted duplicate duration operation IDs")
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM duration_operations`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("duration operation count = %d, %v; want 0", count, err)
+	}
+}
+
 func TestAuthenticateRejectsWrongKindAndExpirationBoundaries(t *testing.T) {
 	ctx := context.Background()
 	_, db, userID, now := openTestUser(t, "authentication-boundary-subject")

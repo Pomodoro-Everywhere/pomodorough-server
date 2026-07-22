@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v3";
+const CACHE_NAME = "pomodorough-shell-v7";
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/index.html",
