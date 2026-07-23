@@ -20,6 +20,8 @@ func TestPublicRoutesAndSecurityHeaders(t *testing.T) {
 		path        string
 		contentType string
 	}{
+		{path: "/", contentType: "text/html"},
+		{path: "/index.html", contentType: "text/html"},
 		{path: "/healthz", contentType: "application/json"},
 		{path: "/openapi.yaml", contentType: "application/yaml"},
 	}
@@ -62,12 +64,12 @@ func TestCookieAuthenticationServesProfileAndApplication(t *testing.T) {
 		t.Fatalf("profile response mismatch: %#v", payload)
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/", nil)
+	request = httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/app", nil)
 	addWebAuthentication(request, fixture)
 	response = httptest.NewRecorder()
 	fixture.handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Pomodorough") {
-		t.Fatalf("GET / status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("GET /app status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -1,13 +1,18 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v13";
+const CACHE_NAME = "pomodorough-shell-v17";
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
+  "/",
   "/index.html",
-  "/app.css?v=13",
-  "/sync-core.js?v=13",
-  "/sync-storage.js?v=13",
-  "/app.js?v=13",
+  "/landing.css?v=1",
+  "/platform-selector.js?v=1",
+  "/landing.js?v=1",
+  "/app",
+  "/app.css?v=16",
+  "/sync-core.js?v=16",
+  "/sync-storage.js?v=16",
+  "/app.js?v=16",
   "/manifest.webmanifest",
   "/icon.svg"
 ];
@@ -65,7 +70,14 @@ async function networkFirstNavigation(request) {
   try {
     return await fetch(request);
   } catch (error) {
-    const cached = await caches.match("/index.html");
+    const url = new URL(request.url);
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      const landing = await caches.match(url.pathname);
+      if (landing) return landing;
+      throw error;
+    }
+    if (url.pathname !== "/app" && !url.pathname.startsWith("/app/")) throw error;
+    const cached = await caches.match("/app");
     if (cached) return cached;
     throw error;
   }

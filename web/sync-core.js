@@ -46,9 +46,11 @@
       || (Array.isArray(local.commands) && local.commands.length > 0)
       || (Array.isArray(local.taskOperations) && local.taskOperations.length > 0)
       || (Array.isArray(local.durationOperations) && local.durationOperations.length > 0)
+      || (Array.isArray(local.autoStartOperations) && local.autoStartOperations.length > 0)
       || (Array.isArray(local.tasks) && local.tasks.length > 0)
       || Boolean(local.timer?.id)
       || Boolean(local.timer?.status && local.timer.status !== "idle")
+      || local.autoStartBreaks === true
       || durationsDiffer(local.durationsMs, local.defaultDurationsMs);
   }
 
@@ -158,19 +160,26 @@
 
   function resolutionOperations(strategy, operations) {
     if (!STRATEGIES.has(strategy)) throw new Error(`Unknown bootstrap strategy: ${strategy}`);
+    const includesAutoStart = Object.prototype.hasOwnProperty.call(operations, "autoStartOperations");
     if (strategy === "keep_remote") {
-      return { commands: [], taskOperations: [], durationOperations: [] };
+      const result = { commands: [], taskOperations: [], durationOperations: [] };
+      if (includesAutoStart) result.autoStartOperations = [];
+      return result;
     }
-    return {
-      commands: clone(operations.commands || []),
+    const result = {
+      commands: sendableTimerCommands(operations.commands, Number.POSITIVE_INFINITY),
       taskOperations: clone(operations.taskOperations || []),
       durationOperations: (operations.durationOperations || []).map(durationRequestOperation)
     };
+    if (includesAutoStart) {
+      result.autoStartOperations = (operations.autoStartOperations || []).map(autoStartRequestOperation);
+    }
+    return result;
   }
 
   function buildResolutionPayload(input) {
     const operations = resolutionOperations(input.strategy, input);
-    return {
+    const payload = {
       requestId: input.requestId,
       deviceId: input.deviceId,
       expectedRevision: input.expectedRevision,
@@ -179,26 +188,36 @@
       taskOperations: operations.taskOperations,
       durationOperations: operations.durationOperations
     };
+    if (Object.prototype.hasOwnProperty.call(operations, "autoStartOperations")) {
+      payload.autoStartOperations = operations.autoStartOperations;
+    }
+    return payload;
   }
 
   function queueIds(input) {
     return {
       commands: (input.commands || []).map((item) => item.id),
       taskOperations: (input.taskOperations || []).map((item) => item.id),
-      durationOperations: (input.durationOperations || []).map((item) => item.id)
+      durationOperations: (input.durationOperations || []).map((item) => item.id),
+      autoStartOperations: (input.autoStartOperations || []).map((item) => item.id)
     };
   }
 
   function createPendingResolution(input) {
+    const payload = buildResolutionPayload(input);
+    const queued = queueIds(input);
+    if (input.strategy !== "keep_remote") {
+      queued.commands = payload.commands.map((item) => item.id);
+    }
     return {
       userId: input.userId,
-      payload: buildResolutionPayload(input),
-      queueIds: queueIds(input)
+      payload,
+      queueIds: queued
     };
   }
 
   function resolutionLimitViolation(payload, limit = RESOLUTION_OPERATION_LIMIT) {
-    for (const field of ["commands", "taskOperations", "durationOperations"]) {
+    for (const field of ["commands", "taskOperations", "durationOperations", "autoStartOperations"]) {
       const count = Array.isArray(payload?.[field]) ? payload[field].length : 0;
       if (count > limit) return { field, count, limit };
     }
@@ -216,21 +235,104 @@
     };
   }
 
+  function timerRequestCommand(command) {
+    const result = {
+      id: command.id,
+      deviceSequence: command.deviceSequence,
+      timerId: command.timerId,
+      type: command.type,
+      phase: command.phase,
+      plannedDurationMs: command.plannedDurationMs,
+      occurredAt: command.occurredAt,
+      hlcWallMs: command.hlcWallMs,
+      hlcCounter: command.hlcCounter,
+      observedElapsedMs: command.observedElapsedMs
+    };
+    if (command.taskId) result.taskId = command.taskId;
+    return result;
+  }
+
+  function sendableTimerCommands(commands, limit) {
+    const result = [];
+    const ordered = [...(commands || [])].sort((left, right) =>
+      Number(left.deviceSequence) - Number(right.deviceSequence) || String(left.id).localeCompare(String(right.id))
+    );
+    for (const command of ordered) {
+      if (command.dependsOnCommandId) break;
+      result.push(timerRequestCommand(command));
+      if (result.length === limit) break;
+    }
+    return result;
+  }
+
+  function autoStartRequestOperation(operation) {
+    return {
+      id: operation.id,
+      enabled: operation.enabled,
+      occurredAt: operation.occurredAt,
+      hlcWallMs: operation.hlcWallMs,
+      hlcCounter: operation.hlcCounter
+    };
+  }
+
+  function compareAutoStartOperations(left, right) {
+    return Number(left.hlcWallMs) - Number(right.hlcWallMs)
+      || Number(left.hlcCounter) - Number(right.hlcCounter)
+      || String(left.deviceId || "").localeCompare(String(right.deviceId || ""))
+      || String(left.id).localeCompare(String(right.id));
+  }
+
+  function applyAutoStartOperations(baseAutoStartBreaks, operations) {
+    const ordered = [...(operations || [])].sort(compareAutoStartOperations);
+    return ordered.length ? ordered[ordered.length - 1].enabled === true : baseAutoStartBreaks === true;
+  }
+
   function buildSyncBatch(input, limit = 256) {
     return {
-      commands: clone((input.commands || []).slice(0, limit)),
+      commands: sendableTimerCommands(input.commands, limit),
       taskOperations: clone((input.taskOperations || []).slice(0, limit)),
-      durationOperations: (input.durationOperations || []).slice(0, limit).map(durationRequestOperation)
+      durationOperations: (input.durationOperations || []).slice(0, limit).map(durationRequestOperation),
+      autoStartOperations: (input.autoStartOperations || []).slice(0, limit).map(autoStartRequestOperation)
     };
+  }
+
+  function generatedBreakUpdates(commands, acknowledgements, canonical) {
+    const outcomes = new Map((acknowledgements || []).map((item) => [item.commandId, item.outcome]));
+    const commandsById = new Map((commands || []).map((item) => [item.id, item]));
+    const promoteCommands = [];
+    const dropCommandIds = [];
+    const dropTimerIds = [];
+    for (const command of commands || []) {
+      if (!command.dependsOnCommandId || !outcomes.has(command.dependsOnCommandId)) continue;
+      const source = commandsById.get(command.dependsOnCommandId);
+      const sourceAccepted = outcomes.get(command.dependsOnCommandId) === "applied"
+        && source?.type === "finish"
+        && canonical?.canonicalTimer?.id === source.timerId
+        && canonical.canonicalTimer.status === "completed";
+      if (sourceAccepted) {
+        const promoted = clone(command);
+        delete promoted.dependsOnCommandId;
+        delete promoted.generatedBreak;
+        promoteCommands.push(promoted);
+      } else {
+        dropCommandIds.push(command.id);
+        if (command.generatedBreak === true) dropTimerIds.push(command.timerId);
+      }
+    }
+    return { promoteCommands, dropCommandIds, dropTimerIds };
   }
 
   function exactAcknowledgements(payload, field, sentItems, idField) {
     const acknowledgements = payload[field];
+    if (sentItems === undefined && acknowledgements == null) {
+      return { acknowledgements: [], acknowledgedIds: new Set() };
+    }
     if (!Array.isArray(acknowledgements)) {
       throw new Error(`Sync response omitted ${field}.`);
     }
-    const expectedIds = new Set(sentItems.map((item) => item.id));
-    if (expectedIds.size !== sentItems.length || acknowledgements.length !== expectedIds.size) {
+    const expectedItems = sentItems || [];
+    const expectedIds = new Set(expectedItems.map((item) => item.id));
+    if (expectedIds.size !== expectedItems.length || acknowledgements.length !== expectedIds.size) {
       throw new Error(`Sync response returned an invalid ${field} set.`);
     }
     const acknowledgedIds = new Set();
@@ -249,7 +351,8 @@
     return {
       commands: exactAcknowledgements(payload, "acknowledgements", sent.commands, "commandId"),
       tasks: exactAcknowledgements(payload, "taskAcknowledgements", sent.taskOperations, "operationId"),
-      durations: exactAcknowledgements(payload, "durationAcknowledgements", sent.durationOperations, "operationId")
+      durations: exactAcknowledgements(payload, "durationAcknowledgements", sent.durationOperations, "operationId"),
+      autoStart: exactAcknowledgements(payload, "autoStartAcknowledgements", sent.autoStartOperations, "operationId")
     };
   }
 
@@ -319,6 +422,8 @@
       || !validInteger(timer.plannedDurationMs, 60_000, 14_400_000)
       || !validInteger(timer.elapsedAtAnchorMs, 0, timer.plannedDurationMs)
       || !validDateTime(timer.anchorAt)
+      || timer.startedByDeviceId !== undefined && (typeof timer.startedByDeviceId !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(timer.startedByDeviceId))
       || timer.taskId !== undefined && typeof timer.taskId !== "string") {
       throw new Error("Bootstrap response returned an invalid canonicalTimer.");
     }
@@ -385,6 +490,9 @@
     validateHistory(payload.history);
     validateTasks(payload.tasks);
     validateDurations(payload.durationsMs);
+    if (typeof payload.autoStartBreaks !== "boolean") {
+      throw new Error("Bootstrap response omitted autoStartBreaks.");
+    }
     if (!validDateTime(payload.serverTime)) throw new Error("Bootstrap response omitted serverTime.");
     if (!validInteger(payload.serverHlcWallMs, 1) || !validInteger(payload.serverHlcCounter, 0)) {
       throw new Error("Bootstrap response returned an invalid server HLC.");
@@ -433,7 +541,8 @@
     const pending = (local.commands || []).filter((item) => !validated.commands.acknowledgedIds.has(item.id));
     const pendingTaskOperations = (local.taskOperations || []).filter((item) => !validated.tasks.acknowledgedIds.has(item.id));
     const pendingDurationOperations = (local.durationOperations || []).filter((item) => !validated.durations.acknowledgedIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, validated);
+    const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !validated.autoStart.acknowledgedIds.has(item.id));
+    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated);
   }
 
   function applyResolutionState(local, payload, pendingResolution) {
@@ -442,23 +551,31 @@
     const commandIds = new Set(discarded.commands || []);
     const taskOperationIds = new Set(discarded.taskOperations || []);
     const durationOperationIds = new Set(discarded.durationOperations || []);
+    const autoStartOperationIds = new Set(discarded.autoStartOperations || []);
     const pending = (local.commands || []).filter((item) => !commandIds.has(item.id));
     const pendingTaskOperations = (local.taskOperations || []).filter((item) => !taskOperationIds.has(item.id));
     const pendingDurationOperations = (local.durationOperations || []).filter((item) => !durationOperationIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, validated);
+    const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !autoStartOperationIds.has(item.id));
+    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated);
   }
 
-  function canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, validated) {
+  function canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated) {
     const baseTasks = Array.isArray(payload.tasks) ? clone(payload.tasks) : clone(local.baseTasks || []);
+    const baseAutoStartBreaks = Object.prototype.hasOwnProperty.call(payload, "autoStartBreaks")
+      ? payload.autoStartBreaks
+      : local.baseAutoStartBreaks === true;
     return {
       acknowledgements: validated,
       pending,
       pendingTaskOperations,
       pendingDurationOperations,
+      pendingAutoStartOperations,
       baseTimer: Object.prototype.hasOwnProperty.call(payload, "canonicalTimer") ? clone(payload.canonicalTimer) : clone(local.baseTimer),
       baseHistory: Array.isArray(payload.history) ? clone(payload.history) : clone(local.baseHistory || []),
       baseTasks,
       baseDurationsMs: Object.prototype.hasOwnProperty.call(payload, "durationsMs") ? clone(payload.durationsMs) : clone(local.baseDurationsMs),
+      baseAutoStartBreaks,
+      autoStartBreaks: applyAutoStartOperations(baseAutoStartBreaks, pendingAutoStartOperations),
       tasks: applyTaskOperations(baseTasks, pendingTaskOperations),
       revision: payload.revision ?? local.revision
     };
@@ -466,7 +583,9 @@
 
   return Object.freeze({
     applyResolutionState,
+    applyAutoStartOperations,
     applyTaskOperations,
+    autoStartRequestOperation,
     bootstrapDialogView,
     buildResolutionPayload,
     buildSyncBatch,
@@ -479,6 +598,7 @@
     createPendingResolution,
     decideBootstrap,
     durationRequestOperation,
+    generatedBreakUpdates,
     hasLocalState,
     isResolutionStrategy,
     pendingMatchesUser,
@@ -488,6 +608,8 @@
     requiresBootstrapResolution,
     RESOLUTION_OPERATION_LIMIT,
     resolutionLimitViolation,
+    sendableTimerCommands,
+    timerRequestCommand,
     validateCanonicalResponse,
     validateAcknowledgements
   });

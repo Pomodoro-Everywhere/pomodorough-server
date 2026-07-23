@@ -13,11 +13,12 @@ import (
 )
 
 type SyncRequest struct {
-	DeviceID           string
-	LastRevision       int64
-	Commands           []timer.Command
-	TaskOperations     []task.Operation
-	DurationOperations []DurationOperation
+	DeviceID            string
+	LastRevision        int64
+	Commands            []timer.Command
+	TaskOperations      []task.Operation
+	DurationOperations  []DurationOperation
+	AutoStartOperations []AutoStartOperation
 }
 
 type Acknowledgement struct {
@@ -48,6 +49,21 @@ type DurationAcknowledgement struct {
 	Reason      string `json:"reason"`
 }
 
+type AutoStartOperation struct {
+	ID         string
+	DeviceID   string
+	Enabled    bool
+	OccurredAt time.Time
+	HLCWallMs  int64
+	HLCCounter int64
+}
+
+type AutoStartAcknowledgement struct {
+	OperationID string `json:"operationId"`
+	Outcome     string `json:"outcome"`
+	Reason      string `json:"reason"`
+}
+
 type DurationsMs struct {
 	Focus      int64 `json:"focus"`
 	ShortBreak int64 `json:"short_break"`
@@ -55,18 +71,42 @@ type DurationsMs struct {
 }
 
 type SyncResult struct {
-	Acknowledgements         []Acknowledgement         `json:"acknowledgements"`
-	TaskAcknowledgements     []TaskAcknowledgement     `json:"taskAcknowledgements"`
-	DurationAcknowledgements []DurationAcknowledgement `json:"durationAcknowledgements"`
-	Revision                 int64                     `json:"revision"`
-	CanonicalTimer           *timer.CanonicalTimer     `json:"canonicalTimer"`
-	History                  []timer.HistoryItem       `json:"history"`
-	Tasks                    []task.Task               `json:"tasks"`
-	DurationsMs              DurationsMs               `json:"durationsMs"`
-	ServerTime               string                    `json:"serverTime"`
-	ServerHLCWallMs          int64                     `json:"serverHlcWallMs"`
-	ServerHLCCounter         int64                     `json:"serverHlcCounter"`
-	Changed                  bool                      `json:"-"`
+	Acknowledgements          []Acknowledgement          `json:"acknowledgements"`
+	TaskAcknowledgements      []TaskAcknowledgement      `json:"taskAcknowledgements"`
+	DurationAcknowledgements  []DurationAcknowledgement  `json:"durationAcknowledgements"`
+	AutoStartAcknowledgements []AutoStartAcknowledgement `json:"autoStartAcknowledgements"`
+	Revision                  int64                      `json:"revision"`
+	CanonicalTimer            *timer.CanonicalTimer      `json:"canonicalTimer"`
+	History                   []timer.HistoryItem        `json:"history"`
+	Tasks                     []task.Task                `json:"tasks"`
+	DurationsMs               DurationsMs                `json:"durationsMs"`
+	AutoStartBreaks           bool                       `json:"autoStartBreaks"`
+	ServerTime                string                     `json:"serverTime"`
+	ServerHLCWallMs           int64                      `json:"serverHlcWallMs"`
+	ServerHLCCounter          int64                      `json:"serverHlcCounter"`
+	Changed                   bool                       `json:"-"`
+}
+
+func normalizeSyncResult(result SyncResult) SyncResult {
+	if result.Acknowledgements == nil {
+		result.Acknowledgements = []Acknowledgement{}
+	}
+	if result.TaskAcknowledgements == nil {
+		result.TaskAcknowledgements = []TaskAcknowledgement{}
+	}
+	if result.DurationAcknowledgements == nil {
+		result.DurationAcknowledgements = []DurationAcknowledgement{}
+	}
+	if result.AutoStartAcknowledgements == nil {
+		result.AutoStartAcknowledgements = []AutoStartAcknowledgement{}
+	}
+	if result.History == nil {
+		result.History = []timer.HistoryItem{}
+	}
+	if result.Tasks == nil {
+		result.Tasks = []task.Task{}
+	}
+	return result
 }
 
 func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request SyncRequest, now time.Time) (SyncResult, error) {
@@ -113,10 +153,11 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 }
 
 type operationApplication struct {
-	commandRejections  map[string]timer.Outcome
-	taskRejections     map[string]TaskAcknowledgement
-	durationRejections map[string]DurationAcknowledgement
-	changed            bool
+	commandRejections   map[string]timer.Outcome
+	taskRejections      map[string]TaskAcknowledgement
+	durationRejections  map[string]DurationAcknowledgement
+	autoStartRejections map[string]AutoStartAcknowledgement
+	changed             bool
 }
 
 type accountReduction struct {
@@ -129,6 +170,9 @@ type accountReduction struct {
 	durationOperations        []DurationOperation
 	durations                 DurationsMs
 	winningDurationOperations map[string]struct{}
+	autoStartOperations       []AutoStartOperation
+	autoStartBreaks           bool
+	winningAutoStartOperation string
 }
 
 func validateUniqueOperationIDs(request SyncRequest) error {
@@ -153,14 +197,22 @@ func validateUniqueOperationIDs(request SyncRequest) error {
 		}
 		durationOperationIDs[operation.ID] = struct{}{}
 	}
+	autoStartOperationIDs := make(map[string]struct{}, len(request.AutoStartOperations))
+	for _, operation := range request.AutoStartOperations {
+		if _, duplicate := autoStartOperationIDs[operation.ID]; duplicate {
+			return fmt.Errorf("duplicate auto-start operation id %q", operation.ID)
+		}
+		autoStartOperationIDs[operation.ID] = struct{}{}
+	}
 	return nil
 }
 
 func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (operationApplication, error) {
 	application := operationApplication{
-		commandRejections:  make(map[string]timer.Outcome),
-		taskRejections:     make(map[string]TaskAcknowledgement),
-		durationRejections: make(map[string]DurationAcknowledgement),
+		commandRejections:   make(map[string]timer.Outcome),
+		taskRejections:      make(map[string]TaskAcknowledgement),
+		durationRejections:  make(map[string]DurationAcknowledgement),
+		autoStartRejections: make(map[string]AutoStartAcknowledgement),
 	}
 	for _, command := range request.Commands {
 		existing, err := loadCommand(ctx, tx, command.ID)
@@ -236,6 +288,27 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 		}
 		application.changed = true
 	}
+	for _, operation := range request.AutoStartOperations {
+		existing, err := loadAutoStartOperation(ctx, tx, operation.ID)
+		if err == nil {
+			if !sameAutoStartOperation(existing, operation, request.DeviceID) {
+				application.autoStartRejections[operation.ID] = AutoStartAcknowledgement{
+					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
+				}
+			}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return operationApplication{}, fmt.Errorf("check auto-start operation id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO auto_start_operations(
+			id, device_id, enabled, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.Enabled,
+			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
+			return operationApplication{}, fmt.Errorf("insert auto-start operation: %w", err)
+		}
+		application.changed = true
+	}
 	return application, nil
 }
 
@@ -260,6 +333,11 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 		return accountReduction{}, err
 	}
 	reduction.durations, reduction.winningDurationOperations = reduceDurations(reduction.durationOperations)
+	reduction.autoStartOperations, err = loadAutoStartOperations(ctx, source)
+	if err != nil {
+		return accountReduction{}, err
+	}
+	reduction.autoStartBreaks, reduction.winningAutoStartOperation = reduceAutoStart(reduction.autoStartOperations)
 	return reduction, nil
 }
 
@@ -312,6 +390,9 @@ func resultFromReduction(reduction accountReduction, revision int64, now time.Ti
 	for _, operation := range reduction.durationOperations {
 		observeHLC(operation.HLCWallMs, operation.HLCCounter)
 	}
+	for _, operation := range reduction.autoStartOperations {
+		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+	}
 	if request != nil {
 		for _, command := range request.Commands {
 			observeHLC(command.HLCWallMs, command.HLCCounter)
@@ -322,20 +403,25 @@ func resultFromReduction(reduction accountReduction, revision int64, now time.Ti
 		for _, operation := range request.DurationOperations {
 			observeHLC(operation.HLCWallMs, operation.HLCCounter)
 		}
+		for _, operation := range request.AutoStartOperations {
+			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		}
 	}
-	return SyncResult{
-		Acknowledgements:         []Acknowledgement{},
-		TaskAcknowledgements:     []TaskAcknowledgement{},
-		DurationAcknowledgements: []DurationAcknowledgement{},
-		Revision:                 revision,
-		CanonicalTimer:           reduction.timer.Canonical,
-		History:                  nonNilHistory(reduction.timer.History),
-		Tasks:                    reduction.tasks,
-		DurationsMs:              reduction.durations,
-		ServerTime:               now.UTC().Format(time.RFC3339Nano),
-		ServerHLCWallMs:          serverHLCWallMs,
-		ServerHLCCounter:         serverHLCCounter,
-	}
+	return normalizeSyncResult(SyncResult{
+		Acknowledgements:          []Acknowledgement{},
+		TaskAcknowledgements:      []TaskAcknowledgement{},
+		DurationAcknowledgements:  []DurationAcknowledgement{},
+		AutoStartAcknowledgements: []AutoStartAcknowledgement{},
+		Revision:                  revision,
+		CanonicalTimer:            reduction.timer.Canonical,
+		History:                   nonNilHistory(reduction.timer.History),
+		Tasks:                     reduction.tasks,
+		DurationsMs:               reduction.durations,
+		AutoStartBreaks:           reduction.autoStartBreaks,
+		ServerTime:                now.UTC().Format(time.RFC3339Nano),
+		ServerHLCWallMs:           serverHLCWallMs,
+		ServerHLCCounter:          serverHLCCounter,
+	})
 }
 
 func addAcknowledgements(result *SyncResult, request SyncRequest, application operationApplication, reduction accountReduction) {
@@ -372,6 +458,19 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Reason = ""
 		}
 		result.DurationAcknowledgements = append(result.DurationAcknowledgements, acknowledgement)
+	}
+	result.AutoStartAcknowledgements = make([]AutoStartAcknowledgement, 0, len(request.AutoStartOperations))
+	for _, operation := range request.AutoStartOperations {
+		if acknowledgement, rejected := application.autoStartRejections[operation.ID]; rejected {
+			result.AutoStartAcknowledgements = append(result.AutoStartAcknowledgements, acknowledgement)
+			continue
+		}
+		acknowledgement := AutoStartAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer auto-start operation"}
+		if reduction.winningAutoStartOperation == operation.ID {
+			acknowledgement.Outcome = "applied"
+			acknowledgement.Reason = ""
+		}
+		result.AutoStartAcknowledgements = append(result.AutoStartAcknowledgements, acknowledgement)
 	}
 }
 
@@ -428,6 +527,22 @@ func loadDurationOperation(ctx context.Context, source databaseQueryer, id strin
 	return operation, nil
 }
 
+func loadAutoStartOperation(ctx context.Context, source databaseQueryer, id string) (AutoStartOperation, error) {
+	var operation AutoStartOperation
+	var occurredAt string
+	err := source.QueryRowContext(ctx, `SELECT id, device_id, enabled, occurred_at, hlc_wall_ms, hlc_counter
+		FROM auto_start_operations WHERE id = ?`, id).Scan(&operation.ID, &operation.DeviceID, &operation.Enabled,
+		&occurredAt, &operation.HLCWallMs, &operation.HLCCounter)
+	if err != nil {
+		return AutoStartOperation{}, err
+	}
+	operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return AutoStartOperation{}, fmt.Errorf("parse stored auto-start operation timestamp: %w", err)
+	}
+	return operation, nil
+}
+
 func sameCommand(stored, submitted timer.Command, deviceID string) bool {
 	return stored.DeviceID == deviceID && stored.DeviceSequence == submitted.DeviceSequence && stored.TimerID == submitted.TimerID &&
 		stored.TaskID == submitted.TaskID && stored.Type == submitted.Type && stored.Phase == submitted.Phase &&
@@ -443,6 +558,11 @@ func sameTaskOperation(stored, submitted task.Operation, deviceID string) bool {
 func sameDurationOperation(stored, submitted DurationOperation, deviceID string) bool {
 	return stored.DeviceID == deviceID && stored.Phase == submitted.Phase && stored.DurationMs == submitted.DurationMs &&
 		stored.OccurredAt.Equal(submitted.OccurredAt) && stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
+}
+
+func sameAutoStartOperation(stored, submitted AutoStartOperation, deviceID string) bool {
+	return stored.DeviceID == deviceID && stored.Enabled == submitted.Enabled && stored.OccurredAt.Equal(submitted.OccurredAt) &&
+		stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
 }
 
 func History(ctx context.Context, db *sql.DB, now time.Time) ([]timer.HistoryItem, int64, error) {
@@ -592,6 +712,40 @@ func reduceDurations(operations []DurationOperation) (DurationsMs, map[string]st
 		winners[operationID] = struct{}{}
 	}
 	return durations, winners
+}
+
+func loadAutoStartOperations(ctx context.Context, source queryer) ([]AutoStartOperation, error) {
+	rows, err := source.QueryContext(ctx, `SELECT id, device_id, enabled, occurred_at, hlc_wall_ms, hlc_counter
+		FROM auto_start_operations ORDER BY hlc_wall_ms, hlc_counter, device_id, id`)
+	if err != nil {
+		return nil, fmt.Errorf("read auto-start operations: %w", err)
+	}
+	defer rows.Close()
+	var operations []AutoStartOperation
+	for rows.Next() {
+		var operation AutoStartOperation
+		var occurredAt string
+		if err := rows.Scan(&operation.ID, &operation.DeviceID, &operation.Enabled, &occurredAt, &operation.HLCWallMs, &operation.HLCCounter); err != nil {
+			return nil, fmt.Errorf("scan auto-start operation: %w", err)
+		}
+		operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse stored auto-start operation timestamp: %w", err)
+		}
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate auto-start operations: %w", err)
+	}
+	return operations, nil
+}
+
+func reduceAutoStart(operations []AutoStartOperation) (bool, string) {
+	if len(operations) == 0 {
+		return false, ""
+	}
+	winner := operations[len(operations)-1]
+	return winner.Enabled, winner.ID
 }
 
 func nullString(value string) any {

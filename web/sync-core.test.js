@@ -56,16 +56,28 @@ function durationOperation(id, wall = 1) {
   };
 }
 
+function autoStartOperation(id, enabled, wall = 1, counter = 0) {
+  return {
+    id,
+    enabled,
+    occurredAt: "2026-07-22T12:00:00Z",
+    hlcWallMs: wall,
+    hlcCounter: counter
+  };
+}
+
 function responseFor(sent, overrides = {}) {
   return {
     acknowledgements: sent.commands.map((item) => ({ commandId: item.id, outcome: "applied", reason: "" })),
     taskAcknowledgements: sent.taskOperations.map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
     durationAcknowledgements: sent.durationOperations.map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
+    autoStartAcknowledgements: (sent.autoStartOperations || []).map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
     revision: 9,
     canonicalTimer: null,
     history: [],
     tasks: [],
     durationsMs: defaults,
+    autoStartBreaks: false,
     serverTime: "2026-07-22T12:30:00Z",
     serverHlcWallMs: 1_753_187_400_000,
     serverHlcCounter: 0,
@@ -215,7 +227,8 @@ test("pending resolution preserves exact retry payload and separate discard iden
     strategy: "keep_remote",
     commands: [command("command-1")],
     taskOperations: [taskOperation("task-op-1", "task-1", "One")],
-    durationOperations: [durationOperation("duration-op-1")]
+    durationOperations: [durationOperation("duration-op-1")],
+    autoStartOperations: [autoStartOperation("auto-start-op-1", true)]
   };
   const first = sync.createPendingResolution(input);
   const retry = sync.createPendingResolution(input);
@@ -224,14 +237,17 @@ test("pending resolution preserves exact retry payload and separate discard iden
   assert.deepEqual(first.payload.commands, []);
   assert.deepEqual(first.payload.taskOperations, []);
   assert.deepEqual(first.payload.durationOperations, []);
+  assert.deepEqual(first.payload.autoStartOperations, []);
   assert.deepEqual(first.queueIds, {
     commands: ["command-1"],
     taskOperations: ["task-op-1"],
-    durationOperations: ["duration-op-1"]
+    durationOperations: ["duration-op-1"],
+    autoStartOperations: ["auto-start-op-1"]
   });
   assert.ok(Array.isArray(first.payload.commands));
   assert.ok(Array.isArray(first.payload.taskOperations));
   assert.ok(Array.isArray(first.payload.durationOperations));
+  assert.ok(Array.isArray(first.payload.autoStartOperations));
 });
 
 test("bootstrap submission requires current owner and defined strategy", () => {
@@ -252,13 +268,13 @@ test("bootstrap submission requires current owner and defined strategy", () => {
 });
 
 test("bootstrap resolution limit accepts 4096 and rejects 4097 for every collection", () => {
-  const fields = ["commands", "taskOperations", "durationOperations"];
+  const fields = ["commands", "taskOperations", "durationOperations", "autoStartOperations"];
   for (const field of fields) {
-    const exact = { commands: [], taskOperations: [], durationOperations: [] };
+    const exact = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] };
     exact[field] = new Array(4096);
     assert.equal(sync.resolutionLimitViolation(exact), null);
 
-    const overflow = { commands: [], taskOperations: [], durationOperations: [] };
+    const overflow = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] };
     overflow[field] = new Array(4097);
     assert.deepEqual(sync.resolutionLimitViolation(overflow), { field, count: 4097, limit: 4096 });
   }
@@ -362,14 +378,19 @@ test("canonical bootstrap response requires every projection and server clock fi
       status: "paused",
       plannedDurationMs: 1_500_000,
       elapsedAtAnchorMs: 60_000,
-      anchorAt: "2026-07-22T12:01:00Z"
+      anchorAt: "2026-07-22T12:01:00Z",
+      startedByDeviceId: "device-1"
     },
     history: [history("history-1")],
     tasks: [{ id: "task-1", title: "One" }]
   });
   assert.doesNotThrow(() => sync.validateCanonicalResponse(valid, sent));
 
-  for (const field of ["revision", "canonicalTimer", "history", "tasks", "durationsMs", "serverTime", "serverHlcWallMs", "serverHlcCounter"]) {
+  const invalidOrigin = structuredClone(valid);
+  invalidOrigin.canonicalTimer.startedByDeviceId = "short";
+  assert.throws(() => sync.validateCanonicalResponse(invalidOrigin, sent), /canonicalTimer/);
+
+  for (const field of ["revision", "canonicalTimer", "history", "tasks", "durationsMs", "autoStartBreaks", "serverTime", "serverHlcWallMs", "serverHlcCounter"]) {
     const invalid = structuredClone(valid);
     delete invalid[field];
     assert.throws(() => sync.validateCanonicalResponse(invalid, sent), /Bootstrap response/);
@@ -518,4 +539,191 @@ test("rebase removes every acknowledged outcome while preserving unsent mixed wo
   assert.deepEqual(rebased.pendingTaskOperations, later.taskOperations);
   assert.deepEqual(rebased.pendingDurationOperations, later.durationOperations);
   assert.deepEqual(rebased.tasks, [{ id: "task-later", title: "Later" }]);
+});
+
+test("auto-start true and false operations use exact wire shape and 256-item batches", () => {
+  const operations = Array.from({ length: 257 }, (_, index) =>
+    autoStartOperation(`auto-start-${index}`, index % 2 === 0, index + 1)
+  );
+  operations[0].ownerId = "local-only";
+  operations[0].deviceId = "top-level-device-only";
+
+  const first = sync.buildSyncBatch({ autoStartOperations: operations });
+  const second = sync.buildSyncBatch({ autoStartOperations: operations.slice(256) });
+
+  assert.equal(first.autoStartOperations.length, 256);
+  assert.equal(second.autoStartOperations.length, 1);
+  assert.equal(first.autoStartOperations[0].enabled, true);
+  assert.equal(first.autoStartOperations[1].enabled, false);
+  assert.deepEqual(Object.keys(first.autoStartOperations[0]), [
+    "id", "enabled", "occurredAt", "hlcWallMs", "hlcCounter"
+  ]);
+});
+
+test("auto-start acknowledgements reject missing extra duplicate and malformed sets without mutation", () => {
+  const operation = autoStartOperation("auto-start-sent", true);
+  const sent = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [operation] };
+  const local = {
+    commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [operation],
+    baseTasks: [], baseHistory: [], baseDurationsMs: defaults, baseAutoStartBreaks: false, revision: 0
+  };
+  const invalidSets = [
+    undefined,
+    [],
+    [
+      { operationId: operation.id, outcome: "applied", reason: "" },
+      { operationId: "auto-start-extra", outcome: "applied", reason: "" }
+    ],
+    [
+      { operationId: operation.id, outcome: "applied", reason: "" },
+      { operationId: operation.id, outcome: "applied", reason: "" }
+    ],
+    [{ operationId: operation.id, outcome: "unknown", reason: "" }],
+    [{ operationId: operation.id, outcome: "applied" }]
+  ];
+
+  for (const acknowledgements of invalidSets) {
+    const response = responseFor(sent);
+    if (acknowledgements === undefined) delete response.autoStartAcknowledgements;
+    else response.autoStartAcknowledgements = acknowledgements;
+    const before = structuredClone(local);
+    assert.throws(() => sync.rebaseSyncState(local, response, sent), /autoStartAcknowledgements/);
+    assert.deepEqual(local, before);
+  }
+});
+
+test("canonical auto-start converges remotely while newer in-flight local intent stays projected", () => {
+  const sentOperation = autoStartOperation("auto-start-sent", true, 1);
+  const newerOperation = autoStartOperation("auto-start-newer", false, 2);
+  const sent = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [sentOperation] };
+  const response = responseFor(sent, { autoStartBreaks: true });
+  const rebased = sync.rebaseSyncState({
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [sentOperation, newerOperation],
+    baseTasks: [],
+    baseHistory: [],
+    baseDurationsMs: defaults,
+    baseAutoStartBreaks: false,
+    revision: 0
+  }, response, sent);
+
+  assert.equal(rebased.baseAutoStartBreaks, true);
+  assert.equal(rebased.autoStartBreaks, false);
+  assert.deepEqual(rebased.pendingAutoStartOperations, [newerOperation]);
+
+  const empty = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] };
+  const remoteOnly = sync.rebaseSyncState({
+    ...empty,
+    baseTasks: [],
+    baseHistory: [],
+    baseDurationsMs: defaults,
+    baseAutoStartBreaks: false,
+    revision: 0
+  }, responseFor(empty, { autoStartBreaks: true }), empty);
+  assert.equal(remoteOnly.autoStartBreaks, true);
+});
+
+test("bootstrap auto-start preserves absent, explicit-empty, and exact saved payload semantics", () => {
+  const operation = autoStartOperation("auto-start-local", true, 7);
+  const input = {
+    userId: "user-1",
+    requestId: "request-auto-start",
+    deviceId: "device-1",
+    expectedRevision: 3,
+    strategy: "replace_remote",
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [operation]
+  };
+  const pending = sync.createPendingResolution(input);
+
+  assert.equal(Object.hasOwn(pending.payload, "autoStartOperations"), true);
+  assert.deepEqual(pending.payload.autoStartOperations, [operation]);
+  assert.equal(JSON.stringify(sync.createPendingResolution(input).payload), JSON.stringify(pending.payload));
+
+  const explicitDefault = sync.buildResolutionPayload({ ...input, autoStartOperations: [] });
+  const keepRemote = sync.buildResolutionPayload({ ...input, strategy: "keep_remote" });
+  const omitted = sync.buildResolutionPayload({
+    userId: "user-1",
+    requestId: "request-auto-start-omitted",
+    deviceId: "device-1",
+    expectedRevision: 3,
+    strategy: "replace_remote",
+    commands: [],
+    taskOperations: [],
+    durationOperations: []
+  });
+  assert.deepEqual(explicitDefault.autoStartOperations, []);
+  assert.deepEqual(keepRemote.autoStartOperations, []);
+  assert.equal(Object.hasOwn(omitted, "autoStartOperations"), false);
+});
+
+test("legacy bootstrap response accepts null auto-start acknowledgements only for omitted request field", () => {
+  const sent = {
+    commands: [],
+    taskOperations: [],
+    durationOperations: []
+  };
+  const legacyReplay = responseFor(sent);
+  legacyReplay.autoStartAcknowledgements = null;
+  assert.doesNotThrow(() => sync.validateCanonicalResponse(legacyReplay, sent));
+
+  assert.throws(() => sync.validateCanonicalResponse(legacyReplay, {
+    ...sent,
+    autoStartOperations: []
+  }), /autoStartAcknowledgements/);
+});
+
+test("generated break waits for applied finish while later independent start remains local", () => {
+  const finish = { ...command("finish-source", 1), type: "finish", timerId: "focus-source" };
+  const generated = {
+    ...command("generated-break", 2),
+    timerId: "break-generated",
+    phase: "short_break",
+    dependsOnCommandId: finish.id,
+    generatedBreak: true
+  };
+  const independent = { ...command("independent-start", 3), timerId: "independent-timer" };
+  const commands = [finish, generated, independent];
+
+  const sent = sync.buildSyncBatch({ commands });
+  assert.deepEqual(sent.commands.map((item) => item.id), [finish.id]);
+  assert.equal(Object.hasOwn(sent.commands[0], "dependsOnCommandId"), false);
+  const resolution = sync.createPendingResolution({
+    userId: "user-1",
+    requestId: "request-generated-break",
+    deviceId: "device-1",
+    expectedRevision: 0,
+    strategy: "merge",
+    commands,
+    taskOperations: [],
+    durationOperations: []
+  });
+  assert.deepEqual(resolution.payload.commands.map((item) => item.id), [finish.id]);
+  assert.deepEqual(resolution.queueIds.commands, [finish.id]);
+
+  const applied = sync.generatedBreakUpdates(commands, [
+    { commandId: finish.id, outcome: "applied", reason: "" }
+  ], { canonicalTimer: { id: finish.timerId, status: "completed" } });
+  assert.deepEqual(applied.promoteCommands.map((item) => item.id), [generated.id]);
+  assert.equal(Object.hasOwn(applied.promoteCommands[0], "dependsOnCommandId"), false);
+  assert.deepEqual(applied.dropCommandIds, []);
+
+  const ignored = sync.generatedBreakUpdates(commands, [
+    { commandId: finish.id, outcome: "ignored", reason: "superseded" }
+  ], { canonicalTimer: { id: "remote-newer", status: "running" } });
+  assert.deepEqual(ignored, {
+    promoteCommands: [],
+    dropCommandIds: [generated.id],
+    dropTimerIds: [generated.timerId]
+  });
+  assert.equal(ignored.dropCommandIds.includes(independent.id), false);
+
+  const supersededAfterApply = sync.generatedBreakUpdates(commands, [
+    { commandId: finish.id, outcome: "applied", reason: "" }
+  ], { canonicalTimer: { id: "remote-newer", status: "running" } });
+  assert.deepEqual(supersededAfterApply.dropCommandIds, [generated.id]);
 });

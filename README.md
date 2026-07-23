@@ -15,14 +15,14 @@
 </p>
 
 Pomodorough is a local-first Pomodoro timer designed to keep timer state, tasks,
-history, and duration preferences consistent across platforms. One Go process
+history, duration preferences, and automatic break-start preference consistent across platforms. One Go process
 serves the progressive web app and JSON API. Each account is isolated in its
 own SQLite database, so the service requires neither PostgreSQL nor Redis.
 
 ## Highlights
 
 - Durable offline operation in the PWA through IndexedDB-backed queues
-- Idempotent synchronization of timer commands, task operations, and durations
+- Idempotent synchronization of timer commands, task operations, durations, and automatic break-start preference
 - Deterministic conflict resolution with hybrid logical clocks
 - Canonical server projections with optimistic replay on every client
 - Per-account SQLite databases using WAL mode and foreign-key enforcement
@@ -37,7 +37,7 @@ own SQLite database, so the service requires neither PostgreSQL nor Redis.
 | --- | --- |
 | Go HTTP service | Authentication, synchronization, revision streaming, and static delivery |
 | Progressive web app | Offline-capable browser UI and durable IndexedDB operation queues |
-| Per-user SQLite store | Commands, outcomes, tasks, durations, sessions, and canonical account state |
+| Per-user SQLite store | Commands, outcomes, tasks, preferences, sessions, and canonical account state |
 | Revision hub | Lightweight SSE notifications that tell connected clients when to synchronize |
 
 The revision stream is an optimization, not a second source of truth. Clients
@@ -117,7 +117,56 @@ go vet ./...
 ```
 
 Tests cover authentication boundaries, migrations, timer and task reduction,
-duration synchronization, idempotency, conflict handling, and HTTP contracts.
+preference synchronization, idempotency, conflict handling, and HTTP contracts.
+Real-listener tests use four logical protocol clients named `pwa`, `ios`,
+`linux`, and `android`; they do not execute native application code.
+
+### Integration user provisioning
+
+Operator-only integration provisioning creates a synthetic
+`https://integration.invalid` profile and separate ordinary native sessions for
+each logical client. It does not add an HTTP authentication bypass, use a Google
+identity, emit fixed tokens, or print `APP_SECRET`.
+
+Use a dedicated, manually owned integration server data directory and exact app
+secret configured for that server. All inputs are mandatory; no production
+data-directory or identity defaults exist. Access tokens use normal 15-minute
+expiration, capped by shorter requested TTL; refresh tokens and sessions use
+requested TTL.
+
+Build server and provisioning CLI from same checkout, then use strict
+stop -> provision -> start order with unchanged server binary:
+
+```sh
+umask 077
+export POMODOROUGH_INTEGRATION_DATA_DIR="$(mktemp -d)"
+export POMODOROUGH_INTEGRATION_APP_SECRET="$(openssl rand -hex 32)"
+export POMODOROUGH_INTEGRATION_SUBJECT="integration-protocol-001"
+export POMODOROUGH_INTEGRATION_DEVICES="pwa=device-pwa:web,ios=device-ios:ios,linux=device-linux:linux,android=device-android:android"
+export POMODOROUGH_INTEGRATION_TTL="2h"
+go build -o /tmp/pomodorough ./cmd/pomodorough
+go build -tags=integration -o /tmp/pomodorough-integration-user ./cmd/pomodorough-integration-user
+# Stop dedicated integration server if already started.
+/tmp/pomodorough-integration-user > integration-credentials.json
+# Start dedicated integration server with /tmp/pomodorough and matching DATA_DIR/APP_SECRET.
+```
+
+`-data-dir`, `-app-secret`, `-subject`, `-devices`, and `-ttl` flags may replace
+their corresponding environment variables. Prefer the environment for the app
+secret to keep it out of process listings and shell history.
+
+CLI and server take same exclusive data-directory lock. CLI marks only an empty
+directory as dedicated integration data, refuses existing unmarked account
+databases, and checks every existing user database already has current schema;
+it never migrates existing databases. Lock or schema mismatch is fatal.
+
+Run CLI as same operating-system account that owns dedicated integration
+directory. Do not run it as root and do not point it at hardened production
+`StateDirectory=pomodorough`: production service uses systemd `DynamicUser`, and
+manual writes can break ownership while creating real credentials. Output
+contains live access and refresh tokens. Keep it out of logs and version
+control, protect it with restrictive permissions, and delete it when testing
+ends. No HTTP authentication bypass exists.
 
 ## Production deployment
 
@@ -158,9 +207,9 @@ and response contracts.
 ## Pomodorough projects
 
 - [`pomodorough-server`](https://github.com/Pomodoro-Everywhere/pomodorough-server) - Web/PWA + sync server
-- [`pomodorough-ios`](https://github.com/Pomodoro-Everywhere/pomodorough-ios) - iOS client
+- [`pomodorough-apple`](https://github.com/Pomodoro-Everywhere/pomodorough-apple) - Apple client
 - [`pomodorough-android`](https://github.com/Pomodoro-Everywhere/pomodorough-android) - Android client
-- [`pomodorough-linux`](https://github.com/Pomodoro-Everywhere/pomodorough-linux) - Linux client
+- [`pomodorough-desktop`](https://github.com/Pomodoro-Everywhere/pomodorough-desktop) - Linux and Windows desktop client
 
 ## License
 

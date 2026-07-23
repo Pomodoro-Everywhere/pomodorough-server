@@ -45,8 +45,20 @@ type AuthInfo struct {
 	CSRFHash  []byte
 }
 
+type SessionTokens struct {
+	Session Session
+	Tokens  []TokenRecord
+}
+
 func UpsertProfile(ctx context.Context, db *sql.DB, profile Profile, now time.Time) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO profile(
+	if err := upsertProfile(ctx, db, profile, now); err != nil {
+		return fmt.Errorf("upsert profile: %w", err)
+	}
+	return nil
+}
+
+func upsertProfile(ctx context.Context, target contextExecer, profile Profile, now time.Time) error {
+	_, err := target.ExecContext(ctx, `INSERT INTO profile(
 		singleton, user_id, issuer, subject, email, email_verified, name, avatar_url, updated_at_ms
 	) VALUES (1, ?, ?, ?, ?, 1, ?, ?, ?)
 	ON CONFLICT(singleton) DO UPDATE SET
@@ -59,10 +71,7 @@ func UpsertProfile(ctx context.Context, db *sql.DB, profile Profile, now time.Ti
 		avatar_url = excluded.avatar_url,
 		updated_at_ms = excluded.updated_at_ms`,
 		profile.ID, profile.Issuer, profile.Subject, profile.Email, profile.Name, profile.AvatarURL, now.UnixMilli())
-	if err != nil {
-		return fmt.Errorf("upsert profile: %w", err)
-	}
-	return nil
+	return err
 }
 
 func ProfileByID(ctx context.Context, db *sql.DB) (Profile, error) {
@@ -85,8 +94,50 @@ func CreateSession(ctx context.Context, db *sql.DB, session Session, tokens []To
 		return fmt.Errorf("begin session: %w", err)
 	}
 	defer tx.Rollback()
+	if err := insertSession(ctx, tx, session, tokens); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session: %w", err)
+	}
+	return nil
+}
+
+func ProvisionProfileAndSessions(ctx context.Context, db *sql.DB, profile Profile, now time.Time, sessions []SessionTokens) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin account provisioning: %w", err)
+	}
+	defer tx.Rollback()
+	if err := upsertProfile(ctx, tx, profile, now); err != nil {
+		return fmt.Errorf("provision profile: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_tokens SET revoked_at_ms = COALESCE(revoked_at_ms, ?)
+		WHERE session_id IN (SELECT id FROM auth_sessions WHERE kind = 'native')`, now.UnixMilli()); err != nil {
+		return fmt.Errorf("revoke replaced native session tokens: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?)
+		WHERE kind = 'native'`, now.UnixMilli()); err != nil {
+		return fmt.Errorf("revoke replaced native sessions: %w", err)
+	}
+	for _, entry := range sessions {
+		if err := insertSession(ctx, tx, entry.Session, entry.Tokens); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account provisioning: %w", err)
+	}
+	return nil
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertSession(ctx context.Context, target contextExecer, session Session, tokens []TokenRecord) error {
 	if session.DeviceID != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO devices(id, platform, created_at_ms, last_seen_at_ms, revoked_at_ms)
+		if _, err := target.ExecContext(ctx, `INSERT INTO devices(id, platform, created_at_ms, last_seen_at_ms, revoked_at_ms)
 			VALUES (?, ?, ?, ?, NULL)
 			ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, last_seen_at_ms = excluded.last_seen_at_ms, revoked_at_ms = NULL`,
 			session.DeviceID, session.Platform, session.CreatedAt.UnixMilli(), session.CreatedAt.UnixMilli()); err != nil {
@@ -101,19 +152,16 @@ func CreateSession(ctx context.Context, db *sql.DB, session Session, tokens []To
 	if len(session.CSRFHash) != 0 {
 		csrfHash = session.CSRFHash
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_sessions(
+	if _, err := target.ExecContext(ctx, `INSERT INTO auth_sessions(
 		id, kind, device_id, platform, csrf_hash, created_at_ms, expires_at_ms, revoked_at_ms, reuse_detected_at_ms
 	) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`, session.ID, session.Kind, deviceID, session.Platform, csrfHash, session.CreatedAt.UnixMilli(), session.ExpiresAt.UnixMilli()); err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
 	for _, token := range tokens {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO auth_tokens(token_hash, session_id, kind, created_at_ms, expires_at_ms, used_at_ms, revoked_at_ms)
+		if _, err := target.ExecContext(ctx, `INSERT INTO auth_tokens(token_hash, session_id, kind, created_at_ms, expires_at_ms, used_at_ms, revoked_at_ms)
 			VALUES (?, ?, ?, ?, ?, NULL, NULL)`, token.Hash[:], session.ID, token.Kind, token.CreatedAt.UnixMilli(), token.ExpiresAt.UnixMilli()); err != nil {
 			return fmt.Errorf("insert auth token: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit session: %w", err)
 	}
 	return nil
 }

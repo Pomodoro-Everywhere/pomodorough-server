@@ -42,7 +42,10 @@ func newServerFixture(t *testing.T) serverFixture {
 	if err := os.WriteFile(filepath.Join(webRoot, "openapi.yaml"), []byte("openapi: 3.0.3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(webRoot, "index.html"), []byte("<!doctype html><title>Pomodorough</title>"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(webRoot, "index.html"), []byte("<!doctype html><title>Pomodorough landing</title>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(webRoot, "app.html"), []byte("<!doctype html><title>Pomodorough application</title>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Config{

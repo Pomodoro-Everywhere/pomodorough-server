@@ -409,12 +409,15 @@ func TestSyncReturnsFutureAccountHLCForNextClientEdit(t *testing.T) {
 			ID: "duration-operation-remote", Phase: "focus", DurationMs: 1_200_000,
 			OccurredAt: now, HLCWallMs: remoteWallMs, HLCCounter: 6,
 		}},
+		AutoStartOperations: []AutoStartOperation{{
+			ID: "auto-start-operation-remote", Enabled: true, OccurredAt: now, HLCWallMs: remoteWallMs, HLCCounter: 8,
+		}},
 	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ServerHLCWallMs != remoteWallMs || first.ServerHLCCounter != 7 {
-		t.Fatalf("server HLC = (%d,%d), want (%d,7)", first.ServerHLCWallMs, first.ServerHLCCounter, remoteWallMs)
+	if first.ServerHLCWallMs != remoteWallMs || first.ServerHLCCounter != 8 {
+		t.Fatalf("server HLC = (%d,%d), want (%d,8)", first.ServerHLCWallMs, first.ServerHLCCounter, remoteWallMs)
 	}
 
 	second, err := userStore.Sync(ctx, db, userID, SyncRequest{

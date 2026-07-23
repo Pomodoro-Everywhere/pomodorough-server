@@ -34,6 +34,7 @@ type CanonicalTimer struct {
 	PlannedDurationMs int64   `json:"plannedDurationMs"`
 	ElapsedAtAnchorMs int64   `json:"elapsedAtAnchorMs"`
 	AnchorAt          string  `json:"anchorAt"`
+	StartedByDeviceID string  `json:"startedByDeviceId,omitempty"`
 	LastIntent        *Intent `json:"lastIntent,omitempty"`
 }
 
@@ -63,6 +64,7 @@ type Session struct {
 	ElapsedAtAnchorMs   int64
 	AnchorAt            time.Time
 	StartedAt           time.Time
+	StartedByDeviceID   string
 	EndedAt             time.Time
 	LastCommandID       string
 	TerminalCommandID   string
@@ -120,6 +122,7 @@ func Reduce(input []Command, now time.Time) Result {
 				ElapsedAtAnchorMs: 0,
 				AnchorAt:          command.OccurredAt,
 				StartedAt:         command.OccurredAt,
+				StartedByDeviceID: command.DeviceID,
 				LastCommandID:     command.ID,
 				LastIntent:        intent,
 			}
@@ -258,6 +261,7 @@ func canonical(session *Session, now time.Time) *CanonicalTimer {
 		PlannedDurationMs: session.PlannedDurationMs,
 		ElapsedAtAnchorMs: clamp(elapsed, 0, session.PlannedDurationMs),
 		AnchorAt:          formatTime(session.AnchorAt),
+		StartedByDeviceID: session.StartedByDeviceID,
 		LastIntent:        session.LastIntent,
 	}
 }

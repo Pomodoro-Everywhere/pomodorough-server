@@ -28,16 +28,6 @@ func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.authenticateWeb(r)
-	if err != nil {
-		returnTo := r.URL.RequestURI()
-		if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-			returnTo = "/"
-		}
-		http.Redirect(w, r, "/auth/google/start?return="+url.QueryEscape(returnTo), http.StatusFound)
-		return
-	}
-	_ = identity
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -45,24 +35,43 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestPath := path.Clean("/" + r.URL.Path)
-	relative := strings.TrimPrefix(requestPath, "/")
-	if relative == "" || strings.HasSuffix(r.URL.Path, "/") {
-		relative = "index.html"
-	}
-	file, info, err := s.openWebFile(relative)
-	if err != nil {
-		acceptsHTML := strings.Contains(r.Header.Get("Accept"), "text/html") || path.Ext(relative) == ""
-		if !acceptsHTML {
-			http.NotFound(w, r)
+	relative, public := publicWebFile(requestPath)
+	entrypoint := relative == "index.html"
+	if !public {
+		if _, err := s.authenticateWeb(r); err != nil {
+			returnTo := r.URL.RequestURI()
+			if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+				returnTo = "/app"
+			}
+			http.Redirect(w, r, "/auth/google/start?return="+url.QueryEscape(returnTo), http.StatusFound)
 			return
 		}
-		file, info, err = s.openWebFile("index.html")
+		if requestPath == "/app" {
+			relative = "app.html"
+			entrypoint = true
+		} else {
+			relative = strings.TrimPrefix(requestPath, "/")
+		}
+	}
+
+	file, info, err := s.openWebFile(relative)
+	if err != nil && !public && strings.HasPrefix(requestPath, "/app/") && path.Ext(relative) == "" {
+		file, info, err = s.openWebFile("app.html")
 		if err != nil {
 			s.logger.Error("open SPA entrypoint", "error", err)
 			http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		relative = "index.html"
+		relative = "app.html"
+		entrypoint = true
+	} else if err != nil {
+		if entrypoint {
+			s.logger.Error("open web entrypoint", "path", relative, "error", err)
+			http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.NotFound(w, r)
+		return
 	}
 	defer file.Close()
 
@@ -74,7 +83,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	base := filepath.Base(relative)
 	switch {
-	case relative == "index.html":
+	case relative == "index.html" || relative == "app.html":
 		w.Header().Set("Cache-Control", "no-store")
 	case base == "sw.js" || base == "manifest.webmanifest":
 		w.Header().Set("Cache-Control", "no-cache")
@@ -84,6 +93,23 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 	}
 	http.ServeContent(w, r, base, info.ModTime(), file)
+}
+
+func publicWebFile(requestPath string) (string, bool) {
+	switch requestPath {
+	case "/", "/index.html":
+		return "index.html", true
+	case "/landing.css":
+		return "landing.css", true
+	case "/platform-selector.js":
+		return "platform-selector.js", true
+	case "/landing.js":
+		return "landing.js", true
+	case "/icon.svg":
+		return "icon.svg", true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) authenticateWeb(r *http.Request) (principal, error) {

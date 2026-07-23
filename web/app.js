@@ -2,19 +2,22 @@
   "use strict";
 
   const DB_NAME = "pomodorough";
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const syncCore = globalThis.PomodoroughSync;
   const syncStorage = globalThis.PomodoroughStorage;
   const META_STORE = "meta";
   const PENDING_STORE = "pending";
   const TASK_PENDING_STORE = "pendingTasks";
   const DURATION_PENDING_STORE = "pendingDurations";
-  const TAB_ID = crypto.randomUUID();
+  const AUTO_START_PENDING_STORE = "pendingAutoStarts";
+  const TAB_ID = tabID();
   const CACHE_PREFIX = "pomodorough-shell-";
   const DIAL_RADIUS = 108;
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const RETRY_MAX_MS = 60000;
   const BOOTSTRAP_LEASE_MS = 5 * 60_000;
+  const TIMER_OWNER_LEASE_MS = 60_000;
+  const TIMER_OWNER_HEARTBEAT_MS = 15_000;
   const PHASES = {
     focus: { label: "Focus", short: "F", defaultMinutes: 25 },
     short_break: { label: "Short break", short: "SB", defaultMinutes: 5 },
@@ -26,6 +29,18 @@
     long_break: 900_000
   };
   const ACK_SUCCESS = new Set(["accepted", "acknowledged", "applied", "duplicate", "ok"]);
+
+  function tabID() {
+    try {
+      const existing = sessionStorage.getItem("pomodoroughTabId");
+      if (existing) return existing;
+      const created = crypto.randomUUID();
+      sessionStorage.setItem("pomodoroughTabId", created);
+      return created;
+    } catch {
+      return crypto.randomUUID();
+    }
+  }
 
   const elements = {
     installButton: document.querySelector("#installButton"),
@@ -92,6 +107,7 @@
   let installPrompt = null;
   let actionLocked = false;
   let completionQueuedFor = null;
+  let completionRetryTimer = null;
   let noticeTimer = null;
   let redirecting = false;
   let inFlightDurationOperationIds = new Set();
@@ -112,6 +128,7 @@
     activeScreen: "timer",
     selectedPhase: "focus",
     selectedTaskId: null,
+    baseAutoStartBreaks: false,
     autoStartBreaks: false,
     baseDurationsMs: clone(DEFAULT_DURATIONS_MS),
     durationsMs: clone(DEFAULT_DURATIONS_MS),
@@ -124,7 +141,9 @@
     pending: [],
     pendingTaskOperations: [],
     pendingDurationOperations: [],
+    pendingAutoStartOperations: [],
     durationSyncBootstrapped: false,
+    autoStartSyncBootstrapped: false,
     syncing: false,
     retrying: false,
     conflict: null,
@@ -153,7 +172,8 @@
       elapsedAtAnchorMs: 0,
       anchorAt: null,
       lastIntent: null,
-      taskId: null
+      taskId: null,
+      dependsOnCommandId: null
     };
   }
 
@@ -187,7 +207,8 @@
       elapsedAtAnchorMs: clampNumber(timer.elapsedAtAnchorMs, 0, plannedDurationMs),
       anchorAt: timer.anchorAt || null,
       lastIntent: timer.lastIntent || null,
-      taskId: timer.taskId || null
+      taskId: timer.taskId || null,
+      dependsOnCommandId: timer.dependsOnCommandId || null
     };
   }
 
@@ -275,7 +296,8 @@
             elapsedAtAnchorMs: 0,
             anchorAt: command.occurredAt,
             lastIntent: intent,
-            taskId: command.taskId || null
+            taskId: command.taskId || null,
+            dependsOnCommandId: command.dependsOnCommandId || null
           },
           history: nextHistory
         };
@@ -350,6 +372,7 @@
 
   function rebuildOptimisticState() {
     rebuildOptimisticDurations();
+    rebuildOptimisticAutoStart();
     let timer = normalizeTimer(state.baseTimer);
     let history = clone(state.baseHistory || []);
 
@@ -369,6 +392,13 @@
     const operations = [...state.pendingDurationOperations].sort(compareDurationOperations);
     for (const operation of operations) durationsMs[operation.phase] = operation.durationMs;
     state.durationsMs = durationsMs;
+  }
+
+  function rebuildOptimisticAutoStart() {
+    state.autoStartBreaks = syncCore.applyAutoStartOperations(
+      state.baseAutoStartBreaks,
+      state.pendingAutoStartOperations
+    );
   }
 
   function rebuildOptimisticTasks() {
@@ -391,6 +421,7 @@
       revision: state.revision,
       selectedPhase: state.selectedPhase,
       selectedTaskId: state.selectedTaskId,
+      baseAutoStartBreaks: state.baseAutoStartBreaks,
       autoStartBreaks: state.autoStartBreaks,
       baseDurationsMs: clone(state.baseDurationsMs),
       durationsMs: clone(state.durationsMs),
@@ -403,6 +434,7 @@
       pending: clone(state.pending),
       pendingTaskOperations: clone(state.pendingTaskOperations),
       pendingDurationOperations: clone(state.pendingDurationOperations),
+      pendingAutoStartOperations: clone(state.pendingAutoStartOperations),
       user: clone(state.user)
     };
   }
@@ -411,6 +443,7 @@
     state.revision = 0;
     state.selectedPhase = "focus";
     state.selectedTaskId = null;
+    state.baseAutoStartBreaks = false;
     state.autoStartBreaks = false;
     state.baseDurationsMs = clone(DEFAULT_DURATIONS_MS);
     state.durationsMs = clone(DEFAULT_DURATIONS_MS);
@@ -423,6 +456,7 @@
     state.pending = [];
     state.pendingTaskOperations = [];
     state.pendingDurationOperations = [];
+    state.pendingAutoStartOperations = [];
     state.user = null;
   }
 
@@ -437,6 +471,7 @@
     state.revision = local.revision;
     state.selectedPhase = local.selectedPhase;
     state.selectedTaskId = local.selectedTaskId;
+    state.baseAutoStartBreaks = local.baseAutoStartBreaks;
     state.autoStartBreaks = local.autoStartBreaks;
     state.baseDurationsMs = local.baseDurationsMs;
     state.durationsMs = local.durationsMs;
@@ -449,6 +484,7 @@
     state.pending = local.pending;
     state.pendingTaskOperations = local.pendingTaskOperations;
     state.pendingDurationOperations = local.pendingDurationOperations;
+    state.pendingAutoStartOperations = local.pendingAutoStartOperations;
     state.user = local.user;
   }
 
@@ -495,6 +531,9 @@
         if (!database.objectStoreNames.contains(DURATION_PENDING_STORE)) {
           database.createObjectStore(DURATION_PENDING_STORE, { keyPath: "id" });
         }
+        if (!database.objectStoreNames.contains(AUTO_START_PENDING_STORE)) {
+          database.createObjectStore(AUTO_START_PENDING_STORE, { keyPath: "id" });
+        }
       };
       request.onsuccess = () => {
         request.result.onversionchange = () => request.result.close();
@@ -524,8 +563,8 @@
     return {
       selectedPhase: state.selectedPhase,
       selectedTaskId: state.selectedTaskId,
-      autoStartBreaks: state.autoStartBreaks,
       durationSyncBootstrapped: state.durationSyncBootstrapped,
+      autoStartSyncBootstrapped: state.autoStartSyncBootstrapped,
       ...overrides
     };
   }
@@ -537,6 +576,7 @@
       history: clone(state.baseHistory),
       tasks: clone(state.baseTasks),
       durationsMs: clone(state.baseDurationsMs),
+      autoStartBreaks: state.baseAutoStartBreaks,
       user: clone(state.user),
       ...overrides
     };
@@ -603,11 +643,7 @@
   async function loadLocalState() {
     db = await openDatabase();
 
-    const lease = await syncStorage.acquireBootstrapGate(db, {
-      token: TAB_ID,
-      nowMs: Date.now(),
-      leaseMs: BOOTSTRAP_LEASE_MS
-    });
+    const lease = await acquireBootstrapGate();
     state.bootstrapGatePersisted = true;
     state.bootstrapGateOwned = lease.acquired;
     const bootstrapState = await syncStorage.readBootstrapState(db);
@@ -616,12 +652,16 @@
       await bootstrapLegacyDurations();
     }
 
-    const transaction = db.transaction([META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE], "readonly");
+    const transaction = db.transaction(
+      [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+      "readonly"
+    );
     const metaStore = transaction.objectStore(META_STORE);
     const pendingStore = transaction.objectStore(PENDING_STORE);
     const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
     const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
-    const [deviceId, deviceSequence, hlc, settings, snapshot, bootstrapResolution, pending, pendingTaskOperations, pendingDurationOperations] = await Promise.all([
+    const autoStartPendingStore = transaction.objectStore(AUTO_START_PENDING_STORE);
+    const [deviceId, deviceSequence, hlc, settings, snapshot, bootstrapResolution, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations] = await Promise.all([
       requestResult(metaStore.get("deviceId")),
       requestResult(metaStore.get("deviceSequence")),
       requestResult(metaStore.get("hlc")),
@@ -630,7 +670,8 @@
       requestResult(metaStore.get("bootstrapResolution")),
       requestResult(pendingStore.getAll()),
       requestResult(taskPendingStore.getAll()),
-      requestResult(durationPendingStore.getAll())
+      requestResult(durationPendingStore.getAll()),
+      requestResult(autoStartPendingStore.getAll())
     ]);
 
     state.deviceId = deviceId?.value || crypto.randomUUID();
@@ -640,14 +681,15 @@
     state.pending = (pending || []).sort((a, b) => a.deviceSequence - b.deviceSequence);
     state.pendingTaskOperations = pendingTaskOperations || [];
     state.pendingDurationOperations = (pendingDurationOperations || []).sort(compareDurationOperations);
+    state.pendingAutoStartOperations = pendingAutoStartOperations || [];
     state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
+    state.autoStartSyncBootstrapped = settings?.value?.autoStartSyncBootstrapped === true;
     state.bootstrapPending = bootstrapResolution?.value || null;
 
     if (settings?.value) {
       state.selectedPhase = PHASES[settings.value.selectedPhase]
         ? settings.value.selectedPhase
         : "focus";
-      state.autoStartBreaks = settings.value.autoStartBreaks === true;
       state.selectedTaskId = settings.value.selectedTaskId || null;
     }
 
@@ -657,6 +699,7 @@
       state.baseHistory = Array.isArray(snapshot.value.history) ? snapshot.value.history : [];
       state.baseTasks = Array.isArray(snapshot.value.tasks) ? snapshot.value.tasks : [];
       state.baseDurationsMs = normalizeDurationsMs(snapshot.value.durationsMs);
+      state.baseAutoStartBreaks = snapshot.value.autoStartBreaks === true;
       state.user = snapshot.value.user || null;
       state.localOwnerId = snapshot.value.user?.id || null;
     } else {
@@ -681,6 +724,27 @@
 
     rebuildOptimisticState();
     quarantineOwnerState();
+  }
+
+  function acquireBootstrapGate() {
+    const nowMs = Date.now();
+    return syncStorage.acquireBootstrapGateWithLegacyAutoStart(db, {
+      token: TAB_ID,
+      nowMs,
+      leaseMs: BOOTSTRAP_LEASE_MS,
+      legacyAutoStartOperationId: crypto.randomUUID()
+    });
+  }
+
+  async function refreshMigratedAutoStart(gate) {
+    if (!gate?.legacyAutoStartMigration?.migrated) return;
+    const queues = await syncStorage.readQueues(db);
+    const local = state.quarantinedLocal || state;
+    local.pendingAutoStartOperations = queues.autoStartOperations || [];
+    local.autoStartBreaks = syncCore.applyAutoStartOperations(
+      local.baseAutoStartBreaks,
+      local.pendingAutoStartOperations
+    );
   }
 
   async function persistSettings() {
@@ -710,6 +774,12 @@
       storeName: PENDING_STORE,
       nowMs: now,
       withDeviceSequence: true,
+      timerOwner: starting ? {
+        deviceId: state.deviceId,
+        tabId: TAB_ID,
+        nowMs: now,
+        leaseMs: TIMER_OWNER_LEASE_MS
+      } : null,
       build: ({ wallMs, counter, deviceSequence }) => {
         const value = {
           id: crypto.randomUUID(),
@@ -725,6 +795,9 @@
         };
         if (starting && startingPhase === "focus" && state.selectedTaskId) {
           value.taskId = state.selectedTaskId;
+        }
+        if (!starting && activeTimer.dependsOnCommandId) {
+          value.dependsOnCommandId = activeTimer.dependsOnCommandId;
         }
         return value;
       }
@@ -754,6 +827,26 @@
         if (type === "upsert") value.title = task.title;
         return value;
       }
+    });
+
+    state.hlcWallMs = operation.hlcWallMs;
+    state.hlcCounter = operation.hlcCounter;
+    return operation;
+  }
+
+  async function persistAutoStartOperation(enabled) {
+    const now = Date.now();
+    const operation = await syncStorage.allocateMutation(db, {
+      storeName: AUTO_START_PENDING_STORE,
+      nowMs: now,
+      withDeviceSequence: false,
+      build: ({ wallMs, counter }) => ({
+        id: crypto.randomUUID(),
+        enabled,
+        occurredAt: new Date(now).toISOString(),
+        hlcWallMs: wallMs,
+        hlcCounter: counter
+      })
     });
 
     state.hlcWallMs = operation.hlcWallMs;
@@ -846,6 +939,33 @@
     }
   }
 
+  async function issueAutoStartOperation(enabled) {
+    if (controlsBlocked()) return false;
+    while (actionLocked) {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+    if (controlsBlocked() || state.autoStartBreaks === enabled) {
+      renderDurations();
+      return false;
+    }
+    actionLocked = true;
+    try {
+      const operation = await persistAutoStartOperation(enabled);
+      state.pendingAutoStartOperations.push(operation);
+      rebuildOptimisticAutoStart();
+      renderDurations();
+      renderSyncStatus();
+      scheduleSync(0);
+      return true;
+    } catch (error) {
+      showNotice(error.message || "Auto-start preference could not be saved.");
+      renderDurations();
+      return false;
+    } finally {
+      actionLocked = false;
+    }
+  }
+
   async function issueTaskOperation(type, task) {
     if (controlsBlocked() || actionLocked) return false;
     actionLocked = true;
@@ -918,8 +1038,8 @@
     }
   }
 
-  function nextBreakPhase() {
-    const completedFocusRounds = state.history.filter((item) => {
+  function nextBreakPhase(history = state.history) {
+    const completedFocusRounds = history.filter((item) => {
       const completed = !item.status || item.status === "completed";
       return completed && item.phase === "focus";
     }).length;
@@ -928,14 +1048,81 @@
       : "short_break";
   }
 
-  async function finishTimer() {
-    const finishedPhase = state.timer.phase;
-    const saved = await issueCommand("finish");
-    if (!saved || finishedPhase !== "focus" || !state.autoStartBreaks) return saved;
+  async function finishTimer(automatic = false) {
+    if (controlsBlocked() || actionLocked) return false;
+    const timer = clone(state.timer);
+    const now = Date.now();
+    const autoBreak = timer.phase === "focus" && state.autoStartBreaks;
+    const breakPhase = autoBreak
+      ? nextBreakPhase(state.history.concat({ timerId: timer.id, phase: "focus", status: "completed" }))
+      : null;
+    actionLocked = true;
+    try {
+      const outcome = await syncStorage.finishTimer(db, {
+        timerId: timer.id,
+        phase: timer.phase,
+        deviceId: state.deviceId,
+        tabId: TAB_ID,
+        leaseMs: TIMER_OWNER_LEASE_MS,
+        manual: !automatic,
+        requireOwner: automatic && timer.phase === "focus",
+        nowMs: now,
+        observedElapsedMs: Math.round(elapsedFor(timer, now)),
+        finishCommandId: crypto.randomUUID(),
+        breakPhase,
+        breakDurationMs: breakPhase ? state.durationsMs[breakPhase] : 0,
+        breakCommandId: breakPhase ? crypto.randomUUID() : null,
+        breakTimerId: breakPhase ? crypto.randomUUID() : null
+      });
+      if (!outcome.transitioned) {
+        if (automatic && outcome.reason === "not_owner") {
+          scheduleCompletionRetry(timer.id, outcome);
+          return true;
+        }
+        return automatic;
+      }
+      window.clearTimeout(completionRetryTimer);
+      completionRetryTimer = null;
+      state.pending.push(...outcome.commands);
+      const last = outcome.commands[outcome.commands.length - 1];
+      state.deviceSequence = last.deviceSequence;
+      state.hlcWallMs = last.hlcWallMs;
+      state.hlcCounter = last.hlcCounter;
+      rebuildOptimisticState();
+      render();
+      scheduleSync(0);
+      return true;
+    } catch (error) {
+      showNotice(error.message || "Timer action could not be saved.");
+      return false;
+    } finally {
+      actionLocked = false;
+    }
+  }
 
-    const started = await issueCommand("start", { phase: nextBreakPhase() });
-    if (!started) showNotice("Focus finished, but break could not be started.");
-    return saved;
+  function completionRetryDelay(outcome, nowMs = Date.now()) {
+    if (outcome?.reason !== "not_owner") return null;
+    const retryAtMs = Number.isFinite(Number(outcome.retryAtMs))
+      ? Number(outcome.retryAtMs)
+      : nowMs + TIMER_OWNER_HEARTBEAT_MS;
+    return Math.max(250, retryAtMs - nowMs + 1);
+  }
+
+  function scheduleCompletionRetry(timerId, outcome) {
+    const delay = completionRetryDelay(outcome);
+    if (delay === null) return;
+    window.clearTimeout(completionRetryTimer);
+    completionRetryTimer = window.setTimeout(() => {
+      completionRetryTimer = null;
+      if (!releaseCompletionRetry(timerId)) return;
+      renderTimer();
+    }, delay);
+  }
+
+  function releaseCompletionRetry(timerId) {
+    if (state.timer.id !== timerId || state.timer.status !== "running") return false;
+    completionQueuedFor = null;
+    return true;
   }
 
   function mergeServerHlc(serverWallMs, serverCounter) {
@@ -958,6 +1145,7 @@
     state.revision = Number(snapshot.revision) || 0;
     state.baseDurationsMs = normalizeDurationsMs(snapshot.durationsMs);
     state.durationsMs = clone(state.baseDurationsMs);
+    state.baseAutoStartBreaks = snapshot.autoStartBreaks === true;
     state.baseTimer = snapshot.canonicalTimer
       ? normalizeTimer(snapshot.canonicalTimer)
       : emptyTimer(state.selectedPhase, state.baseDurationsMs[state.selectedPhase]);
@@ -969,6 +1157,7 @@
     state.pending = (syncState.commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
     state.pendingTaskOperations = syncState.taskOperations || [];
     state.pendingDurationOperations = (syncState.durationOperations || []).sort(compareDurationOperations);
+    state.pendingAutoStartOperations = syncState.autoStartOperations || [];
     rebuildOptimisticState();
   }
 
@@ -984,16 +1173,19 @@
         commands: state.pending,
         taskOperations: state.pendingTaskOperations,
         durationOperations: state.pendingDurationOperations,
+        autoStartOperations: state.pendingAutoStartOperations,
         baseTimer: state.baseTimer,
         baseHistory: state.baseHistory,
         baseTasks: state.baseTasks,
         baseDurationsMs: state.baseDurationsMs,
+        baseAutoStartBreaks: state.baseAutoStartBreaks,
         revision: state.revision
       }, payload, sent);
       const validated = rebased.acknowledgements;
       const { acknowledgements, acknowledgedIds } = validated.commands;
       const { acknowledgements: taskAcknowledgements, acknowledgedIds: acknowledgedTaskOperationIds } = validated.tasks;
       const { acknowledgements: durationAcknowledgements, acknowledgedIds: acknowledgedDurationOperationIds } = validated.durations;
+      const { acknowledgements: autoStartAcknowledgements, acknowledgedIds: acknowledgedAutoStartOperationIds } = validated.autoStart;
       const canonicalTimer = Object.prototype.hasOwnProperty.call(rebased, "baseTimer")
         ? rebased.baseTimer
           ? normalizeTimer(rebased.baseTimer)
@@ -1002,6 +1194,7 @@
       const history = rebased.baseHistory;
       const tasks = rebased.baseTasks;
       const durationsMs = normalizeDurationsMs(rebased.baseDurationsMs);
+      const autoStartBreaks = rebased.baseAutoStartBreaks;
       const revision = rebased.revision;
       const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
       const conflicts = acknowledgements.filter((acknowledgement) => {
@@ -1009,7 +1202,8 @@
         return outcome && !ACK_SUCCESS.has(outcome);
       }).concat(
         taskAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"),
-        durationAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected")
+        durationAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"),
+        autoStartAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected")
       );
 
       const nextSnapshot = snapshotValue({
@@ -1018,8 +1212,10 @@
         canonicalTimer: clone(canonicalTimer),
         history: clone(history),
         tasks: clone(tasks),
-        durationsMs: clone(durationsMs)
+        durationsMs: clone(durationsMs),
+        autoStartBreaks
       });
+      const generatedBreaks = syncCore.generatedBreakUpdates(state.pending, acknowledgements, payload);
       const outcome = await syncStorage.applySyncResponse(db, {
         expectedUserId,
         snapshot: nextSnapshot,
@@ -1027,8 +1223,16 @@
         queueIds: {
           commands: [...acknowledgedIds],
           taskOperations: [...acknowledgedTaskOperationIds],
-          durationOperations: [...acknowledgedDurationOperationIds]
-        }
+          durationOperations: [...acknowledgedDurationOperationIds],
+          autoStartOperations: [...acknowledgedAutoStartOperationIds]
+        },
+        timerOwnerClaim: {
+          deviceId: state.deviceId,
+          tabId: TAB_ID,
+          nowMs: Date.now(),
+          leaseMs: TIMER_OWNER_LEASE_MS
+        },
+        ...generatedBreaks
       });
       await reloadPersistedState();
 
@@ -1085,7 +1289,8 @@
       console.warn("Pomodorough pending queues unavailable:", error);
       return;
     }
-    if (!force && state.pending.length === 0 && state.pendingTaskOperations.length === 0 && state.pendingDurationOperations.length === 0) {
+    if (!force && state.pending.length === 0 && state.pendingTaskOperations.length === 0
+      && state.pendingDurationOperations.length === 0 && state.pendingAutoStartOperations.length === 0) {
       state.retrying = false;
       renderSyncStatus();
       return;
@@ -1101,7 +1306,8 @@
         const sent = syncCore.buildSyncBatch({
           commands: state.pending,
           taskOperations: state.pendingTaskOperations,
-          durationOperations: state.pendingDurationOperations
+          durationOperations: state.pendingDurationOperations,
+          autoStartOperations: state.pendingAutoStartOperations
         });
         inFlightDurationOperationIds = new Set(sent.durationOperations.map((operation) => operation.id));
         const body = JSON.stringify({
@@ -1109,7 +1315,8 @@
           lastRevision: state.revision,
           commands: sent.commands,
           taskOperations: sent.taskOperations,
-          durationOperations: sent.durationOperations
+          durationOperations: sent.durationOperations,
+          autoStartOperations: sent.autoStartOperations
         });
         const response = await postMutation("/api/v1/sync", body, expectedUserId);
 
@@ -1121,7 +1328,8 @@
 
         const payload = await response.json();
         await acceptSyncResponse(payload, sent, expectedUserId);
-        if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length) {
+        if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length
+          || state.pendingAutoStartOperations.length) {
           syncAgain = true;
         }
         retryDelayMs = 1000;
@@ -1255,6 +1463,13 @@
       nowMs: Date.now(),
       leaseMs: BOOTSTRAP_LEASE_MS
     });
+    if (restarted.acquired && !restarted.resolution) {
+      restarted.legacyAutoStartMigration = await syncStorage.migrateLegacyAutoStart(db, {
+        operationId: crypto.randomUUID(),
+        nowMs: Date.now()
+      });
+      await refreshMigratedAutoStart(restarted);
+    }
     state.bootstrapPending = restarted.resolution;
     state.bootstrapPreview = null;
     state.bootstrapPlan = null;
@@ -1290,7 +1505,8 @@
     syncCore.validateCanonicalResponse(payload, {
       commands: [],
       taskOperations: [],
-      durationOperations: []
+      durationOperations: [],
+      autoStartOperations: []
     });
     return payload;
   }
@@ -1302,10 +1518,12 @@
       timer: local.timer,
       tasks: local.tasks,
       durationsMs: local.durationsMs,
+      autoStartBreaks: local.autoStartBreaks,
       defaultDurationsMs: DEFAULT_DURATIONS_MS,
       commands: local.pending,
       taskOperations: local.pendingTaskOperations,
-      durationOperations: local.pendingDurationOperations
+      durationOperations: local.pendingDurationOperations,
+      autoStartOperations: local.pendingAutoStartOperations
     };
   }
 
@@ -1313,12 +1531,9 @@
     if (!syncCore.isResolutionStrategy(strategy)) {
       throw new syncStorage.BootstrapGateError("History resolution changed in another tab.");
     }
-    const lease = await syncStorage.acquireBootstrapGate(db, {
-      token: TAB_ID,
-      nowMs: Date.now(),
-      leaseMs: BOOTSTRAP_LEASE_MS
-    });
+    const lease = await acquireBootstrapGate();
     if (!lease.acquired) throw new syncStorage.BootstrapGateError("Another tab owns history resolution.");
+    await refreshMigratedAutoStart(lease);
     const pending = await syncStorage.captureResolution(db, {
       userId: state.user.id,
       requestId: crypto.randomUUID(),
@@ -1353,15 +1568,20 @@
   }
 
   async function refreshAllPendingOperations() {
-    const { commands, taskOperations, durationOperations } = await syncStorage.readQueues(db);
+    const { commands, taskOperations, durationOperations, autoStartOperations } = await syncStorage.readQueues(db);
     state.pending = (commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
     state.pendingTaskOperations = taskOperations || [];
     state.pendingDurationOperations = (durationOperations || []).sort(compareDurationOperations);
+    state.pendingAutoStartOperations = autoStartOperations || [];
   }
 
   function bootstrapConflicts(validated) {
     return validated.commands.acknowledgements
-      .concat(validated.tasks.acknowledgements, validated.durations.acknowledgements)
+      .concat(
+        validated.tasks.acknowledgements,
+        validated.durations.acknowledgements,
+        validated.autoStart.acknowledgements
+      )
       .filter((acknowledgement) => {
         const outcome = String(acknowledgement.outcome || "").toLowerCase();
         return outcome && !ACK_SUCCESS.has(outcome) && outcome !== "ignored";
@@ -1380,23 +1600,28 @@
         commands: local.pending,
         taskOperations: local.pendingTaskOperations,
         durationOperations: local.pendingDurationOperations,
+        autoStartOperations: local.pendingAutoStartOperations,
         baseTimer: local.baseTimer,
         baseHistory: local.baseHistory,
         baseTasks: local.baseTasks,
         baseDurationsMs: local.baseDurationsMs,
+        baseAutoStartBreaks: local.baseAutoStartBreaks,
         revision: local.revision
       }, payload, pending);
       const validated = applied.acknowledgements;
       const history = applied.baseHistory;
       const tasks = applied.baseTasks;
       const durationsMs = normalizeDurationsMs(applied.baseDurationsMs);
+      const autoStartBreaks = applied.baseAutoStartBreaks;
       const canonicalTimer = applied.baseTimer
         ? normalizeTimer(applied.baseTimer)
         : emptyTimer(state.selectedPhase, durationsMs[state.selectedPhase]);
       const revision = Number(applied.revision);
       if (!Number.isFinite(revision) || revision < 0) throw new Error("Bootstrap response omitted revision.");
       const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
-      const queueIds = pending.queueIds || { commands: [], taskOperations: [], durationOperations: [] };
+      const queueIds = pending.queueIds || {
+        commands: [], taskOperations: [], durationOperations: [], autoStartOperations: []
+      };
       const snapshot = {
         revision,
         serverTime: payload.serverTime,
@@ -1404,10 +1629,30 @@
         history: clone(history),
         tasks: clone(tasks),
         durationsMs: clone(durationsMs),
+        autoStartBreaks,
         user: clone(state.user)
       };
 
-      const outcome = await syncStorage.applyResolution(db, { ...pending, queueIds }, { snapshot, hlc });
+      const generatedBreaks = syncCore.generatedBreakUpdates(
+        local.pending,
+        validated.commands.acknowledgements,
+        payload
+      );
+      const outcome = await syncStorage.applyResolution(
+        db,
+        { ...pending, queueIds },
+        {
+          snapshot,
+          hlc,
+          timerOwnerClaim: {
+            deviceId: state.deviceId,
+            tabId: TAB_ID,
+            nowMs: Date.now(),
+            leaseMs: TIMER_OWNER_LEASE_MS
+          },
+          ...generatedBreaks
+        }
+      );
       await reloadPersistedState();
       state.localOwnerId = state.user.id;
       state.bootstrapPending = null;
@@ -1434,7 +1679,8 @@
     }
     render();
     openRevisionStream();
-    if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length) {
+    if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length
+      || state.pendingAutoStartOperations.length) {
       scheduleSync(0);
     }
   }
@@ -1592,11 +1838,7 @@
     }
 
     if (!state.bootstrapGateOwned) {
-      const lease = await syncStorage.acquireBootstrapGate(db, {
-        token: TAB_ID,
-        nowMs: Date.now(),
-        leaseMs: BOOTSTRAP_LEASE_MS
-      });
+      const lease = await acquireBootstrapGate();
       if (!lease.acquired) {
         state.retrying = true;
         scheduleRetry();
@@ -1605,6 +1847,7 @@
       }
       state.bootstrapGateOwned = true;
       state.bootstrapGatePersisted = true;
+      await refreshMigratedAutoStart(lease);
       if (lease.resolution) state.bootstrapPending = lease.resolution;
       if (state.bootstrapPending && !syncCore.pendingResolutionCanSubmit(state.bootstrapPending, state.user?.id)) {
         if (!state.sessionIdentityValidated) {
@@ -1708,7 +1951,7 @@
   function redirectToLogin() {
     if (redirecting) return;
     redirecting = true;
-    window.location.assign("/auth/google/start");
+    window.location.assign("/auth/google/start?return=%2Fapp");
   }
 
   function openRevisionStream() {
@@ -1798,7 +2041,8 @@
     } catch (error) {
       console.warn("Pomodorough pending queues unavailable before logout:", error);
     }
-    const pendingCount = state.pending.length + state.pendingTaskOperations.length + state.pendingDurationOperations.length;
+    const pendingCount = state.pending.length + state.pendingTaskOperations.length
+      + state.pendingDurationOperations.length + state.pendingAutoStartOperations.length;
     if (pendingCount > 0) {
       const confirmed = window.confirm(
         `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Logging out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
@@ -1833,11 +2077,15 @@
 
   async function clearLocalData() {
     if (db) {
-      const transaction = db.transaction([META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE], "readwrite");
+      const transaction = db.transaction(
+        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+        "readwrite"
+      );
       transaction.objectStore(META_STORE).clear();
       transaction.objectStore(PENDING_STORE).clear();
       transaction.objectStore(TASK_PENDING_STORE).clear();
       transaction.objectStore(DURATION_PENDING_STORE).clear();
+      transaction.objectStore(AUTO_START_PENDING_STORE).clear();
       await transactionDone(transaction);
       db.close();
     }
@@ -1976,10 +2224,12 @@
 
     if (!blocked && status === "running" && remaining <= 0 && completionQueuedFor !== timer.id) {
       completionQueuedFor = timer.id;
-      finishTimer().then((saved) => {
+      finishTimer(true).then((saved) => {
         if (!saved) completionQueuedFor = null;
       });
     } else if (status !== "running") {
+      window.clearTimeout(completionRetryTimer);
+      completionRetryTimer = null;
       completionQueuedFor = null;
     }
   }
@@ -2159,7 +2409,8 @@
   }
 
   function renderSyncStatus() {
-    const count = state.pending.length + state.pendingTaskOperations.length + state.pendingDurationOperations.length;
+    const count = state.pending.length + state.pendingTaskOperations.length
+      + state.pendingDurationOperations.length + state.pendingAutoStartOperations.length;
     let syncState = "synced";
     let label = "In sync";
 
@@ -2328,8 +2579,7 @@
     }
 
     elements.autoStartBreaks.addEventListener("change", () => {
-      state.autoStartBreaks = elements.autoStartBreaks.checked;
-      persistSettings().catch(() => showNotice("Auto-start preference could not be saved."));
+      issueAutoStartOperation(elements.autoStartBreaks.checked);
     });
 
     for (const button of elements.screenButtons) {
@@ -2359,7 +2609,7 @@
       else if (state.timer.status === "paused") issueCommand("resume");
       else issueCommand("start");
     });
-    elements.finishButton.addEventListener("click", finishTimer);
+    elements.finishButton.addEventListener("click", () => finishTimer(false));
     elements.cancelButton.addEventListener("click", () => issueCommand("cancel"));
     elements.clearButton.addEventListener("click", () => issueCommand("clear"));
     elements.logoutButton.addEventListener("click", logout);
@@ -2399,6 +2649,14 @@
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("pagehide", () => {
+      if (!db || !state.deviceId) return;
+      syncStorage.releaseTimerOwnership(db, {
+        deviceId: state.deviceId,
+        tabId: TAB_ID,
+        nowMs: Date.now()
+      }).catch(() => {});
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
       renderTimer();
@@ -2429,7 +2687,7 @@
   async function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     try {
-      await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.register("/sw.js", { scope: "/app" });
     } catch (error) {
       console.warn("Pomodorough offline shell unavailable:", error);
     }
@@ -2469,9 +2727,22 @@
     }
   }
 
+  function heartbeatTimerOwnership() {
+    if (!db || !state.ready || !state.deviceId || !state.timer.id
+      || !["running", "paused"].includes(state.timer.status)) return;
+    syncStorage.renewTimerOwnership(db, {
+      timerId: state.timer.id,
+      deviceId: state.deviceId,
+      tabId: TAB_ID,
+      nowMs: Date.now(),
+      leaseMs: TIMER_OWNER_LEASE_MS
+    }).catch(() => {});
+  }
+
   window.setInterval(() => {
     if (state.ready) renderTimer();
   }, 250);
+  window.setInterval(heartbeatTimerOwnership, TIMER_OWNER_HEARTBEAT_MS);
 
   initialize();
 })();

@@ -4,280 +4,103 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#142c5c">
-  <meta name="description" content="A local-first focus timer that continues across your devices.">
-  <title>Pomodorough</title>
-  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="description" content="Choose Pomodorough for Apple, Windows, Linux, Android, or the Web.">
+  <title>Pomodorough | Choose your platform</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=13">
-  <script src="/sync-core.js?v=13" defer></script>
-  <script src="/sync-storage.js?v=13" defer></script>
-  <script src="/app.js?v=13" defer></script>
+  <link rel="stylesheet" href="/landing.css?v=1">
+  <script src="/platform-selector.js?v=1" defer></script>
+  <script src="/landing.js?v=1" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#timer-workbench">Skip to timer</a>
+  <a class="skip-link" href="#departure">Skip to downloads</a>
 
   <header class="masthead">
     <a class="wordmark" href="/" aria-label="Pomodorough home">
       <span class="wordmark-symbol" aria-hidden="true">P</span>
-      <span class="wordmark-copy">
-        <span class="wordmark-main">Pomodorough</span>
-        <span class="wordmark-sub">Time, in transit</span>
+      <span>
+        <strong>Pomodorough</strong>
+        <small>Time, in transit</small>
       </span>
     </a>
-
-    <div class="masthead-tools">
-      <button id="installButton" class="install-button" type="button" hidden>Install</button>
-      <div id="syncStatus" class="sync-status" data-state="loading" role="status" aria-live="polite">
-        <span class="sync-lamp" aria-hidden="true"></span>
-        <span class="sync-label">
-          <small>Line status</small>
-          <span id="syncStatusText">Checking line</span>
-        </span>
-      </div>
-      <div id="profile" class="profile" hidden>
-        <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <span id="profileName" class="profile-name"></span>
-        <button id="logoutButton" class="text-button" type="button">Log out</button>
-      </div>
-    </div>
+    <span class="station-code" aria-hidden="true">PMD / 25</span>
   </header>
 
-  <div class="registration-rule" aria-hidden="true">
-    <span></span><span></span><span></span><span></span><span></span>
-  </div>
-
-  <dialog id="bootstrapDialog" class="bootstrap-dialog" aria-labelledby="bootstrapTitle" aria-describedby="bootstrapSummary" aria-busy="false">
-    <div class="bootstrap-ticket">
-      <span class="bootstrap-kicker">Account arrival / history transfer</span>
-      <h2 id="bootstrapTitle">Choose your history</h2>
-      <p id="bootstrapSummary">Comparing local and remote completed runs.</p>
-
-      <div id="bootstrapChoices" class="bootstrap-choices">
-        <button type="button" data-bootstrap-strategy="replace_remote">
-          <strong>Keep Local</strong>
-          <span>Replace account history with this device.</span>
-        </button>
-        <button type="button" data-bootstrap-strategy="keep_remote">
-          <strong>Keep Remote</strong>
-          <span>Use account history and discard unsigned local data.</span>
-        </button>
-        <button type="button" data-bootstrap-strategy="merge">
-          <strong>Keep Both</strong>
-          <span>Combine histories. Conflicts or rejected changes are possible.</span>
-        </button>
-      </div>
-
-      <section id="bootstrapConfirmation" class="bootstrap-confirmation" hidden>
-        <h3 id="bootstrapConfirmationTitle">Confirm history choice</h3>
-        <p id="bootstrapConfirmationMessage"></p>
-        <div class="bootstrap-actions">
-          <button id="bootstrapConfirm" class="bootstrap-confirm" type="button">Confirm</button>
-          <button id="bootstrapCancel" class="bootstrap-cancel" type="button">Cancel</button>
-        </div>
-      </section>
-
-      <p id="bootstrapError" class="bootstrap-error" role="alert" hidden></p>
-      <button id="bootstrapRetry" class="bootstrap-retry" type="button" hidden>Retry saved choice</button>
-      <button id="bootstrapSignOut" class="bootstrap-signout" type="button" hidden>Sign out instead</button>
-    </div>
-  </dialog>
-
   <main>
-    <nav class="screen-nav" aria-label="Pomodorough screens">
-      <div role="tablist" aria-label="Workspace">
-        <button id="timerTab" type="button" role="tab" aria-selected="true" aria-controls="timerScreen" data-screen-button="timer">
-          <span>Clock</span>
-          <strong>Timer</strong>
-        </button>
-        <button id="tasksTab" type="button" role="tab" aria-selected="false" aria-controls="tasksScreen" data-screen-button="tasks" tabindex="-1">
-          <span>Board</span>
-          <strong>Tasks</strong>
-        </button>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">One timer / every platform</p>
+        <h1 id="hero-title">Keep focus moving.</h1>
+        <p class="hero-summary">Pomodorough is a local-first focus timer with account sync across the Web and native apps. Choose where this run starts.</p>
       </div>
-    </nav>
 
-    <aside id="conflictPanel" class="conflict-panel" hidden>
-      <div>
-        <strong>Timer continued elsewhere</strong>
-        <span id="conflictReason">Newer account state arrived during sync.</span>
-      </div>
-      <button id="conflictDismiss" class="text-button" type="button">Dismiss</button>
-    </aside>
-
-    <p id="notice" class="notice" role="alert" hidden></p>
-
-    <div id="timerScreen" role="tabpanel" aria-labelledby="timerTab">
-      <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title">
-      <h1 id="workbench-title" class="visually-hidden">Pomodoro timer</h1>
-
-      <article class="timer-machine" aria-describedby="timerInstruction">
-        <div class="machine-plate">
-          <span>Current service</span>
-          <span id="timerStateLabel">Idle</span>
+      <div id="departure" class="departure" aria-labelledby="departure-title">
+        <div class="departure-header">
+          <span>Next departure</span>
+          <span class="signal" aria-hidden="true"></span>
         </div>
-
-        <div id="dial" class="dial" data-status="idle">
-          <svg class="dial-face" viewBox="0 0 280 280" aria-hidden="true">
-            <circle class="dial-rim" cx="140" cy="140" r="127"></circle>
-            <g id="dialTicks" class="dial-ticks"></g>
-            <circle class="dial-track" cx="140" cy="140" r="108"></circle>
-            <circle id="dialProgress" class="dial-progress" cx="140" cy="140" r="108"></circle>
-          </svg>
-          <div class="dial-center">
-            <span class="board-kicker">Now timing</span>
-            <span id="phaseLabel" class="dial-phase">Focus</span>
-            <time id="timerDisplay" class="timer-display" role="timer" datetime="PT25M">25:00</time>
-            <span id="timerDetail" class="timer-detail">Idle / 25 min</span>
-          </div>
-          <span class="dial-pointer" aria-hidden="true"></span>
-        </div>
-
-        <p id="timerInstruction" class="timer-instruction">Choose a pattern, then start the clock.</p>
-
-        <div class="action-bank" role="group" aria-label="Timer controls">
-          <button id="timerToggle" class="action-primary" type="button">Start focus</button>
-          <button id="finishButton" class="action-key" type="button" disabled>Finish</button>
-          <button id="cancelButton" class="action-key action-danger" type="button" disabled>Cancel</button>
-          <button id="clearButton" class="action-clear" type="button" disabled>Clear timer</button>
-        </div>
-      </article>
-
-      <div id="durationForm" class="recipe-rail" role="group" aria-label="Timer durations">
-        <div class="rail-heading">
-          <span class="rail-number">Route</span>
+        <div class="departure-board">
           <div>
-            <strong>Service pattern</strong>
-            <small>Choose a mode and duration</small>
+            <span class="board-label">Recommended route</span>
+            <h2 id="departure-title" data-platform-name aria-live="polite">Native apps</h2>
           </div>
+          <span class="board-status">Ready</span>
         </div>
-
-        <label class="task-selector-row" for="taskSelector">
-          <span>
-            <strong>Task on this run</strong>
-            <small>Optional / focus service only</small>
-          </span>
-          <select id="taskSelector">
-            <option value="">No task</option>
-          </select>
-        </label>
-
-        <fieldset>
-          <legend class="visually-hidden">Choose phase and duration</legend>
-
-          <div class="duration-row" data-phase-row="focus">
-            <button class="phase-button" type="button" data-phase="focus" aria-pressed="true">
-              <span class="phase-index">Work</span>
-              <span>Focus</span>
-            </button>
-            <div class="stepper">
-              <button type="button" data-step="-1" data-for="focusDuration" aria-label="Reduce focus duration">&minus;</button>
-              <label>
-                <span class="visually-hidden">Focus minutes</span>
-                <input id="focusDuration" name="focus" type="number" inputmode="numeric" min="1" max="180" value="25">
-                <span class="minute-unit" aria-hidden="true">min</span>
-              </label>
-              <button type="button" data-step="1" data-for="focusDuration" aria-label="Increase focus duration">+</button>
-            </div>
-          </div>
-
-          <div class="duration-row" data-phase-row="short_break">
-            <button class="phase-button" type="button" data-phase="short_break" aria-pressed="false">
-              <span class="phase-index">Reset</span>
-              <span>Short break</span>
-            </button>
-            <div class="stepper">
-              <button type="button" data-step="-1" data-for="shortBreakDuration" aria-label="Reduce short break duration">&minus;</button>
-              <label>
-                <span class="visually-hidden">Short break minutes</span>
-                <input id="shortBreakDuration" name="short_break" type="number" inputmode="numeric" min="1" max="180" value="5">
-                <span class="minute-unit" aria-hidden="true">min</span>
-              </label>
-              <button type="button" data-step="1" data-for="shortBreakDuration" aria-label="Increase short break duration">+</button>
-            </div>
-          </div>
-
-          <div class="duration-row" data-phase-row="long_break">
-            <button class="phase-button" type="button" data-phase="long_break" aria-pressed="false">
-              <span class="phase-index">Recover</span>
-              <span>Long break</span>
-            </button>
-            <div class="stepper">
-              <button type="button" data-step="-1" data-for="longBreakDuration" aria-label="Reduce long break duration">&minus;</button>
-              <label>
-                <span class="visually-hidden">Long break minutes</span>
-                <input id="longBreakDuration" name="long_break" type="number" inputmode="numeric" min="1" max="180" value="15">
-                <span class="minute-unit" aria-hidden="true">min</span>
-              </label>
-              <button type="button" data-step="1" data-for="longBreakDuration" aria-label="Increase long break duration">+</button>
-            </div>
-          </div>
-        </fieldset>
-
-        <label class="auto-start-row">
-          <span class="auto-start-copy">
-            <strong>Auto-start breaks</strong>
-            <small>Short after focus. Long every fourth focus.</small>
-          </span>
-          <span class="auto-start-toggle">
-            <input id="autoStartBreaks" type="checkbox" role="switch">
-            <span class="toggle-track" aria-hidden="true">
-              <span class="toggle-knob"></span>
-            </span>
-          </span>
-        </label>
-
+        <p class="recommendation" data-platform-note>Choose from available native apps below.</p>
+        <div class="primary-actions">
+          <a class="button button-native" href="#native-options" data-native-cta>View native apps</a>
+          <a class="button button-web" href="/app">Use Web app</a>
+        </div>
+        <p class="choice-note">Nothing downloads or opens until you choose.</p>
       </div>
-      </section>
+    </section>
 
-      <section class="history-strip" aria-labelledby="history-title">
-        <header class="history-heading">
-          <div>
-            <span class="history-kicker">Run log / this account</span>
-            <h2 id="history-title">Recent arrivals</h2>
-          </div>
-          <output id="historyCount" class="history-count" aria-label="Completed timer count">000</output>
-        </header>
-        <ol id="historyList" class="history-list">
-          <li class="history-empty">No completed runs yet. Your first finish appears here.</li>
-        </ol>
-      </section>
-    </div>
-
-    <section id="tasksScreen" class="tasks-screen" role="tabpanel" aria-labelledby="tasksTab tasks-title" hidden>
-      <header class="tasks-heading">
-        <div>
-          <span class="history-kicker">Focus manifest / today</span>
-          <h1 id="tasks-title">Task board</h1>
-          <p>Add a task, then assign it before starting a focus run. Recreating the same name restores its history.</p>
-        </div>
-        <output id="taskCount" class="history-count" aria-label="Active task count">00</output>
-      </header>
-
-      <form id="taskForm" class="task-form">
-        <label for="taskInput">New task</label>
-        <div>
-          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Write release notes">
-          <button type="submit">Add task</button>
-        </div>
-      </form>
-
-      <div class="task-board" aria-live="polite">
-        <div class="task-board-head" aria-hidden="true">
-          <span>Task</span>
-          <span>Finished pomodoros today</span>
-          <span>Time today spent</span>
-          <span>Action</span>
-        </div>
-        <div id="taskList" class="task-list">
-          <p class="task-empty">No tasks on the board. Add one for your next focus run.</p>
-        </div>
+    <section id="native-options" class="native-section" aria-labelledby="native-title">
+      <div class="section-heading">
+        <p class="eyebrow">Direct services</p>
+        <h2 id="native-title">All native apps</h2>
+        <p>These links stay available even when platform detection is unavailable or incorrect.</p>
       </div>
+
+      <div class="route-grid">
+        <a class="route-card route-apple" href="https://github.com/Pomodoro-Everywhere/pomodorough-apple/releases/latest">
+          <span class="route-code">APL</span>
+          <span class="route-copy">
+            <strong>Apple</strong>
+            <small>iPhone / iPad / Mac</small>
+          </span>
+          <span class="route-arrow" aria-hidden="true">&#8599;</span>
+        </a>
+        <a class="route-card route-desktop" href="https://github.com/Pomodoro-Everywhere/pomodorough-desktop/releases/latest">
+          <span class="route-code">DSK</span>
+          <span class="route-copy">
+            <strong>Desktop</strong>
+            <small>Windows / Linux</small>
+          </span>
+          <span class="route-arrow" aria-hidden="true">&#8599;</span>
+        </a>
+        <a class="route-card route-android" href="https://github.com/Pomodoro-Everywhere/pomodorough-android/releases/latest">
+          <span class="route-code">AND</span>
+          <span class="route-copy">
+            <strong>Android</strong>
+            <small>Phones / tablets</small>
+          </span>
+          <span class="route-arrow" aria-hidden="true">&#8599;</span>
+        </a>
+      </div>
+
+      <aside class="release-note" aria-labelledby="release-note-title">
+        <span class="notice-mark" aria-hidden="true">!</span>
+        <div>
+          <h3 id="release-note-title">Before opening a native build</h3>
+          <p>Downloads come from GitHub Releases. Some builds may be unsigned, so your system may ask you to confirm before opening them. Apple and Android release pages may not contain a published build yet.</p>
+        </div>
+      </aside>
     </section>
   </main>
 
-  <footer class="site-footer">
-    <span>Local clock / shared account</span>
-    <span>Device <b id="deviceMark">----</b></span>
+  <footer>
+    <span>Pomodorough departure hall</span>
+    <a href="https://github.com/Pomodoro-Everywhere/pomodorough-server">Source and server</a>
   </footer>
 </body>
 </html>

@@ -23,6 +23,12 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	dataDirLock, err := store.AcquireDataDirLock(cfg.DataDir)
+	if err != nil {
+		logger.Error("lock storage", "error", err)
+		os.Exit(1)
+	}
+	defer dataDirLock.Close()
 	userStore, err := store.New(cfg.DataDir)
 	if err != nil {
 		logger.Error("initialize storage", "error", err)

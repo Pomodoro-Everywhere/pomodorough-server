@@ -92,6 +92,23 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestCanonicalTimerRetainsStartingDeviceAcrossLaterIntents(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	result := Reduce([]Command{
+		command("start-owner", "device-owner", "timer-owner", "start", 1, 100, base, 0),
+		command("pause-peer", "device-peer", "timer-owner", "pause", 1, 200, base.Add(time.Minute), 60_000),
+	}, base.Add(2*time.Minute))
+	if result.Canonical == nil {
+		t.Fatal("canonical timer missing")
+	}
+	if result.Canonical.StartedByDeviceID != "device-owner" {
+		t.Fatalf("starting device = %q, want device-owner", result.Canonical.StartedByDeviceID)
+	}
+	if result.Canonical.LastIntent == nil || result.Canonical.LastIntent.CommandID != "pause-peer" {
+		t.Fatalf("last intent = %#v, want pause-peer", result.Canonical.LastIntent)
+	}
+}
+
 func TestHistoryIsNewestFirstAtFractionalSecondPrecision(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	commands := []Command{

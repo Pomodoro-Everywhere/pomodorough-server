@@ -143,7 +143,7 @@ func (c *Codec) Seal(purpose string, value any) (string, error) {
 
 func (c *Codec) Open(purpose, token string, value any) error {
 	sealed, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || len(sealed) < c.aead.NonceSize()+c.aead.Overhead() {
+	if err != nil || len(sealed) < c.aead.NonceSize()+c.aead.Overhead() || !EqualString(token, base64.RawURLEncoding.EncodeToString(sealed)) {
 		return ErrInvalidToken
 	}
 	nonce := sealed[:c.aead.NonceSize()]

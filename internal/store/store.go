@@ -15,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 var (
 	ErrNotFound          = errors.New("user database not found")
@@ -314,12 +314,28 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		) STRICT`,
 		)
 	}
+	if version < 5 {
+		statements = append(statements,
+			`CREATE TABLE auto_start_operations (
+			id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 8 AND 128),
+			device_id TEXT NOT NULL CHECK (length(device_id) BETWEEN 8 AND 128),
+			enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+			occurred_at TEXT NOT NULL,
+			occurred_at_ms INTEGER NOT NULL,
+			hlc_wall_ms INTEGER NOT NULL CHECK (hlc_wall_ms >= 0),
+			hlc_counter INTEGER NOT NULL CHECK (hlc_counter >= 0)
+		) STRICT`,
+			`CREATE INDEX auto_start_operations_order_idx ON auto_start_operations(hlc_wall_ms, hlc_counter, device_id, id)`,
+			`CREATE TRIGGER auto_start_operations_no_update BEFORE UPDATE ON auto_start_operations
+		BEGIN SELECT RAISE(ABORT, 'auto-start operations are immutable'); END`,
+		)
+	}
 	for _, statement := range statements {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate user database: %w", err)
 		}
 	}
-	if version < 4 {
+	if version < 5 {
 		immutableTables := []struct {
 			table   string
 			trigger string
@@ -328,6 +344,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			{table: "timer_commands", trigger: "timer_commands_no_delete", message: "timer commands are immutable"},
 			{table: "task_operations", trigger: "task_operations_no_delete", message: "task operations are immutable"},
 			{table: "duration_operations", trigger: "duration_operations_no_delete", message: "duration operations are immutable"},
+			{table: "auto_start_operations", trigger: "auto_start_operations_no_delete", message: "auto-start operations are immutable"},
 		}
 		for _, immutable := range immutableTables {
 			var tableCount int

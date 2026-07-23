@@ -1,6 +1,8 @@
 package authn
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -30,6 +32,74 @@ func TestOpaqueTokenRejectsMalformedAndNonCanonicalValues(t *testing.T) {
 	if _, _, err := NewOpaqueToken("invalid"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("NewOpaqueToken(invalid) error = %v, want ErrInvalidToken", err)
 	}
+}
+
+func TestOpaqueTokenRejectsAlternateNonZeroPadBits(t *testing.T) {
+	userID := UserID([]byte(strings.Repeat("s", 32)), googleIssuerForTest, "subject-123")
+	token, _, err := NewOpaqueToken(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, _ := strings.Cut(token, ".")
+	nonCanonical := alternateNonZeroPadBits(t, secret)
+	if _, _, err := ParseOpaqueToken(userID + "." + nonCanonical); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("alternate-pad-bit opaque token error = %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestSealedTokenRejectsAlternateNonZeroPadBits(t *testing.T) {
+	codec := newTestCodec(t)
+	var sealed string
+	for length := 1; ; length++ {
+		var err error
+		sealed, err = codec.Seal("pad-bit-test", strings.Repeat("x", length))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw)%3 != 0 {
+			break
+		}
+	}
+	nonCanonical := alternateNonZeroPadBits(t, sealed)
+	var output string
+	if err := codec.Open("pad-bit-test", nonCanonical, &output); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("alternate-pad-bit sealed token error = %v, want ErrInvalidToken", err)
+	}
+}
+
+func alternateNonZeroPadBits(t *testing.T, encoded string) string {
+	t.Helper()
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mask := 0
+	switch len(raw) % 3 {
+	case 1:
+		mask = 0x0f
+	case 2:
+		mask = 0x03
+	default:
+		t.Fatal("encoding has no unused pad bits")
+	}
+	index := strings.IndexByte(alphabet, encoded[len(encoded)-1])
+	if index < 0 || index&mask != 0 {
+		t.Fatalf("canonical final base64url digit index = %d", index)
+	}
+	result := encoded[:len(encoded)-1] + string(alphabet[index|1])
+	decoded, err := base64.RawURLEncoding.DecodeString(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, raw) || result == encoded {
+		t.Fatalf("alternate pad bits changed decoded bytes: canonical=%q alternate=%q", encoded, result)
+	}
+	return result
 }
 
 func TestOAuthStateRejectsExpiredIncompleteFutureAndTamperedTokens(t *testing.T) {

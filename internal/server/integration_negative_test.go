@@ -20,7 +20,8 @@ func TestUnavailableAndUnauthenticatedRoutes(t *testing.T) {
 		status   int
 		location string
 	}{
-		{name: "root requires login", method: http.MethodGet, path: "/", status: http.StatusFound, location: "/auth/google/start?return=%2F"},
+		{name: "root is public", method: http.MethodGet, path: "/", status: http.StatusOK},
+		{name: "app requires login", method: http.MethodGet, path: "/app", status: http.StatusFound, location: "/auth/google/start?return=%2Fapp"},
 		{name: "web auth unavailable", method: http.MethodGet, path: "/auth/google/start", status: http.StatusServiceUnavailable},
 		{name: "native auth unavailable", method: http.MethodPost, path: "/api/v1/auth/google/challenge", status: http.StatusServiceUnavailable},
 		{name: "API requires auth", method: http.MethodGet, path: "/api/v1/me", status: http.StatusUnauthorized},

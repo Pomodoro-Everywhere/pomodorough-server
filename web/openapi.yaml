@@ -1,13 +1,13 @@
 openapi: 3.0.3
 info:
   title: Pomodorough API
-  version: 1.4.0
+  version: 1.5.0
   description: |
     Local-first Pomodoro timer synchronization API.
 
-    Timer, task, and duration preference mutations are immutable and idempotent.
+    Timer, task, duration preference, and auto-start preference mutations are immutable and idempotent.
     The server orders them by hybrid logical clock, device ID, and operation ID,
-    then returns canonical timer, task, and duration projections. Clients must
+    then returns canonical timer, task, duration, and auto-start projections. Clients must
     retain unacknowledged mutations and retry them with the same IDs.
 
     Web clients authenticate with the session cookie created by Google OAuth.
@@ -18,7 +18,7 @@ info:
 
     Revision events are hints only. Clients must use `GET /api/v1/bootstrap` or
     `POST /api/v1/sync` as authoritative sources of timer, task, and duration
-    preference state.
+    and auto-start preference state.
 servers:
   - url: https://pomodorough.egigoka.me
     description: Production
@@ -32,7 +32,7 @@ tags:
   - name: Account
     description: Current account, session, and device controls.
   - name: Timer
-    description: Bootstrap resolution, timer/task/duration synchronization, history, and revision hints.
+    description: Bootstrap resolution, timer/task/preference synchronization, history, and revision hints.
 paths:
   /openapi.yaml:
     get:
@@ -352,7 +352,10 @@ paths:
         returned remote snapshot without changing revision. `merge` applies the
         supplied immutable local operations on top of remote history.
         `replace_remote` atomically clears timer commands and projections, task
-        operations, and duration operations before applying local history.
+        operations, and duration operations before applying local history. When
+        `autoStartOperations` is omitted, replacement preserves remote auto-start
+        history for compatibility with legacy clients. A present empty array
+        explicitly replaces auto-start history with default `false`.
 
         `requestId` provides durable idempotency. An exact retry returns the exact
         stored canonical result without another revision increment or event. Reuse
@@ -422,19 +425,21 @@ paths:
       summary: Submit commands and read canonical timer state
       description: |
         Accepts up to 256 immutable timer commands, 256 immutable task operations,
-        and 256 immutable duration operations. Repeating a stored ID is idempotent
+        256 immutable duration operations, and 256 immutable auto-start operations.
+        Repeating a stored ID is idempotent
         only when immutable payload and device ID match. A changed stored payload
-        is rejected. Duplicate timer command, task operation, or duration operation
+        is rejected. Duplicate timer command, task operation, duration operation, or auto-start operation
         IDs within one request invalidate the entire request before mutation.
         Reusing a timer device sequence for a different command produces a
         rejected acknowledgement. Mutations are ordered by `hlcWallMs`,
         `hlcCounter`, device ID, then operation ID; latest valid intent wins.
-        Duration preferences resolve independently for each phase.
+        Duration preferences resolve independently for each phase. Auto-start
+        operations resolve as one account preference with default `false`.
 
         `lastRevision` reports the client's last observed revision. This version
         always returns the complete canonical snapshot and history. A revision is
         incremented once per request that inserts at least one new timer command,
-        task operation, or duration operation.
+        task operation, duration operation, or auto-start operation.
 
         Bearer-authenticated clients may only sync the device bound to their
         access-token session. Web clients must supply both conditional CSRF
@@ -515,7 +520,7 @@ paths:
       description: |
         Sends current revision immediately, then sends a `revision` event whenever
         a sync request inserts at least one new timer command, task operation, or
-        duration operation, or a first bootstrap merge/replacement changes logical
+        duration operation, auto-start operation, or a first bootstrap merge/replacement changes logical
         history. Sends a comment keepalive every 20 seconds. Events are hints;
         reconnect and fetch a bootstrap snapshot or sync to retrieve authoritative
         state.
@@ -827,6 +832,13 @@ components:
       maxLength: 128
       example: duration-op-01J2YM1N9A7B5C3D1E8F6G4H2J
 
+    AutoStartOperationID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: auto-start-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+
     TimerPhase:
       type: string
       enum: [focus, short_break, long_break]
@@ -994,6 +1006,36 @@ components:
         hlcWallMs: 1784134500125
         hlcCounter: 0
 
+    AutoStartOperation:
+      type: object
+      additionalProperties: false
+      required: [id, enabled, occurredAt, hlcWallMs, hlcCounter]
+      properties:
+        id:
+          $ref: "#/components/schemas/AutoStartOperationID"
+        enabled:
+          type: boolean
+          description: Whether clients should automatically start break timers after focus completion.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Client-observed preference change time in RFC 3339 format.
+        hlcWallMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Hybrid logical clock wall component; must not exceed server time by more than five minutes.
+        hlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+      example:
+        id: auto-start-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+        enabled: true
+        occurredAt: "2026-07-15T16:55:00.125Z"
+        hlcWallMs: 1784134500125
+        hlcCounter: 0
+
     BootstrapResolutionStrategy:
       type: string
       enum: [keep_remote, replace_remote, merge]
@@ -1039,6 +1081,16 @@ components:
           description: Complete immutable local duration history; must be empty for `keep_remote`.
           items:
             $ref: "#/components/schemas/DurationOperation"
+        autoStartOperations:
+          type: array
+          maxItems: 4096
+          description: |
+            Complete immutable local auto-start history; must be empty for
+            `keep_remote`. Optional for legacy compatibility. Omission during
+            `replace_remote` preserves remote auto-start history; a present empty
+            array replaces it with default `false`.
+          items:
+            $ref: "#/components/schemas/AutoStartOperation"
 
     SyncRequest:
       type: object
@@ -1070,6 +1122,13 @@ components:
           description: Optional for compatibility with clients predating duration sync.
           items:
             $ref: "#/components/schemas/DurationOperation"
+        autoStartOperations:
+          type: array
+          maxItems: 256
+          default: []
+          description: Optional for compatibility with clients predating auto-start preference sync.
+          items:
+            $ref: "#/components/schemas/AutoStartOperation"
 
     Acknowledgement:
       type: object
@@ -1112,6 +1171,20 @@ components:
         reason:
           type: string
           description: Empty for the canonical phase winner; explanatory text otherwise.
+
+    AutoStartAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [operationId, outcome, reason]
+      properties:
+        operationId:
+          $ref: "#/components/schemas/AutoStartOperationID"
+        outcome:
+          type: string
+          enum: [applied, ignored, rejected]
+        reason:
+          type: string
+          description: Empty for the canonical winner; explanatory text otherwise.
 
     DurationsMs:
       type: object
@@ -1199,6 +1272,8 @@ components:
         anchorAt:
           type: string
           format: date-time
+        startedByDeviceId:
+          $ref: "#/components/schemas/DeviceID"
         lastIntent:
           $ref: "#/components/schemas/TimerIntent"
 
@@ -1240,11 +1315,13 @@ components:
         - acknowledgements
         - taskAcknowledgements
         - durationAcknowledgements
+        - autoStartAcknowledgements
         - revision
         - canonicalTimer
         - history
         - tasks
         - durationsMs
+        - autoStartBreaks
         - serverTime
         - serverHlcWallMs
         - serverHlcCounter
@@ -1264,6 +1341,11 @@ components:
           description: One entry for each duration operation in request order.
           items:
             $ref: "#/components/schemas/DurationAcknowledgement"
+        autoStartAcknowledgements:
+          type: array
+          description: One entry for each auto-start operation in request order.
+          items:
+            $ref: "#/components/schemas/AutoStartAcknowledgement"
         revision:
           type: integer
           format: int64
@@ -1285,6 +1367,10 @@ components:
             $ref: "#/components/schemas/Task"
         durationsMs:
           $ref: "#/components/schemas/DurationsMs"
+        autoStartBreaks:
+          type: boolean
+          default: false
+          description: Canonical account auto-start preference.
         serverTime:
           type: string
           format: date-time
