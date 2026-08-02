@@ -78,11 +78,17 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
 }
 
 test("shell entry assets use cache-busting version URLs", () => {
-  for (const asset of ["app.css", "sync-core.js", "sync-storage.js", "app.js"]) {
+  for (const asset of ["app.css"]) {
     assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=16`));
     assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=16`));
   }
-  assert.match(workerSource, /pomodorough-shell-v17/);
+  assert.match(appSource, /\/app\.js\?v=20/);
+  assert.match(workerSource, /\/app\.js\?v=20/);
+  for (const asset of ["sync-core.js", "sync-storage.js"]) {
+    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
+    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
+  }
+  assert.match(workerSource, /pomodorough-shell-v24/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/app"/);

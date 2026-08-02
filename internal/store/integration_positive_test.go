@@ -101,11 +101,11 @@ func TestSyncBatchRevisionAndHistoryPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	history, revision, err := History(ctx, db, now.Add(2*time.Second))
+	history, revision, changed, err := userStore.History(ctx, db, userID, now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if revision != 1 || len(history) != 1 || history[0].Status != "cancelled" || history[0].CommandID != "command-0002" {
+	if changed || revision != 1 || len(history) != 1 || history[0].Status != "cancelled" || history[0].CommandID != "command-0002" {
 		t.Fatalf("persisted history=%#v revision=%d", history, revision)
 	}
 	empty, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: deviceID}, now.Add(3*time.Second))

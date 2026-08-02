@@ -32,6 +32,40 @@ type protocolClient struct {
 	stream      *protocolRevisionStream
 }
 
+type protocolNativeStore struct {
+	client              *protocolClient
+	commands            []syncCommandJSON
+	taskOperations      []syncTaskOperationJSON
+	durationOperations  []syncDurationOperationJSON
+	autoStartOperations []syncAutoStartOperationJSON
+}
+
+func (s *protocolNativeStore) payload() syncRequestJSON {
+	return syncRequestJSON{
+		DeviceID: s.client.deviceID, LastRevision: int64Pointer(s.client.revision),
+		Commands:            append([]syncCommandJSON(nil), s.commands...),
+		TaskOperations:      append([]syncTaskOperationJSON(nil), s.taskOperations...),
+		DurationOperations:  append([]syncDurationOperationJSON(nil), s.durationOperations...),
+		AutoStartOperations: append([]syncAutoStartOperationJSON(nil), s.autoStartOperations...),
+	}
+}
+
+func (s *protocolNativeStore) apply(t *testing.T, result store.SyncResult) {
+	t.Helper()
+	validateProtocolAcknowledgements(t, commandJSONIDs(s.commands), acknowledgementIDs(result.Acknowledgements))
+	validateProtocolAcknowledgements(t, taskOperationJSONIDs(s.taskOperations), taskAcknowledgementIDs(result.TaskAcknowledgements))
+	validateProtocolAcknowledgements(t, durationOperationJSONIDs(s.durationOperations), durationAcknowledgementIDs(result.DurationAcknowledgements))
+	validateProtocolAcknowledgements(t, autoStartOperationJSONIDs(s.autoStartOperations), autoStartAcknowledgementIDs(result.AutoStartAcknowledgements))
+	s.commands = nil
+	s.taskOperations = nil
+	s.durationOperations = nil
+	s.autoStartOperations = nil
+}
+
+func (s *protocolNativeStore) pendingCount() int {
+	return len(s.commands) + len(s.taskOperations) + len(s.durationOperations) + len(s.autoStartOperations)
+}
+
 type protocolRevisionStream struct {
 	cancel    context.CancelFunc
 	body      io.ReadCloser
@@ -260,6 +294,90 @@ func comparableProtocolState(result store.SyncResult) string {
 	return string(encoded)
 }
 
+func validateProtocolAcknowledgements(t *testing.T, sent, acknowledged []string) {
+	t.Helper()
+	if len(sent) != len(acknowledged) {
+		t.Fatalf("acknowledgement count = %d, want %d", len(acknowledged), len(sent))
+	}
+	expected := make(map[string]struct{}, len(sent))
+	for _, id := range sent {
+		expected[id] = struct{}{}
+	}
+	for _, id := range acknowledged {
+		if _, ok := expected[id]; !ok {
+			t.Fatalf("unexpected acknowledgement ID %q", id)
+		}
+		delete(expected, id)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing acknowledgement IDs: %#v", expected)
+	}
+}
+
+func commandJSONIDs(values []syncCommandJSON) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].ID
+	}
+	return result
+}
+
+func taskOperationJSONIDs(values []syncTaskOperationJSON) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].ID
+	}
+	return result
+}
+
+func durationOperationJSONIDs(values []syncDurationOperationJSON) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].ID
+	}
+	return result
+}
+
+func autoStartOperationJSONIDs(values []syncAutoStartOperationJSON) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].ID
+	}
+	return result
+}
+
+func acknowledgementIDs(values []store.Acknowledgement) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].CommandID
+	}
+	return result
+}
+
+func taskAcknowledgementIDs(values []store.TaskAcknowledgement) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].OperationID
+	}
+	return result
+}
+
+func durationAcknowledgementIDs(values []store.DurationAcknowledgement) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].OperationID
+	}
+	return result
+}
+
+func autoStartAcknowledgementIDs(values []store.AutoStartAcknowledgement) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].OperationID
+	}
+	return result
+}
+
 func (f *protocolFixture) converge(t *testing.T, revision int64) []store.SyncResult {
 	t.Helper()
 	results := make([]store.SyncResult, len(f.clients))
@@ -455,6 +573,87 @@ func TestLogicalProtocolClientsConvergeTasksDurationsAndAutoStart(t *testing.T) 
 	states = fixture.converge(t, result.Revision)
 	if !states[0].AutoStartBreaks || result.AutoStartAcknowledgements[0].Outcome != "ignored" || result.AutoStartAcknowledgements[1].Outcome != "applied" {
 		t.Fatalf("auto-start LWW conflict result=%#v state=%v", result.AutoStartAcknowledgements, states[0].AutoStartBreaks)
+	}
+}
+
+func TestIndependentNativeStoresConvergeAcrossBothDeliveryOrders(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	taskID := task.ID("Shared conflict")
+	var snapshots [2]string
+	orders := [][2]int{{0, 1}, {1, 0}}
+
+	for orderIndex, order := range orders {
+		orderIndex, order := orderIndex, order
+		t.Run(fmt.Sprintf("order-%d-%d", order[0], order[1]), func(t *testing.T) {
+			fixture := newProtocolFixture(t)
+			ios, linux := fixture.clients[1], fixture.clients[2]
+			counter := int64(0)
+			stores := []*protocolNativeStore{
+				{
+					client: ios,
+					commands: []syncCommandJSON{{
+						ID: "independent-command-ios", DeviceSequence: int64Pointer(1),
+						TimerID: "independent-timer-ios", Type: "start", Phase: "focus",
+						PlannedDurationMs: int64Pointer(1_500_000), OccurredAt: at.Format(time.RFC3339Nano),
+						HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter, ObservedElapsedMs: int64Pointer(0),
+					}},
+					taskOperations: []syncTaskOperationJSON{{
+						ID: "independent-task-ios", TaskID: taskID, Type: "upsert", Title: "Shared conflict",
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+					durationOperations: []syncDurationOperationJSON{{
+						ID: "independent-duration-ios", Phase: "focus", DurationMs: int64Pointer(1_200_000),
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+					autoStartOperations: []syncAutoStartOperationJSON{{
+						ID: "independent-auto-start-ios", Enabled: boolPointer(false),
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+				},
+				{
+					client: linux,
+					commands: []syncCommandJSON{{
+						ID: "independent-command-linux", DeviceSequence: int64Pointer(1),
+						TimerID: "independent-timer-linux", Type: "start", Phase: "short_break",
+						PlannedDurationMs: int64Pointer(300_000), OccurredAt: at.Format(time.RFC3339Nano),
+						HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter, ObservedElapsedMs: int64Pointer(0),
+					}},
+					taskOperations: []syncTaskOperationJSON{{
+						ID: "independent-task-linux", TaskID: taskID, Type: "delete",
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+					durationOperations: []syncDurationOperationJSON{{
+						ID: "independent-duration-linux", Phase: "focus", DurationMs: int64Pointer(1_800_000),
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+					autoStartOperations: []syncAutoStartOperationJSON{{
+						ID: "independent-auto-start-linux", Enabled: boolPointer(true),
+						OccurredAt: at.Format(time.RFC3339Nano), HLCWallMs: int64Pointer(at.UnixMilli()), HLCCounter: &counter,
+					}},
+				},
+			}
+			captured := [2]syncRequestJSON{stores[0].payload(), stores[1].payload()}
+			for _, storeIndex := range order {
+				result := fixture.sync(t, stores[storeIndex].client, captured[storeIndex])
+				stores[storeIndex].apply(t, result)
+			}
+			for _, local := range stores {
+				if local.pendingCount() != 0 {
+					t.Fatalf("%s retained %d queued operations", local.client.name, local.pendingCount())
+				}
+			}
+			states := fixture.converge(t, 2)
+			state := states[0]
+			if state.CanonicalTimer == nil || state.CanonicalTimer.ID != "independent-timer-linux" ||
+				len(state.History) != 1 || state.History[0].TimerID != "independent-timer-ios" ||
+				len(state.Tasks) != 0 || state.DurationsMs.Focus != 1_800_000 || !state.AutoStartBreaks {
+				t.Fatalf("final independent-store state = %#v", state)
+			}
+			snapshots[orderIndex] = comparableProtocolState(state)
+		})
+	}
+	if snapshots[0] != snapshots[1] {
+		t.Fatalf("delivery orders diverged:\nfirst  %s\nsecond %s", snapshots[0], snapshots[1])
 	}
 }
 

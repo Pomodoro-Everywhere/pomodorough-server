@@ -18,6 +18,8 @@ import (
 const (
 	maxSyncBody      = 1 << 20
 	maxBootstrapBody = 32 << 20
+	maxSafeInteger   = int64(9_007_199_254_740_991)
+	maxClockSkew     = 5 * time.Minute
 )
 
 var (
@@ -189,6 +191,10 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 	}
 	result, err := s.store.Sync(r.Context(), db, identity.UserID, request, time.Now())
 	db.Close()
+	if errors.Is(err, store.ErrRevisionExhausted) {
+		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, "sync account mutations", err)
 		return
@@ -207,11 +213,18 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identit
 	}
 	result, err := s.store.Bootstrap(r.Context(), db, identity.UserID, time.Now())
 	db.Close()
+	if errors.Is(err, store.ErrRevisionExhausted) {
+		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, "read bootstrap snapshot", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+	if result.Changed {
+		s.hub.publish(identity.UserID, result.Revision)
+	}
 }
 
 func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -240,6 +253,10 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 		writeAPIError(w, http.StatusConflict, "request ID conflict")
 		return
 	}
+	if errors.Is(err, store.ErrRevisionExhausted) {
+		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, "resolve bootstrap history", err)
 		return
@@ -256,13 +273,20 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity 
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	history, _, err := store.History(r.Context(), db, time.Now())
+	history, revision, changed, err := s.store.History(r.Context(), db, identity.UserID, time.Now())
 	db.Close()
+	if errors.Is(err, store.ErrRevisionExhausted) {
+		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, "read timer history", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": history})
+	if changed {
+		s.hub.publish(identity.UserID, revision)
+	}
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -273,11 +297,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	_, revision, err := store.History(r.Context(), db, time.Now())
+	_, revision, changed, err := s.store.History(r.Context(), db, identity.UserID, time.Now())
 	db.Close()
+	if errors.Is(err, store.ErrRevisionExhausted) {
+		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, "read stream revision", err)
 		return
+	}
+	if changed {
+		s.hub.publish(identity.UserID, revision)
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
@@ -294,16 +325,21 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 	if err := writeRevision(revision); err != nil {
 		return
 	}
-	keepalive := time.NewTicker(20 * time.Second)
+	lastSent := revision
+	keepalive := time.NewTicker(s.streamKeepaliveInterval)
 	defer keepalive.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case revision := <-updates:
+			if revision <= lastSent {
+				continue
+			}
 			if err := writeRevision(revision); err != nil {
 				return
 			}
+			lastSent = revision
 		case <-keepalive.C:
 			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
@@ -321,7 +357,7 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 	if err := decodeJSON(w, r, maxSyncBody, &payload); err != nil {
 		return store.SyncRequest{}, err
 	}
-	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 {
+	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || *payload.LastRevision > store.MaxSafeRevision || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 {
 		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
 	}
 	request, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, 256, now)
@@ -342,7 +378,7 @@ func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now
 		return store.BootstrapResolutionRequest{}, err
 	}
 	_, validStrategy := validBootstrapStrategies[payload.Strategy]
-	if !validID(payload.RequestID) || !validID(payload.DeviceID) || payload.ExpectedRevision == nil || *payload.ExpectedRevision < 0 || !validStrategy ||
+	if !validID(payload.RequestID) || !validID(payload.DeviceID) || payload.ExpectedRevision == nil || *payload.ExpectedRevision < 0 || *payload.ExpectedRevision > store.MaxSafeRevision || !validStrategy ||
 		payload.Commands == nil || payload.TaskOperations == nil || payload.DurationOperations == nil ||
 		len(payload.Commands) > 4096 || len(payload.TaskOperations) > 4096 || len(payload.DurationOperations) > 4096 || len(autoStartOperations) > 4096 {
 		return store.BootstrapResolutionRequest{}, fmt.Errorf("invalid bootstrap resolution envelope")
@@ -393,7 +429,7 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 	seenDurationOperationIDs := make(map[string]struct{}, len(durationOperations))
 	seenAutoStartOperationIDs := make(map[string]struct{}, len(autoStartOperations))
 	for _, input := range commands {
-		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 {
+		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 || *input.DeviceSequence > maxSafeInteger {
 			return store.SyncRequest{}, fmt.Errorf("invalid command identity")
 		}
 		if _, duplicate := seenCommandIDs[input.ID]; duplicate {
@@ -412,12 +448,12 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		if input.PlannedDurationMs == nil || *input.PlannedDurationMs < int64(time.Minute/time.Millisecond) || *input.PlannedDurationMs > int64(4*time.Hour/time.Millisecond) {
 			return store.SyncRequest{}, fmt.Errorf("invalid timer duration")
 		}
-		if input.HLCWallMs == nil || *input.HLCWallMs <= 0 || *input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter == nil || *input.HLCCounter < 0 || input.ObservedElapsedMs == nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid hybrid clock")
-		}
-		occurredAt, err := time.Parse(time.RFC3339Nano, input.OccurredAt)
+		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
 		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid occurrence time")
+			return store.SyncRequest{}, fmt.Errorf("invalid hybrid clock: %w", err)
+		}
+		if input.ObservedElapsedMs == nil {
+			return store.SyncRequest{}, fmt.Errorf("missing observed elapsed")
 		}
 		request.Commands = append(request.Commands, timer.Command{
 			ID: input.ID, DeviceID: deviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
@@ -446,12 +482,9 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		} else if input.Title != "" {
 			return store.SyncRequest{}, fmt.Errorf("delete task operation has title")
 		}
-		if input.HLCWallMs == nil || *input.HLCWallMs <= 0 || *input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter == nil || *input.HLCCounter < 0 {
-			return store.SyncRequest{}, fmt.Errorf("invalid task operation clock")
-		}
-		occurredAt, err := time.Parse(time.RFC3339Nano, input.OccurredAt)
+		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
 		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid task occurrence time")
+			return store.SyncRequest{}, fmt.Errorf("invalid task operation clock: %w", err)
 		}
 		request.TaskOperations = append(request.TaskOperations, task.Operation{
 			ID: input.ID, DeviceID: deviceID, TaskID: input.TaskID, Type: input.Type, Title: title,
@@ -472,12 +505,9 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		if input.DurationMs == nil || *input.DurationMs < 60_000 || *input.DurationMs > 10_800_000 || *input.DurationMs%60_000 != 0 {
 			return store.SyncRequest{}, fmt.Errorf("invalid duration value")
 		}
-		if input.HLCWallMs == nil || *input.HLCWallMs < 0 || *input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter == nil || *input.HLCCounter < 0 {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration operation clock")
-		}
-		occurredAt, err := time.Parse(time.RFC3339Nano, input.OccurredAt)
+		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
 		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration occurrence time")
+			return store.SyncRequest{}, fmt.Errorf("invalid duration operation clock: %w", err)
 		}
 		request.DurationOperations = append(request.DurationOperations, store.DurationOperation{
 			ID: input.ID, DeviceID: deviceID, Phase: input.Phase, DurationMs: *input.DurationMs,
@@ -495,12 +525,9 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		if input.Enabled == nil {
 			return store.SyncRequest{}, fmt.Errorf("missing auto-start value")
 		}
-		if input.HLCWallMs == nil || *input.HLCWallMs < 0 || *input.HLCWallMs > now.Add(5*time.Minute).UnixMilli() || input.HLCCounter == nil || *input.HLCCounter < 0 {
-			return store.SyncRequest{}, fmt.Errorf("invalid auto-start operation clock")
-		}
-		occurredAt, err := time.Parse(time.RFC3339Nano, input.OccurredAt)
+		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
 		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid auto-start occurrence time")
+			return store.SyncRequest{}, fmt.Errorf("invalid auto-start operation clock: %w", err)
 		}
 		request.AutoStartOperations = append(request.AutoStartOperations, store.AutoStartOperation{
 			ID: input.ID, DeviceID: deviceID, Enabled: *input.Enabled, OccurredAt: occurredAt,
@@ -508,6 +535,31 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		})
 	}
 	return request, nil
+}
+
+func parseOperationClock(occurredAtValue string, wallMs, counter *int64, allowLegacy bool, now time.Time) (time.Time, error) {
+	if wallMs == nil || counter == nil || *wallMs < 0 || *wallMs > maxSafeInteger || *counter < 0 || *counter > maxSafeInteger {
+		return time.Time{}, errors.New("clock is outside the safe integer range")
+	}
+	occurredAt, err := time.Parse(time.RFC3339Nano, occurredAtValue)
+	if err != nil {
+		return time.Time{}, errors.New("occurrence time is not RFC 3339")
+	}
+	if *wallMs == 0 {
+		if !allowLegacy || *counter != 0 || !occurredAt.Equal(time.Unix(0, 0).UTC()) {
+			return time.Time{}, errors.New("invalid legacy clock sentinel")
+		}
+		return occurredAt, nil
+	}
+	latest := now.Add(maxClockSkew)
+	if *wallMs > latest.UnixMilli() || occurredAt.After(latest) {
+		return time.Time{}, errors.New("clock is too far ahead of server time")
+	}
+	delta := occurredAt.Sub(time.UnixMilli(*wallMs))
+	if delta < -maxClockSkew || delta > maxClockSkew {
+		return time.Time{}, errors.New("occurrence time and hybrid clock disagree")
+	}
+	return occurredAt, nil
 }
 
 func validID(value string) bool {

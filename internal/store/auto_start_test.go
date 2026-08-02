@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -227,6 +228,34 @@ func TestBootstrapLegacyOmittedAutoStartHashReplaysStoredResponse(t *testing.T) 
 	presentEmpty.AutoStartOperationsPresent = true
 	if _, err := userStore.ResolveBootstrap(ctx, db, userID, presentEmpty, now.Add(2*time.Hour)); !errors.Is(err, ErrRequestIDConflict) {
 		t.Fatalf("present-empty retry error = %v, want ErrRequestIDConflict", err)
+	}
+}
+
+func TestBootstrapLegacyReplayNormalizesZeroServerHLC(t *testing.T) {
+	ctx := context.Background()
+	userStore, db, userID, now := openTestUser(t, "bootstrap-legacy-zero-hlc-subject")
+	defer db.Close()
+	request := BootstrapResolutionRequest{
+		RequestID: "resolution-legacy-zero-hlc", DeviceID: "device-0001", ExpectedRevision: 0, Strategy: BootstrapKeepRemote,
+	}
+	legacyPayload := `{"DeviceID":"device-0001","ExpectedRevision":0,"Strategy":"keep_remote","Commands":[],"TaskOperations":[],"DurationOperations":[]}`
+	legacyHash := sha256.Sum256([]byte(legacyPayload))
+	serverTime := now.UTC().Format(time.RFC3339Nano)
+	legacyResponse := fmt.Sprintf(
+		`{"acknowledgements":[],"taskAcknowledgements":[],"durationAcknowledgements":[],"revision":0,"canonicalTimer":null,"history":[],"tasks":[],"durationsMs":{"focus":1500000,"short_break":300000,"long_break":900000},"serverTime":%q,"serverHlcWallMs":0,"serverHlcCounter":0}`,
+		serverTime,
+	)
+	if _, err := db.ExecContext(ctx, `INSERT INTO bootstrap_resolutions(request_id, payload_hash, response_json, created_at_ms)
+		VALUES (?, ?, ?, ?)`, request.RequestID, legacyHash[:], legacyResponse, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := userStore.ResolveBootstrap(ctx, db, userID, request, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ServerHLCWallMs != now.UnixMilli() || replayed.ServerHLCCounter != 0 {
+		t.Fatalf("legacy replay server HLC = (%d,%d), want (%d,0)", replayed.ServerHLCWallMs, replayed.ServerHLCCounter, now.UnixMilli())
 	}
 }
 

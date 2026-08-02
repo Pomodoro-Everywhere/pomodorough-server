@@ -148,7 +148,11 @@ func TestParseAutoStartRejectsInvalidDuplicateNullAndKeepRemote(t *testing.T) {
 		{name: "future wall", operation: validAutoStartOperationJSON(now, true)},
 		{name: "missing counter", operation: validAutoStartOperationJSON(now, true)},
 		{name: "negative counter", operation: validAutoStartOperationJSON(now, true)},
+		{name: "unsafe counter", operation: validAutoStartOperationJSON(now, true)},
 		{name: "invalid occurredAt", operation: validAutoStartOperationJSON(now, true)},
+		{name: "future occurredAt", operation: validAutoStartOperationJSON(now, true)},
+		{name: "occurredAt and clock disagree", operation: validAutoStartOperationJSON(now, true)},
+		{name: "invalid legacy occurredAt", operation: validAutoStartOperationJSON(now, true)},
 	}
 	tests[0].operation.ID = "short"
 	tests[1].operation.Enabled = nil
@@ -156,7 +160,12 @@ func TestParseAutoStartRejectsInvalidDuplicateNullAndKeepRemote(t *testing.T) {
 	tests[3].operation.HLCWallMs = int64Pointer(now.Add(5*time.Minute).UnixMilli() + 1)
 	tests[4].operation.HLCCounter = nil
 	tests[5].operation.HLCCounter = int64Pointer(-1)
-	tests[6].operation.OccurredAt = "yesterday"
+	tests[6].operation.HLCCounter = int64Pointer(maxSafeInteger + 1)
+	tests[7].operation.OccurredAt = "yesterday"
+	tests[8].operation.OccurredAt = now.Add(maxClockSkew + time.Millisecond).Format(time.RFC3339Nano)
+	tests[9].operation.OccurredAt = now.Add(-maxClockSkew - time.Millisecond).Format(time.RFC3339Nano)
+	tests[10].operation.HLCWallMs = int64Pointer(0)
+	tests[10].operation.HLCCounter = int64Pointer(0)
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			payload := validSyncRequestJSON(now)
@@ -271,5 +280,13 @@ func TestHTTPLegacyBootstrapReplayNormalizesRequiredArrays(t *testing.T) {
 		if string(fields[field]) != "[]" {
 			t.Errorf("%s = %s, want []", field, fields[field])
 		}
+	}
+	var normalized store.SyncResult
+	if err := json.Unmarshal(response.Body.Bytes(), &normalized); err != nil {
+		t.Fatal(err)
+	}
+	expectedWallMs := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC).UnixMilli()
+	if normalized.ServerHLCWallMs != expectedWallMs || normalized.ServerHLCCounter != 0 {
+		t.Fatalf("legacy replay server HLC = (%d,%d), want (%d,0)", normalized.ServerHLCWallMs, normalized.ServerHLCCounter, expectedWallMs)
 	}
 }

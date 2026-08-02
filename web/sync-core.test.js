@@ -66,6 +66,14 @@ function autoStartOperation(id, enabled, wall = 1, counter = 0) {
   };
 }
 
+function permutations(values) {
+  if (values.length === 0) return [[]];
+  return values.flatMap((value, index) => {
+    const rest = values.slice(0, index).concat(values.slice(index + 1));
+    return permutations(rest).map((permutation) => [value, ...permutation]);
+  });
+}
+
 function responseFor(sent, overrides = {}) {
   return {
     acknowledgements: sent.commands.map((item) => ({ commandId: item.id, outcome: "applied", reason: "" })),
@@ -79,13 +87,13 @@ function responseFor(sent, overrides = {}) {
     durationsMs: defaults,
     autoStartBreaks: false,
     serverTime: "2026-07-22T12:30:00Z",
-    serverHlcWallMs: 1_753_187_400_000,
+    serverHlcWallMs: Date.parse("2026-07-22T12:30:00Z"),
     serverHlcCounter: 0,
     ...overrides
   };
 }
 
-test("bootstrap decision separates ownership and one-sided history", () => {
+test("bootstrap decision separates ownership, empty sides, and conflicting meaningful state", () => {
   assert.deepEqual(sync.decideBootstrap({ localOwnerId: "user-1", currentUserId: "user-1" }), {
     mode: "normal_sync",
     reason: "same_owner"
@@ -110,6 +118,19 @@ test("bootstrap decision separates ownership and one-sided history", () => {
     remoteHistory: [],
     hasLocalState: true
   }), { mode: "auto", strategy: "merge", reason: "local_state_only" });
+
+  const conflictCases = [
+    { localHistory: [history("local")], remoteHistory: [], hasRemoteState: true, localHistoryCount: 1, remoteHistoryCount: 0 },
+    { localHistory: [], remoteHistory: [history("remote")], hasLocalState: true, localHistoryCount: 0, remoteHistoryCount: 1 },
+    { localHistory: [history("local")], remoteHistory: [history("remote")], localHistoryCount: 1, remoteHistoryCount: 1 }
+  ];
+  for (const input of conflictCases) {
+    assert.deepEqual(sync.decideBootstrap(input), {
+      mode: "choose",
+      localHistoryCount: input.localHistoryCount,
+      remoteHistoryCount: input.remoteHistoryCount
+    });
+  }
 });
 
 test("bootstrap preflight counts unique completed timers and ignores terminal non-completions", () => {
@@ -187,6 +208,46 @@ test("local-state detection ignores empty defaults and sees queued or projected 
   assert.equal(sync.hasLocalState(empty), false);
   assert.equal(sync.hasLocalState({ ...empty, taskOperations: [taskOperation("op-1", "task-1", "Local")] }), true);
   assert.equal(sync.hasLocalState({ ...empty, durationsMs: { ...defaults, focus: 1_800_000 } }), true);
+  assert.equal(sync.hasLocalState({ ...empty, history: [{ ...history("cancelled"), status: "cancelled" }] }), true);
+  assert.equal(sync.hasLocalState({ ...empty, autoStartBreaks: true }), true);
+});
+
+test("remote-state detection covers every synchronized canonical domain", () => {
+  const empty = {
+    canonicalTimer: null,
+    history: [],
+    tasks: [],
+    durationsMs: defaults,
+    defaultDurationsMs: defaults,
+    autoStartBreaks: false
+  };
+  assert.equal(sync.hasRemoteState(empty), false);
+  for (const remote of [
+    { ...empty, canonicalTimer: { id: "timer-remote" } },
+    { ...empty, history: [{ ...history("cancelled"), status: "cancelled" }] },
+    { ...empty, tasks: [{ id: "task-remote", title: "Remote" }] },
+    { ...empty, durationsMs: { ...defaults, short_break: 600_000 } },
+    { ...empty, autoStartBreaks: true }
+  ]) {
+    assert.equal(sync.hasRemoteState(remote), true);
+  }
+});
+
+test("bootstrap state matrix never silently discards one-sided completed history conflicts", () => {
+  const cases = [
+    { localHistory: [], remoteHistory: [], hasLocalState: false, hasRemoteState: false, mode: "auto", strategy: "keep_remote" },
+    { localHistory: [], remoteHistory: [], hasLocalState: true, hasRemoteState: false, mode: "auto", strategy: "merge" },
+    { localHistory: [], remoteHistory: [], hasLocalState: true, hasRemoteState: true, mode: "auto", strategy: "merge" },
+    { localHistory: [history("local")], remoteHistory: [], hasLocalState: true, hasRemoteState: false, mode: "auto", strategy: "replace_remote" },
+    { localHistory: [], remoteHistory: [history("remote")], hasLocalState: false, hasRemoteState: true, mode: "auto", strategy: "keep_remote" },
+    { localHistory: [history("local")], remoteHistory: [], hasLocalState: true, hasRemoteState: true, mode: "choose" },
+    { localHistory: [], remoteHistory: [history("remote")], hasLocalState: true, hasRemoteState: true, mode: "choose" }
+  ];
+  for (const item of cases) {
+    const decision = sync.decideBootstrap(item);
+    assert.equal(decision.mode, item.mode);
+    if (item.strategy) assert.equal(decision.strategy, item.strategy);
+  }
 });
 
 test("chooser strategies require confirmation and expose destructive or merge warning copy", () => {
@@ -445,17 +506,117 @@ test("canonical response rejects duplicate history identities", () => {
   assert.throws(() => sync.validateCanonicalResponse(duplicateTimer, sent), /invalid history/);
 });
 
-test("server time comparison is strict, offset-aware, and fraction-preserving", () => {
-  assert.equal(sync.compareServerTimes("2026-07-22T12:30:00Z", "2026-07-22T14:30:00+02:00"), 0);
-  assert.equal(sync.compareServerTimes("2026-07-22T12:30:00.000000002Z", "2026-07-22T12:30:00.000000001Z"), 1);
-  assert.equal(sync.compareServerTimes("2026-07-22T12:29:59.9Z", "2026-07-22T12:30:00Z"), -1);
-  assert.equal(sync.compareServerTimes("2026-02-30T12:30:00Z", "2026-07-22T12:30:00Z"), null);
+test("server time validation accepts offsets and fractions without ordering snapshots", () => {
+  assert.equal(sync.validDateTime("2026-07-22T12:30:00Z"), true);
+  assert.equal(sync.validDateTime("2026-07-22T14:30:00+02:00"), true);
+  assert.equal(sync.validDateTime("2026-07-22T12:30:00.000000002Z"), true);
+  assert.equal(sync.validDateTime("2026-02-30T12:30:00Z"), false);
+});
+
+test("canonical server HLC is bounded by trusted server time", () => {
+  const sent = { commands: [], taskOperations: [], durationOperations: [] };
+  const serverTime = "2026-07-22T12:30:00Z";
+  const wallMs = Date.parse(serverTime);
+  assert.doesNotThrow(() => sync.validateCanonicalResponse(responseFor(sent, { serverTime, serverHlcWallMs: wallMs }), sent));
+  assert.doesNotThrow(() => sync.validateCanonicalResponse(responseFor(sent, { serverTime, serverHlcWallMs: wallMs + 300_000 }), sent));
+  assert.throws(() => sync.validateCanonicalResponse(responseFor(sent, { serverTime, serverHlcWallMs: wallMs - 1 }), sent), /inconsistent/);
+  assert.throws(() => sync.validateCanonicalResponse(responseFor(sent, { serverTime, serverHlcWallMs: wallMs + 300_001 }), sent), /inconsistent/);
+});
+
+test("server clock offset uses response midpoint and trusted now survives one-hour device skew", () => {
+  const serverTime = "2026-07-22T12:30:00Z";
+  const serverTimeMs = Date.parse(serverTime);
+  const fastLocal = serverTimeMs + 3_600_000;
+  const slowLocal = serverTimeMs - 3_600_000;
+  const fast = sync.serverClockOffset(serverTime, fastLocal, fastLocal + 100, 1);
+  const slow = sync.serverClockOffset(serverTime, slowLocal, slowLocal + 100, 2);
+
+  assert.deepEqual(fast, {
+    offsetMs: -3_600_050, uncertaintyMs: 50, sampledAtWallMs: fastLocal + 50,
+    requestSequence: 1, receivedAtWallMs: fastLocal + 100
+  });
+  assert.deepEqual(slow, {
+    offsetMs: 3_599_950, uncertaintyMs: 50, sampledAtWallMs: slowLocal + 50,
+    requestSequence: 2, receivedAtWallMs: slowLocal + 100
+  });
+  assert.equal(sync.trustedNow(fastLocal + 1_000, fast), serverTimeMs + 950);
+  assert.equal(sync.trustedNow(slowLocal + 1_000, slow), serverTimeMs + 950);
+  assert.equal(sync.trustedNow(fastLocal - 7_200_000, fast, serverTimeMs + 2_000), serverTimeMs + 2_000);
+  assert.throws(() => sync.serverClockOffset(serverTime, fastLocal + 1, fastLocal, 3), /timing/);
+});
+
+test("trusted clock rejects high uncertainty and invalid persisted tuples", () => {
+  const serverTime = "2026-07-22T12:30:00Z";
+  const localTime = Date.parse(serverTime) + 3_600_000;
+  assert.doesNotThrow(() => sync.serverClockOffset(serverTime, localTime, localTime + 60_000, 1));
+  assert.throws(() => sync.serverClockOffset(serverTime, localTime, localTime + 60_001, 2), /uncertainty/);
+  for (const sample of [
+    { offsetMs: 0, uncertaintyMs: 30_001, sampledAtWallMs: localTime, requestSequence: 1, receivedAtWallMs: localTime },
+    { offsetMs: 0, uncertaintyMs: 0, sampledAtWallMs: 0, requestSequence: 1, receivedAtWallMs: localTime },
+    { offsetMs: Number.MAX_SAFE_INTEGER, uncertaintyMs: 0, sampledAtWallMs: localTime, requestSequence: 1, receivedAtWallMs: localTime },
+    { offsetMs: 0, uncertaintyMs: 0, sampledAtWallMs: localTime, requestSequence: 0, receivedAtWallMs: localTime },
+    { offsetMs: 0, uncertaintyMs: 0, sampledAtWallMs: localTime, requestSequence: 1, receivedAtWallMs: localTime - 1 }
+  ]) {
+    assert.equal(sync.validClockSample(sample), false);
+    assert.throws(() => sync.trustedNow(localTime, sample), /outside/);
+  }
+  assert.equal(sync.trustedNow(localTime, null), localTime);
+});
+
+test("legacy duration wire migration always uses Unix epoch sentinel", () => {
+  const migrated = sync.durationRequestOperation({
+    id: "duration-legacy", phase: "focus", durationMs: 1_800_000,
+    occurredAt: "2026-07-22T12:30:00Z", hlcWallMs: 0, hlcCounter: 0
+  });
+  assert.equal(migrated.occurredAt, "1970-01-01T00:00:00.000Z");
+});
+
+test("timer batches order by HLC, device, and command ID, never device sequence", () => {
+  const laterSequenceEarlierHlc = { ...command("command-a", 99), hlcWallMs: 100 };
+  laterSequenceEarlierHlc.deviceId = "device-1";
+  const earlierSequenceLaterHlc = { ...command("command-b", 1), deviceId: "device-1", hlcWallMs: 200 };
+  const tied = { ...command("command-c", 50), deviceId: "device-2", hlcWallMs: 200 };
+  const sameDeviceIdTie = { ...command("command-c", 50), deviceId: "device-1", hlcWallMs: 200 };
+  assert.deepEqual(
+    sync.sendableTimerCommands([tied, sameDeviceIdTie, earlierSequenceLaterHlc, laterSequenceEarlierHlc], 4).map((item) => item.id),
+    ["command-a", "command-b", "command-c", "command-c"]
+  );
+  assert.deepEqual(
+    [tied, sameDeviceIdTie, earlierSequenceLaterHlc, laterSequenceEarlierHlc].sort(sync.compareTimerCommands).map((item) => `${item.deviceId}:${item.id}`),
+    ["device-1:command-a", "device-1:command-b", "device-1:command-c", "device-2:command-c"]
+  );
+  assert.deepEqual(
+    sync.sendableTimerCommands([tied, earlierSequenceLaterHlc, laterSequenceEarlierHlc], 3).map((item) => item.id),
+    ["command-a", "command-b", "command-c"]
+  );
+});
+
+test("timer comparator is transitive with missing legacy device IDs", () => {
+  const commands = [
+    { ...command("command-z", 3), deviceId: "device-z", hlcWallMs: 100 },
+    { ...command("command-m", 2), hlcWallMs: 100 },
+    { ...command("command-a", 1), deviceId: "device-a", hlcWallMs: 100 },
+    { ...command("command-invalid", 4), deviceId: "device-b", hlcWallMs: undefined, hlcCounter: Number.NaN }
+  ];
+  const expected = ["command-invalid", "command-m", "command-a", "command-z"];
+  for (const order of permutations(commands)) {
+    assert.deepEqual([...order].sort(sync.compareTimerCommands).map((item) => item.id), expected);
+  }
+  for (const left of commands) {
+    for (const right of commands) {
+      const forward = Math.sign(sync.compareTimerCommands(left, right));
+      const reverse = Math.sign(sync.compareTimerCommands(right, left));
+      assert.equal(forward === 0 && reverse === 0 || forward === -reverse, true);
+    }
+  }
 });
 
 test("403 refresh retries exact JSON body once and never loops", async () => {
   const events = [];
   const responses = [{ status: 403 }, { status: 403 }];
   const body = JSON.stringify({ requestId: "request-1", commands: [] });
+  let sequence = 0;
+  let timing;
   const response = await sync.postJSONWithCsrfRetry({
     fetcher: async (url, options) => {
       events.push({ type: "fetch", url, options: structuredClone(options) });
@@ -464,6 +625,8 @@ test("403 refresh retries exact JSON body once and never loops", async () => {
     url: "/api/v1/bootstrap/resolve",
     body,
     csrfToken: "old-token",
+    nextRequestSequence: async () => sequence += 1,
+    onTiming: (value) => { timing = value; },
     refreshCsrf: async () => {
       events.push({ type: "refresh" });
       return "new-token";
@@ -476,6 +639,7 @@ test("403 refresh retries exact JSON body once and never loops", async () => {
   assert.equal(events[2].options.body, body);
   assert.equal(events[0].options.headers["X-CSRF-Token"], "old-token");
   assert.equal(events[2].options.headers["X-CSRF-Token"], "new-token");
+  assert.equal(timing.requestSequence, 2);
 });
 
 test("sync batching, task acknowledgements, and optimistic task rebase preserve later operations", () => {
@@ -507,6 +671,37 @@ test("sync batching, task acknowledgements, and optimistic task rebase preserve 
     { id: "task-sent", title: "Sent" }
   ]);
   assert.equal(rebased.pendingDurationOperations.length, 44);
+});
+
+test("sync batching covers protocol boundaries and multiple batches for every queue", () => {
+  const cases = new Map([
+    [1, [1]],
+    [255, [255]],
+    [256, [256]],
+    [257, [256, 1]],
+    [513, [256, 256, 1]]
+  ]);
+  const factories = {
+    commands: (index) => command(`batch-command-${index}`, index + 1),
+    taskOperations: (index) =>
+      taskOperation(`batch-task-operation-${index}`, `batch-task-${index}`, `Task ${index}`, index + 1),
+    durationOperations: (index) => durationOperation(`batch-duration-${index}`, index + 1),
+    autoStartOperations: (index) =>
+      autoStartOperation(`batch-auto-start-${index}`, index % 2 === 0, index + 1)
+  };
+
+  for (const [field, factory] of Object.entries(factories)) {
+    for (const [operationCount, expectedBatchSizes] of cases) {
+      let pending = Array.from({ length: operationCount }, (_, index) => factory(index));
+      const batchSizes = [];
+      while (pending.length) {
+        const batch = sync.buildSyncBatch({ [field]: pending });
+        batchSizes.push(batch[field].length);
+        pending = pending.slice(batch[field].length);
+      }
+      assert.deepEqual(batchSizes, expectedBatchSizes, `${field} count ${operationCount}`);
+    }
+  }
 });
 
 test("rebase removes every acknowledged outcome while preserving unsent mixed work", () => {
@@ -707,7 +902,17 @@ test("generated break waits for applied finish while later independent start rem
 
   const applied = sync.generatedBreakUpdates(commands, [
     { commandId: finish.id, outcome: "applied", reason: "" }
-  ], { canonicalTimer: { id: finish.timerId, status: "completed" } });
+  ], {
+    history: [{
+      timerId: finish.timerId,
+      commandId: finish.id,
+      phase: "focus",
+      status: "completed",
+      completedAt: "2026-07-22T12:25:00Z"
+    }],
+    durationsMs: defaults,
+    canonicalTimer: null
+  });
   assert.deepEqual(applied.promoteCommands.map((item) => item.id), [generated.id]);
   assert.equal(Object.hasOwn(applied.promoteCommands[0], "dependsOnCommandId"), false);
   assert.deepEqual(applied.dropCommandIds, []);
@@ -726,4 +931,84 @@ test("generated break waits for applied finish while later independent start rem
     { commandId: finish.id, outcome: "applied", reason: "" }
   ], { canonicalTimer: { id: "remote-newer", status: "running" } });
   assert.deepEqual(supersededAfterApply.dropCommandIds, [generated.id]);
+});
+
+test("generated break resolves every dependent command across outcome evidence and phase matrix", () => {
+  const chains = [
+    ["start"],
+    ["start", "pause"],
+    ["start", "pause", "resume"],
+    ["start", "finish"],
+    ["start", "cancel"],
+    ["start", "finish", "clear"]
+  ];
+  for (const outcome of ["applied", "ignored", "rejected"]) {
+    for (const exactCompletion of [false, true]) {
+      for (const phaseCorrection of [false, true]) {
+        for (const types of chains) {
+          const suffix = `${outcome}-${exactCompletion}-${phaseCorrection}-${types.join("-")}`;
+          const source = {
+            ...command(`source-${suffix}`, 1),
+            type: "finish",
+            timerId: `focus-${suffix}`,
+            phase: "focus"
+          };
+          const dependents = types.map((type, index) => ({
+            ...command(`dependent-${index}-${suffix}`, index + 2),
+            type,
+            timerId: `break-${suffix}`,
+            phase: "short_break",
+            plannedDurationMs: defaults.short_break,
+            observedElapsedMs: index * 1_000,
+            dependsOnCommandId: source.id,
+            ...(index === 0 ? { generatedBreak: true } : {})
+          }));
+          const prior = phaseCorrection
+            ? [1, 2, 3].map((index) => ({
+                ...history(`prior-${index}-${suffix}`),
+                commandId: `prior-command-${index}-${suffix}`,
+                completedAt: `2026-07-22T12:2${index}:00Z`
+              }))
+            : [];
+          const evidence = {
+            ...history(`completion-${suffix}`),
+            timerId: exactCompletion ? source.timerId : `other-${suffix}`,
+            commandId: exactCompletion ? source.id : `other-command-${suffix}`,
+            completedAt: "2026-07-22T12:25:00Z"
+          };
+          const result = sync.generatedBreakUpdates(
+            [source, ...dependents],
+            [{ commandId: source.id, outcome, reason: "" }],
+            {
+              canonicalTimer: null,
+              history: [...prior, evidence],
+              durationsMs: defaults
+            }
+          );
+          const releases = exactCompletion && outcome !== "rejected";
+          assert.deepEqual(
+            result.promoteCommands.map((item) => item.id),
+            releases ? dependents.map((item) => item.id) : [],
+            suffix
+          );
+          assert.deepEqual(
+            result.dropCommandIds,
+            releases ? [] : dependents.map((item) => item.id),
+            suffix
+          );
+          if (releases) {
+            const expectedPhase = phaseCorrection && !types.includes("finish")
+              ? "long_break"
+              : "short_break";
+            assert.ok(result.promoteCommands.every((item) =>
+              item.phase === expectedPhase
+                && item.plannedDurationMs === defaults[expectedPhase]
+                && !Object.hasOwn(item, "dependsOnCommandId")
+                && !Object.hasOwn(item, "generatedBreak")
+            ), suffix);
+          }
+        }
+      }
+    }
+  }
 });

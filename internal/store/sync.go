@@ -109,6 +109,24 @@ func normalizeSyncResult(result SyncResult) SyncResult {
 	return result
 }
 
+func normalizeStoredSyncResult(result SyncResult) (SyncResult, error) {
+	result = normalizeSyncResult(result)
+	if result.ServerHLCWallMs != 0 {
+		return result, nil
+	}
+	serverTime, err := time.Parse(time.RFC3339Nano, result.ServerTime)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("decode stored bootstrap server time: %w", err)
+	}
+	serverWallMs := serverTime.UnixMilli()
+	if serverWallMs < 1 || serverWallMs > MaxSafeRevision {
+		return SyncResult{}, errors.New("stored bootstrap server time is outside supported range")
+	}
+	result.ServerHLCWallMs = serverWallMs
+	result.ServerHLCCounter = 0
+	return result, nil
+}
+
 func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request SyncRequest, now time.Time) (SyncResult, error) {
 	if err := validateUniqueOperationIDs(request); err != nil {
 		return SyncResult{}, err
@@ -135,9 +153,16 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 	if err != nil {
 		return SyncResult{}, err
 	}
+	projectionChanged, err := timerProjectionChanged(ctx, tx, reduction.timer)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	revision := reduction.revision
-	if applied.changed {
-		revision++
+	if applied.changed || projectionChanged {
+		revision, err = safeRevisionIncrement(revision)
+		if err != nil {
+			return SyncResult{}, err
+		}
 	}
 	if err := persistReduction(ctx, tx, reduction, revision); err != nil {
 		return SyncResult{}, err
@@ -148,7 +173,41 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 
 	result := resultFromReduction(reduction, revision, now, &request)
 	addAcknowledgements(&result, request, applied, reduction)
-	result.Changed = applied.changed
+	result.Changed = applied.changed || projectionChanged
+	return result, nil
+}
+
+func (s *Store) materializeProjection(ctx context.Context, db *sql.DB, userID string, now time.Time) (SyncResult, error) {
+	unlock := s.LockUser(userID)
+	defer unlock()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("begin projection materialization: %w", err)
+	}
+	defer tx.Rollback()
+	reduction, err := reduceAccount(ctx, tx, now)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	changed, err := timerProjectionChanged(ctx, tx, reduction.timer)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	revision := reduction.revision
+	if changed {
+		revision, err = safeRevisionIncrement(revision)
+		if err != nil {
+			return SyncResult{}, err
+		}
+		if err := persistReduction(ctx, tx, reduction, revision); err != nil {
+			return SyncResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SyncResult{}, fmt.Errorf("commit projection materialization: %w", err)
+	}
+	result := resultFromReduction(reduction, revision, now, nil)
+	result.Changed = changed
 	return result, nil
 }
 
@@ -317,6 +376,9 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 	if err := source.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&reduction.revision); err != nil {
 		return accountReduction{}, fmt.Errorf("read account revision: %w", err)
 	}
+	if err := validateCanonicalRevision(reduction.revision); err != nil {
+		return accountReduction{}, err
+	}
 	var err error
 	reduction.commands, err = loadCommands(ctx, source)
 	if err != nil {
@@ -342,6 +404,9 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 }
 
 func persistReduction(ctx context.Context, tx *sql.Tx, reduction accountReduction, revision int64) error {
+	if err := validateCanonicalRevision(revision); err != nil {
+		return err
+	}
 	for commandID, outcome := range reduction.timer.Outcomes {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO command_outcomes(command_id, outcome, reason) VALUES (?, ?, ?)
 			ON CONFLICT(command_id) DO UPDATE SET outcome = excluded.outcome, reason = excluded.reason`, commandID, outcome.Outcome, outcome.Reason); err != nil {
@@ -371,6 +436,74 @@ func persistReduction(ctx context.Context, tx *sql.Tx, reduction accountReductio
 		return fmt.Errorf("save account state: %w", err)
 	}
 	return nil
+}
+
+func timerProjectionChanged(ctx context.Context, source databaseQueryer, result timer.Result) (bool, error) {
+	var persistedCurrentID sql.NullString
+	if err := source.QueryRowContext(ctx, `SELECT current_timer_id FROM account_state WHERE singleton = 1`).Scan(&persistedCurrentID); err != nil {
+		return false, fmt.Errorf("read current timer projection: %w", err)
+	}
+	currentID := ""
+	if result.Canonical != nil {
+		currentID = result.Canonical.ID
+	}
+	if persistedCurrentID.String != currentID {
+		return true, nil
+	}
+
+	rows, err := source.QueryContext(ctx, `SELECT timer_id, task_id, phase, status, planned_duration_ms, elapsed_at_anchor_ms,
+		anchor_at_ms, started_at_ms, ended_at_ms, last_command_id, terminal_command_id, superseded_by_timer_id
+	FROM timer_sessions ORDER BY timer_id`)
+	if err != nil {
+		return false, fmt.Errorf("read timer projection: %w", err)
+	}
+	defer rows.Close()
+	persisted := make([]timer.Session, 0, len(result.Sessions))
+	for rows.Next() {
+		var session timer.Session
+		var taskID, terminalCommandID, supersededByTimerID sql.NullString
+		var anchorAtMs, startedAtMs int64
+		var endedAtMs sql.NullInt64
+		if err := rows.Scan(&session.TimerID, &taskID, &session.Phase, &session.Status, &session.PlannedDurationMs,
+			&session.ElapsedAtAnchorMs, &anchorAtMs, &startedAtMs, &endedAtMs, &session.LastCommandID,
+			&terminalCommandID, &supersededByTimerID); err != nil {
+			return false, fmt.Errorf("scan timer projection: %w", err)
+		}
+		session.TaskID = taskID.String
+		session.AnchorAt = time.UnixMilli(anchorAtMs).UTC()
+		session.StartedAt = time.UnixMilli(startedAtMs).UTC()
+		if endedAtMs.Valid {
+			session.EndedAt = time.UnixMilli(endedAtMs.Int64).UTC()
+		}
+		session.TerminalCommandID = terminalCommandID.String
+		session.SupersededByTimerID = supersededByTimerID.String
+		persisted = append(persisted, session)
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate timer projection: %w", err)
+	}
+	if len(persisted) != len(result.Sessions) {
+		return true, nil
+	}
+	for index, session := range result.Sessions {
+		stored := persisted[index]
+		if stored.TimerID != session.TimerID || stored.TaskID != session.TaskID || stored.Phase != session.Phase ||
+			stored.Status != session.Status || stored.PlannedDurationMs != session.PlannedDurationMs ||
+			stored.ElapsedAtAnchorMs != session.ElapsedAtAnchorMs || !sameProjectedTime(stored.AnchorAt, session.AnchorAt) ||
+			!sameProjectedTime(stored.StartedAt, session.StartedAt) || !sameProjectedTime(stored.EndedAt, session.EndedAt) ||
+			stored.LastCommandID != session.LastCommandID || stored.TerminalCommandID != session.TerminalCommandID ||
+			stored.SupersededByTimerID != session.SupersededByTimerID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func sameProjectedTime(left, right time.Time) bool {
+	if left.IsZero() || right.IsZero() {
+		return left.IsZero() && right.IsZero()
+	}
+	return left.UnixMilli() == right.UnixMilli()
 }
 
 func resultFromReduction(reduction accountReduction, revision int64, now time.Time, request *SyncRequest) SyncResult {
@@ -565,16 +698,12 @@ func sameAutoStartOperation(stored, submitted AutoStartOperation, deviceID strin
 		stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
 }
 
-func History(ctx context.Context, db *sql.DB, now time.Time) ([]timer.HistoryItem, int64, error) {
-	commands, err := loadCommands(ctx, db)
+func (s *Store) History(ctx context.Context, db *sql.DB, userID string, now time.Time) ([]timer.HistoryItem, int64, bool, error) {
+	result, err := s.materializeProjection(ctx, db, userID, now)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	var revision int64
-	if err := db.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&revision); err != nil {
-		return nil, 0, fmt.Errorf("read account revision: %w", err)
-	}
-	return nonNilHistory(timer.Reduce(commands, now).History), revision, nil
+	return result.History, result.Revision, result.Changed, nil
 }
 
 type queryer interface {

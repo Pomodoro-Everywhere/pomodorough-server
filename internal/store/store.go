@@ -15,15 +15,33 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const (
+	schemaVersion   = 5
+	MaxSafeRevision = int64(9_007_199_254_740_991)
+)
 
 var (
 	ErrNotFound          = errors.New("user database not found")
 	ErrUnauthorized      = errors.New("unauthorized")
 	ErrRefreshReuse      = errors.New("refresh token reuse detected")
 	ErrRevisionConflict  = errors.New("revision conflict")
+	ErrRevisionExhausted = errors.New("canonical revision exhausted")
 	ErrRequestIDConflict = errors.New("request ID conflict")
 )
+
+func safeRevisionIncrement(revision int64) (int64, error) {
+	if err := validateCanonicalRevision(revision); err != nil || revision == MaxSafeRevision {
+		return 0, ErrRevisionExhausted
+	}
+	return revision + 1, nil
+}
+
+func validateCanonicalRevision(revision int64) error {
+	if revision < 0 || revision > MaxSafeRevision {
+		return ErrRevisionExhausted
+	}
+	return nil
+}
 
 type Store struct {
 	usersDir string

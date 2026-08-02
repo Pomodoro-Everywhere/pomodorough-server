@@ -2,15 +2,23 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const { indexedDB } = require("fake-indexeddb");
 const sync = require("./sync-core.js");
 const storage = require("./sync-storage.js");
+const uuidFixtureBytes = fs.readFileSync(
+  path.join(__dirname, "../internal/timer/testdata/uuidv7-v1.json")
+);
+const uuidFixture = JSON.parse(uuidFixtureBytes);
 
 let databaseSequence = 0;
 
 function command(id, sequence, wall = sequence, counter = 0) {
   return {
     id,
+    deviceId: "device-1",
     deviceSequence: sequence,
     timerId: `timer-${id}`,
     type: "start",
@@ -137,6 +145,20 @@ async function seedMeta(database, values) {
   await storage.transactionDone(transaction);
 }
 
+async function readMeta(database, key) {
+  const transaction = database.transaction("meta", "readonly");
+  const record = await storage.requestResult(transaction.objectStore("meta").get(key));
+  return record?.value;
+}
+
+function fixedEntropy(hex) {
+  const source = Uint8Array.from(Buffer.from(hex.padStart(20, "0"), "hex"));
+  return (bytes) => {
+    bytes.set(source);
+    return bytes;
+  };
+}
+
 function resolutionInput(strategy = "merge", userId = "user-1") {
   return {
     userId,
@@ -154,6 +176,53 @@ async function acquire(database, token = "tab-1", nowMs = 1_000, leaseMs = 1_000
 async function capture(database, input = resolutionInput(), token = "tab-1") {
   return storage.captureResolution(database, input, { gateToken: token, replaceExisting: false });
 }
+
+test("UUIDv7 generator matches RFC 9562 fixture", () => {
+  assert.equal(
+    crypto.createHash("sha256").update(uuidFixtureBytes).digest("hex"),
+    "719bf4601f0e82aa9898e891184edcf8f37b183a05f3ddd6fa211e1ac8dc2f10"
+  );
+  const fixture = uuidFixture.rfc9562;
+  const randomValue = BigInt(`0x${fixture.randomValueHex}`);
+  const generated = storage.uuid7FromParts(fixture.timestampMs, randomValue);
+
+  assert.equal(generated, fixture.uuid);
+  assert.deepEqual(storage.uuid7Parts(generated), {
+    integer: BigInt(`0x${fixture.uuid.replaceAll("-", "")}`),
+    timestampMs: fixture.timestampMs,
+    randomValue
+  });
+});
+
+test("UUIDv7 reservation is monotonic through equal clocks and rollback", () => {
+  const first = storage.reserveUuid7(
+    1_000,
+    3,
+    null,
+    [],
+    fixedEntropy("09")
+  );
+  const second = storage.reserveUuid7(999, 2, first.at(-1));
+
+  assert.deepEqual(
+    first.concat(second).map((identifier) => storage.uuid7Parts(identifier).randomValue),
+    [9n, 10n, 11n, 12n, 13n]
+  );
+  assert.deepEqual(first.concat(second), first.concat(second).toSorted());
+  assert.ok(first.every((identifier) => storage.uuid7Parts(identifier).timestampMs === 1_000));
+});
+
+test("UUIDv7 rejects timestamp and random-tail overflow", () => {
+  assert.throws(
+    () => storage.reserveUuid7(storage.UUID7_MAX_TIMESTAMP_MS + 1, 1, null),
+    { name: "UUIDRangeError" }
+  );
+  const exhausted = storage.uuid7FromParts(1_000, storage.UUID7_RANDOM_MAX);
+  assert.throws(
+    () => storage.reserveUuid7(1_000, 1, exhausted),
+    { name: "UUIDRangeError", message: /headroom/ }
+  );
+});
 
 test("capture atomically snapshots stores and survives database reload", async (t) => {
   const instance = await fixture();
@@ -260,6 +329,242 @@ test("legacy auto-start migration stays valid under a far-future local clock", a
     wallMs: 9_000_000_000_000,
     counter: 7
   });
+});
+
+test("legacy duration normalization repairs queue but freezes unowned captured payload", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const legacy = {
+    ...durationOperation("duration-legacy"),
+    occurredAt: "2026-07-22T12:30:00Z",
+    hlcWallMs: 0,
+    hlcCounter: 0
+  };
+  const current = durationOperation("duration-current");
+  await seedQueues(instance.database, { durationOperations: [legacy, current] });
+  await seedMeta(instance.database, {
+    bootstrapResolution: {
+      userId: "user-1",
+      payload: { durationOperations: [legacy, current] },
+      queueIds: { durationOperations: [legacy.id, current.id] }
+    }
+  });
+
+  const before = (await storage.readBootstrapState(instance.database)).resolution;
+  assert.deepEqual(await storage.normalizeLegacyDurationOperations(instance.database), { changed: 1, resolution: before });
+  assert.deepEqual(await storage.normalizeLegacyDurationOperations(instance.database), { changed: 0, resolution: before });
+  const queues = await storage.readQueues(instance.database);
+  assert.equal(queues.durationOperations.find((item) => item.id === legacy.id).occurredAt, "1970-01-01T00:00:00.000Z");
+  assert.deepEqual(queues.durationOperations.find((item) => item.id === current.id), current);
+  const resolution = (await storage.readBootstrapState(instance.database)).resolution;
+  assert.deepEqual(resolution, before);
+  assert.equal(resolution.payload.durationOperations[0].occurredAt, "2026-07-22T12:30:00Z");
+  assert.deepEqual(resolution.payload.durationOperations[1], current);
+});
+
+test("legacy duration capture normalizes queue before freezing request payload", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const legacy = {
+    ...durationOperation("duration-capture-legacy"),
+    occurredAt: "2026-07-22T12:30:00Z",
+    hlcWallMs: 0,
+    hlcCounter: 0
+  };
+  await seedQueues(instance.database, { durationOperations: [legacy] });
+  await acquire(instance.database);
+
+  const pending = await capture(instance.database);
+  assert.equal(pending.payload.durationOperations[0].occurredAt, "1970-01-01T00:00:00.000Z");
+  assert.equal((await storage.readQueues(instance.database)).durationOperations[0].occurredAt, "1970-01-01T00:00:00.000Z");
+});
+
+test("resolution replacement requires owner and fresh request ID", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  await acquire(instance.database, "tab-owner");
+  const existing = await capture(instance.database, {
+    ...resolutionInput("merge"),
+    requestId: "request-existing"
+  }, "tab-owner");
+
+  await assert.rejects(storage.captureResolution(instance.database, {
+    ...resolutionInput("merge"),
+    requestId: "request-existing"
+  }, { gateToken: "tab-owner", replaceExisting: true }), { name: "BootstrapGateError" });
+  assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution, existing);
+
+  const foreign = { ...existing, gateToken: "tab-foreign" };
+  await seedMeta(instance.database, { bootstrapResolution: foreign });
+  await assert.rejects(storage.captureResolution(instance.database, {
+    ...resolutionInput("merge"),
+    requestId: "request-fresh"
+  }, { gateToken: "tab-owner", replaceExisting: true }), { name: "BootstrapGateError" });
+  assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution, foreign);
+
+  await seedMeta(instance.database, { bootstrapResolution: existing });
+  const replaced = await storage.captureResolution(instance.database, {
+    ...resolutionInput("merge"),
+    requestId: "request-fresh"
+  }, { gateToken: "tab-owner", replaceExisting: true });
+  assert.equal(replaced.payload.requestId, "request-fresh");
+});
+
+test("legacy captured payload rotates request ID only for current gate owner", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const legacy = {
+    ...durationOperation("duration-rotate-legacy"),
+    occurredAt: "2026-07-22T12:30:00Z",
+    hlcWallMs: 0,
+    hlcCounter: 0
+  };
+  const captured = {
+    userId: "user-1",
+    gateToken: "tab-owner",
+    payload: { requestId: "request-old", durationOperations: [legacy] },
+    queueIds: { durationOperations: [legacy.id] }
+  };
+  await seedQueues(instance.database, { durationOperations: [legacy] });
+  await seedMeta(instance.database, {
+    bootstrapGate: { token: "tab-owner", acquiredAtMs: 1, expiresAtMs: 10_000 },
+    bootstrapResolution: captured
+  });
+
+  await assert.rejects(storage.normalizeLegacyDurationOperations(instance.database, {
+    gateToken: "tab-other",
+    replacementRequestId: "request-other"
+  }), { name: "BootstrapGateError" });
+  assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution, captured);
+
+  const result = await storage.normalizeLegacyDurationOperations(instance.database, {
+    gateToken: "tab-owner",
+    replacementRequestId: "request-new"
+  });
+  assert.equal(result.resolution.payload.requestId, "request-new");
+  assert.equal(result.resolution.payload.durationOperations[0].occurredAt, "1970-01-01T00:00:00.000Z");
+  assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution, result.resolution);
+});
+
+test("stale gate takeover can rotate legacy captured payload before retry", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const legacy = {
+    ...durationOperation("duration-takeover-legacy"),
+    occurredAt: "2026-07-22T12:30:00Z",
+    hlcWallMs: 0,
+    hlcCounter: 0
+  };
+  const captured = {
+    userId: "user-1",
+    gateToken: "tab-old",
+    payload: { requestId: "request-old", strategy: "merge", durationOperations: [legacy] },
+    queueIds: { durationOperations: [legacy.id] }
+  };
+  await seedQueues(instance.database, { durationOperations: [legacy] });
+  await seedMeta(instance.database, {
+    bootstrapGate: { token: "tab-old", acquiredAtMs: 1, expiresAtMs: 10 },
+    bootstrapResolution: captured
+  });
+
+  const takeover = await acquire(instance.database, "tab-new", 11, 1_000);
+  assert.equal(takeover.acquired, true);
+  assert.equal(takeover.resolution.gateToken, "tab-new");
+  const normalized = await storage.normalizeLegacyDurationOperations(instance.database, {
+    gateToken: "tab-new",
+    replacementRequestId: "request-new"
+  });
+  assert.equal(normalized.resolution.payload.requestId, "request-new");
+  assert.equal(normalized.resolution.payload.durationOperations[0].occurredAt, "1970-01-01T00:00:00.000Z");
+  assert.equal((await storage.validatePendingForSend(instance.database, {
+    pending: normalized.resolution,
+    currentUserId: "user-1",
+    gateToken: "tab-new",
+    nowMs: 12,
+    leaseMs: 1_000
+  })).payload.requestId, "request-new");
+});
+
+test("server clock offset persists across restart and rejects stale or invalid samples", async (t) => {
+  const instance = await fixture();
+  const reloaded = await instance.secondConnection();
+  t.after(() => {
+    reloaded.close();
+    return instance.close();
+  });
+  const fastClock = {
+    offsetMs: -3_600_050, uncertaintyMs: 50, sampledAtWallMs: 4_600_050,
+    requestSequence: 1, receivedAtWallMs: 4_600_100
+  };
+  const rolledBackClock = {
+    offsetMs: 3_599_950, uncertaintyMs: 50, sampledAtWallMs: 1_000_050,
+    requestSequence: 2, receivedAtWallMs: 1_000_100
+  };
+  const staleClock = {
+    offsetMs: -3_600_050, uncertaintyMs: 100, sampledAtWallMs: 4_600_050,
+    requestSequence: 1, receivedAtWallMs: 4_600_100
+  };
+
+  await storage.saveClockOffset(instance.database, fastClock);
+  assert.deepEqual((await storage.readCanonicalState(reloaded)).clockOffset, fastClock);
+  await storage.saveClockOffset(reloaded, rolledBackClock);
+  assert.deepEqual((await storage.readSyncState(instance.database)).clockOffset, rolledBackClock);
+  assert.deepEqual(await storage.saveClockOffset(instance.database, staleClock), rolledBackClock);
+  const laterReceiptSameRequest = {
+    offsetMs: 3_599_900, uncertaintyMs: 100, sampledAtWallMs: 999_950,
+    requestSequence: 2, receivedAtWallMs: 1_000_150
+  };
+  assert.deepEqual(await storage.saveClockOffset(instance.database, laterReceiptSameRequest), laterReceiptSameRequest);
+  await assert.rejects(
+    storage.saveClockOffset(instance.database, {
+      offsetMs: 0, uncertaintyMs: 30_001, sampledAtWallMs: 1_000,
+      requestSequence: 3, receivedAtWallMs: 1_000
+    }),
+    { name: "ClockRangeError" }
+  );
+  assert.deepEqual((await storage.readCanonicalState(reloaded)).clockOffset, laterReceiptSameRequest);
+});
+
+test("clock request sequence is atomic across tabs and survives restart", async (t) => {
+  const instance = await fixture();
+  const second = await instance.secondConnection();
+  t.after(() => {
+    second.close();
+    return instance.close();
+  });
+  assert.deepEqual(
+    await Promise.all([
+      storage.allocateClockRequestSequence(instance.database),
+      storage.allocateClockRequestSequence(second)
+    ]).then((values) => values.sort((left, right) => left - right)),
+    [1, 2]
+  );
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  assert.equal(await storage.allocateClockRequestSequence(instance.database), 3);
+});
+
+test("invalid sync clock tuple leaves canonical state and queues unchanged", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const queued = command("clock-invalid-pending", 1);
+  await seedMeta(instance.database, { snapshot: snapshot(1), hlc: { wallMs: 100, counter: 0 } });
+  await seedQueues(instance.database, { commands: [queued] });
+
+  await assert.rejects(storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1",
+    snapshot: snapshot(2),
+    hlc: { wallMs: 200, counter: 0 },
+    clockOffset: {
+      offsetMs: 0, uncertaintyMs: 30_001, sampledAtWallMs: 1_000,
+      requestSequence: 1, receivedAtWallMs: 1_000
+    },
+    queueIds: { commands: [queued.id], taskOperations: [], durationOperations: [], autoStartOperations: [] }
+  }), { name: "ClockRangeError" });
+
+  const persisted = await storage.readSyncState(instance.database);
+  assert.equal(persisted.snapshot.revision, 1);
+  assert.deepEqual(persisted.commands, [queued]);
 });
 
 test("ambiguous legacy false omits bootstrap field and preserves canonical true", async (t) => {
@@ -373,6 +678,194 @@ test("stale bootstrap gate takeover idempotently preserves explicit legacy auto-
   assert.equal((await storage.readQueues(takeoverTab)).autoStartOperations.length, 1);
 });
 
+test("UUIDv7 mutation allocation persists across domains, restart, and clock rollback", async (t) => {
+  const instance = await fixture();
+  const second = await instance.secondConnection();
+  t.after(() => {
+    second.close();
+    return instance.close();
+  });
+  await seedMeta(instance.database, {
+    deviceSequence: 0,
+    hlc: { wallMs: 100, counter: 0 }
+  });
+  const first = await storage.allocateMutation(instance.database, {
+    storeName: "pending",
+    nowMs: 100,
+    withDeviceSequence: true,
+    withUuidV7: true,
+    entropy: fixedEntropy("09"),
+    build: ({ id, wallMs, counter, deviceSequence }) => command(
+      id,
+      deviceSequence,
+      wallMs,
+      counter
+    )
+  });
+  const secondOperation = await storage.allocateMutation(second, {
+    storeName: "pendingTasks",
+    nowMs: 100,
+    withDeviceSequence: false,
+    withUuidV7: true,
+    build: ({ id, wallMs, counter }) => taskOperation(id, wallMs, counter)
+  });
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  const afterRestart = await storage.allocateMutation(instance.database, {
+    storeName: "pendingAutoStarts",
+    nowMs: 99,
+    withDeviceSequence: false,
+    withUuidV7: true,
+    build: ({ id, wallMs, counter }) => autoStartOperation(id, true, wallMs, counter)
+  });
+
+  const identifiers = [first.id, secondOperation.id, afterRestart.id];
+  assert.deepEqual(identifiers, [...identifiers].sort());
+  assert.deepEqual(
+    identifiers.map((identifier) => storage.uuid7Parts(identifier).timestampMs),
+    [100, 100, 100]
+  );
+  assert.deepEqual(
+    identifiers.map((identifier) => storage.uuid7Parts(identifier).randomValue),
+    [9n, 10n, 11n]
+  );
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), afterRestart.id);
+});
+
+test("UUIDv7 allocator reconstructs missing state without rewriting UUIDv4 queues", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const legacy = command("550e8400-e29b-41d4-a716-446655440000", 1, 100);
+  const existingV7 = storage.uuid7FromParts(100, 9n);
+  await seedQueues(instance.database, {
+    commands: [legacy],
+    taskOperations: [taskOperation(existingV7, 100, 1)]
+  });
+  await seedMeta(instance.database, {
+    deviceSequence: 1,
+    hlc: { wallMs: 100, counter: 1 }
+  });
+
+  const operation = await storage.allocateMutation(instance.database, {
+    storeName: "pendingAutoStarts",
+    nowMs: 100,
+    withDeviceSequence: false,
+    withUuidV7: true,
+    build: ({ id, wallMs, counter }) => autoStartOperation(id, true, wallMs, counter)
+  });
+
+  assert.deepEqual(storage.uuid7Parts(operation.id), {
+    integer: storage.uuid7Parts(operation.id).integer,
+    timestampMs: 100,
+    randomValue: 10n
+  });
+  assert.deepEqual((await storage.readQueues(instance.database)).commands, [legacy]);
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), operation.id);
+});
+
+test("UUIDv7 stale or exhausted state aborts queue, HLC, and sequence writes", async () => {
+  const cases = [
+    {
+      name: "stale",
+      stored: storage.uuid7FromParts(100, 8n),
+      pending: storage.uuid7FromParts(100, 9n),
+      message: /predates/
+    },
+    {
+      name: "exhausted",
+      stored: storage.uuid7FromParts(100, storage.UUID7_RANDOM_MAX),
+      pending: null,
+      message: /headroom/
+    }
+  ];
+  for (const item of cases) {
+    const instance = await fixture();
+    try {
+      await seedMeta(instance.database, {
+        deviceSequence: 0,
+        hlc: { wallMs: 100, counter: 0 },
+        [storage.UUID7_KEY]: item.stored
+      });
+      if (item.pending) {
+        await seedQueues(instance.database, {
+          taskOperations: [taskOperation(item.pending, 100)]
+        });
+      }
+      const beforeQueues = await storage.readQueues(instance.database);
+
+      await assert.rejects(storage.allocateMutation(instance.database, {
+        storeName: "pending",
+        nowMs: 100,
+        withDeviceSequence: true,
+        withUuidV7: true,
+        build: ({ id, wallMs, counter, deviceSequence }) => command(
+          id,
+          deviceSequence,
+          wallMs,
+          counter
+        )
+      }), { name: "UUIDRangeError", message: item.message });
+
+      assert.deepEqual(await storage.readQueues(instance.database), beforeQueues);
+      assert.deepEqual((await storage.readCanonicalState(instance.database)).hlc, {
+        wallMs: 100,
+        counter: 0
+      });
+      assert.equal(await readMeta(instance.database, "deviceSequence"), 0);
+      assert.equal(await readMeta(instance.database, storage.UUID7_KEY), item.stored);
+    } finally {
+      await instance.close();
+    }
+  }
+});
+
+test("UUIDv7 finish and generated break reserve one atomic consecutive batch", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  await seedMeta(instance.database, {
+    snapshot: runningFocusSnapshot(),
+    deviceSequence: 0,
+    hlc: { wallMs: 100, counter: 0 },
+    timerOwner: {
+      timerId: "owned-focus",
+      deviceId: "device-owner",
+      tabId: "tab-owner",
+      leaseExpiresAtMs: 2_000
+    }
+  });
+
+  const result = await storage.finishTimer(instance.database, {
+    timerId: "owned-focus",
+    phase: "focus",
+    deviceId: "device-owner",
+    tabId: "tab-owner",
+    leaseMs: 1_000,
+    manual: false,
+    requireOwner: true,
+    nowMs: 500,
+    observedElapsedMs: 1_500_000,
+    withUuidV7: true,
+    entropy: fixedEntropy("09"),
+    breakPhase: "short_break",
+    breakDurationMs: 300_000,
+    breakTimerId: "550e8400-e29b-41d4-a716-446655440000"
+  });
+
+  const parts = result.commands.map((item) => storage.uuid7Parts(item.id));
+  assert.deepEqual(parts.map((item) => item.timestampMs), [500, 500]);
+  assert.deepEqual(parts.map((item) => item.randomValue), [9n, 10n]);
+  assert.equal(result.commands[1].dependsOnCommandId, result.commands[0].id);
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), result.commands[1].id);
+
+  const firstBody = JSON.stringify(sync.buildSyncBatch({ commands: result.commands }));
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  assert.equal(
+    JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database))),
+    firstBody
+  );
+});
+
 test("two tabs allocate unique timer sequences and monotonic timer/task HLC tuples", async (t) => {
   const instance = await fixture();
   const second = await instance.secondConnection();
@@ -412,6 +905,27 @@ test("two tabs allocate unique timer sequences and monotonic timer/task HLC tupl
   const queues = await storage.readQueues(instance.database);
   assert.deepEqual(queues.commands.map((item) => item.id).sort(), ["command-a", "command-b"]);
   assert.deepEqual(queues.taskOperations.map((item) => item.id).sort(), ["task-a", "task-b"]);
+});
+
+test("mutation allocation rejects unsafe sequence and counter atomically", async () => {
+  const cases = [
+    { name: "sequence", deviceSequence: Number.MAX_SAFE_INTEGER, hlc: { wallMs: 100, counter: 0 }, nowMs: 100, withDeviceSequence: true },
+    { name: "counter", deviceSequence: 0, hlc: { wallMs: 100, counter: Number.MAX_SAFE_INTEGER }, nowMs: 100, withDeviceSequence: false }
+  ];
+  for (const item of cases) {
+    const instance = await fixture();
+    await seedMeta(instance.database, { deviceSequence: item.deviceSequence, hlc: item.hlc });
+    await assert.rejects(storage.allocateMutation(instance.database, {
+      storeName: "pending",
+      nowMs: item.nowMs,
+      withDeviceSequence: item.withDeviceSequence,
+      build: ({ wallMs, counter, deviceSequence }) => command(item.name, deviceSequence || 1, wallMs, counter)
+    }), { name: "ClockRangeError" });
+    const queues = await storage.readQueues(instance.database);
+    assert.deepEqual(queues.commands, []);
+    assert.deepEqual((await storage.readCanonicalState(instance.database)).hlc, item.hlc);
+    await instance.close();
+  }
 });
 
 test("focus ownership lease blocks live peers and allows same-device restart reclaim", async (t) => {
@@ -484,6 +998,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
   const reclaimed = await completion(instance.database, "device-owner", "tab-reopened", 2_000, "reclaimed");
   assert.equal(reclaimed.transitioned, true);
   assert.deepEqual(reclaimed.commands.map((item) => item.type), ["finish", "start"]);
+  assert.deepEqual(reclaimed.commands.map((item) => item.deviceId), ["device-owner", "device-owner"]);
 
   instance.database.close();
   instance.database = await openDatabase(instance.name);
@@ -786,6 +1301,15 @@ test("generated break survives lost response and promotes only after applied fin
     elapsedAtAnchorMs: 1_500_000,
     anchorAt: "2026-07-22T12:25:00Z"
   };
+  canonical.history = [{
+    id: "history-finish-dependent-source",
+    timerId: "owned-focus",
+    commandId: "finish-dependent-source",
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 1_500_000,
+    completedAt: "2026-07-22T12:25:00Z"
+  }];
   const updates = sync.generatedBreakUpdates(reloaded.commands, acknowledgements, canonical);
   await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
@@ -806,6 +1330,189 @@ test("generated break survives lost response and promotes only after applied fin
   assert.deepEqual(sync.buildSyncBatch({ commands: promoted }).commands.map((item) => item.id), [
     "break-dependent-start"
   ]);
+});
+
+test("provisional chain matrix survives restart and response loss", async () => {
+  const chains = [
+    ["start"],
+    ["start", "pause"],
+    ["start", "pause", "resume"],
+    ["start", "finish"],
+    ["start", "cancel"],
+    ["start", "finish", "clear"]
+  ];
+  let caseIndex = 0;
+  for (const types of chains) {
+    for (const outcome of ["applied", "ignored", "rejected"]) {
+      for (const phaseCorrection of [false, true]) {
+        for (const restartBeforeHttp of [false, true]) {
+          for (const responseLoss of [false, true]) {
+            caseIndex += 1;
+            const label = [
+              types.join("-"),
+              outcome,
+              phaseCorrection ? "long" : "short",
+              restartBeforeHttp ? "restart" : "live",
+              responseLoss ? "lost" : "delivered"
+            ].join("/");
+            const instance = await fixture();
+            try {
+              const source = {
+                ...command(`00-source-${caseIndex}`, 1),
+                timerId: `focus-${caseIndex}`,
+                type: "finish",
+                phase: "focus"
+              };
+              const dependents = types.map((type, index) => ({
+                ...command(`1${index}-dependent-${caseIndex}`, index + 2),
+                timerId: `break-${caseIndex}`,
+                type,
+                phase: "short_break",
+                plannedDurationMs: 300_000,
+                observedElapsedMs: index * 1_000,
+                dependsOnCommandId: source.id,
+                ...(index === 0 ? { generatedBreak: true } : {})
+              }));
+              await seedMeta(instance.database, {
+                snapshot: snapshot(0),
+                hlc: { wallMs: 100, counter: 0 }
+              });
+              await seedQueues(instance.database, { commands: [source, ...dependents] });
+              if (restartBeforeHttp) {
+                instance.database.close();
+                instance.database = await openDatabase(instance.name);
+              }
+              let pending = (await storage.readQueues(instance.database)).commands;
+              assert.deepEqual(
+                sync.buildSyncBatch({ commands: pending }).commands.map((item) => item.id),
+                [source.id],
+                label
+              );
+              const canonical = snapshot(1);
+              canonical.history = [
+                ...(phaseCorrection ? [1, 2, 3].map((index) => ({
+                  id: `prior-${index}-${caseIndex}`,
+                  timerId: `prior-${index}-${caseIndex}`,
+                  commandId: `prior-command-${index}-${caseIndex}`,
+                  phase: "focus",
+                  status: "completed",
+                  plannedDurationMs: 1_500_000,
+                  completedAt: `2026-07-22T12:2${index}:00Z`
+                })) : []),
+                {
+                  id: `completion-${caseIndex}`,
+                  timerId: source.timerId,
+                  commandId: source.id,
+                  phase: "focus",
+                  status: "completed",
+                  plannedDurationMs: 1_500_000,
+                  completedAt: "2026-07-22T12:25:00Z"
+                }
+              ];
+              canonical.canonicalTimer = {
+                id: source.timerId,
+                phase: "focus",
+                status: "completed",
+                plannedDurationMs: 1_500_000,
+                elapsedAtAnchorMs: 1_500_000,
+                anchorAt: "2026-07-22T12:25:00Z"
+              };
+              const acknowledgements = [{ commandId: source.id, outcome, reason: "" }];
+              let updates = sync.generatedBreakUpdates(pending, acknowledgements, canonical);
+              if (responseLoss) {
+                const firstUpdates = JSON.stringify(updates);
+                instance.database.close();
+                instance.database = await openDatabase(instance.name);
+                pending = (await storage.readQueues(instance.database)).commands;
+                updates = sync.generatedBreakUpdates(pending, acknowledgements, canonical);
+                assert.equal(JSON.stringify(updates), firstUpdates, label);
+              }
+              await storage.applySyncResponse(instance.database, {
+                expectedUserId: "user-1",
+                snapshot: canonical,
+                hlc: { wallMs: 500, counter: 0 },
+                queueIds: {
+                  commands: [source.id],
+                  taskOperations: [],
+                  durationOperations: [],
+                  autoStartOperations: []
+                },
+                ...updates
+              });
+              instance.database.close();
+              instance.database = await openDatabase(instance.name);
+              const after = (await storage.readQueues(instance.database)).commands;
+              const releases = outcome !== "rejected";
+              assert.deepEqual(
+                after.map((item) => item.id),
+                releases ? dependents.map((item) => item.id) : [],
+                label
+              );
+              if (releases) {
+                const expectedPhase = phaseCorrection && !types.includes("finish")
+                  ? "long_break"
+                  : "short_break";
+                assert.ok(after.every((item) =>
+                  item.phase === expectedPhase
+                    && item.plannedDurationMs === canonical.durationsMs[expectedPhase]
+                    && !Object.hasOwn(item, "dependsOnCommandId")
+                    && !Object.hasOwn(item, "generatedBreak")
+                ), label);
+              }
+            } finally {
+              await instance.close();
+            }
+          }
+        }
+      }
+    }
+  }
+});
+
+test("normal sync survives every restart checkpoint", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const operation = taskOperation("restart-task-operation");
+  await seedMeta(instance.database, {
+    snapshot: snapshot(0),
+    hlc: { wallMs: 100, counter: 0 }
+  });
+  await seedQueues(instance.database, { taskOperations: [operation] });
+  const firstBody = JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database)));
+
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  assert.equal(
+    JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database))),
+    firstBody
+  );
+
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  assert.equal(
+    JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database))),
+    firstBody
+  );
+
+  const canonical = snapshot(1);
+  canonical.tasks = [{ id: operation.taskId, title: operation.title }];
+  await storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1",
+    snapshot: canonical,
+    hlc: { wallMs: 200, counter: 0 },
+    queueIds: {
+      commands: [],
+      taskOperations: [operation.id],
+      durationOperations: [],
+      autoStartOperations: []
+    }
+  });
+
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  const afterApply = await storage.readSyncState(instance.database);
+  assert.deepEqual(sync.buildSyncBatch(afterApply).taskOperations, []);
+  assert.deepEqual(afterApply.snapshot, canonical);
 });
 
 test("ignored finish drops provisional break and rebases to newer canonical timer", async (t) => {
@@ -1235,7 +1942,7 @@ test("delayed sync response retains newer canonical snapshot, HLC, and all pendi
   assert.deepEqual(queues.taskOperations.map((item) => item.id), ["newer-task", "sent-task"]);
 });
 
-test("older equal-revision response preserves canonical state and queues", async (t) => {
+test("equal-revision response applies acknowledgements despite server clock rollback", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   await seedMeta(instance.database, {
@@ -1244,7 +1951,6 @@ test("older equal-revision response preserves canonical state and queues", async
   });
   await seedQueues(instance.database, { commands: [command("sent", 1)] });
   const incoming = snapshot(8, "user-1", "2026-07-22T12:29:59.999999999Z");
-  incoming.tasks = [{ id: "older", title: "Older" }];
 
   const outcome = await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
@@ -1253,16 +1959,16 @@ test("older equal-revision response preserves canonical state and queues", async
     queueIds: { commands: ["sent"], taskOperations: [], durationOperations: [] }
   });
 
-  assert.equal(outcome.stale, true);
-  assert.equal(outcome.idempotent, false);
+  assert.equal(outcome.applied, true);
+  assert.equal(outcome.stale, false);
   const persisted = await storage.readSyncState(instance.database);
-  assert.equal(persisted.snapshot.serverTime, "2026-07-22T12:30:00Z");
+  assert.equal(persisted.snapshot.serverTime, "2026-07-22T12:29:59.999999999Z");
   assert.deepEqual(persisted.snapshot.tasks, []);
-  assert.deepEqual(persisted.commands.map((item) => item.id), ["sent"]);
-  assert.deepEqual(persisted.hlc, { wallMs: 800, counter: 0 });
+  assert.deepEqual(persisted.commands, []);
+  assert.deepEqual(persisted.hlc, { wallMs: 900, counter: 0 });
 });
 
-test("newer equal-revision response advances canonical state and acknowledgements", async (t) => {
+test("equal-revision response applies acknowledgements with a later server time", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   await seedMeta(instance.database, {
@@ -1271,7 +1977,6 @@ test("newer equal-revision response advances canonical state and acknowledgement
   });
   await seedQueues(instance.database, { commands: [command("sent", 1)] });
   const incoming = snapshot(8, "user-1", "2026-07-22T12:30:00.000000001Z");
-  incoming.tasks = [{ id: "newer", title: "Newer" }];
 
   const outcome = await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
@@ -1283,12 +1988,12 @@ test("newer equal-revision response advances canonical state and acknowledgement
   assert.equal(outcome.applied, true);
   const persisted = await storage.readSyncState(instance.database);
   assert.equal(persisted.snapshot.serverTime, "2026-07-22T12:30:00.000000001Z");
-  assert.deepEqual(persisted.snapshot.tasks, [{ id: "newer", title: "Newer" }]);
+  assert.deepEqual(persisted.snapshot.tasks, []);
   assert.deepEqual(persisted.commands, []);
   assert.deepEqual(persisted.hlc, { wallMs: 900, counter: 0 });
 });
 
-test("exact equal-revision server time is an idempotent no-op", async (t) => {
+test("exact equal-revision response still consumes its acknowledgements", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   await seedMeta(instance.database, {
@@ -1297,7 +2002,6 @@ test("exact equal-revision server time is an idempotent no-op", async (t) => {
   });
   await seedQueues(instance.database, { commands: [command("sent", 1)] });
   const incoming = snapshot(8, "user-1", "2026-07-22T12:30:00.123456789Z");
-  incoming.tasks = [{ id: "different", title: "Different" }];
 
   const outcome = await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
@@ -1306,13 +2010,12 @@ test("exact equal-revision server time is an idempotent no-op", async (t) => {
     queueIds: { commands: ["sent"], taskOperations: [], durationOperations: [] }
   });
 
-  assert.equal(outcome.applied, false);
+  assert.equal(outcome.applied, true);
   assert.equal(outcome.stale, false);
-  assert.equal(outcome.idempotent, true);
   const persisted = await storage.readSyncState(instance.database);
   assert.deepEqual(persisted.snapshot.tasks, []);
-  assert.deepEqual(persisted.commands.map((item) => item.id), ["sent"]);
-  assert.deepEqual(persisted.hlc, { wallMs: 800, counter: 0 });
+  assert.deepEqual(persisted.commands, []);
+  assert.deepEqual(persisted.hlc, { wallMs: 900, counter: 0 });
 });
 
 test("current sync response preserves a newer HLC allocated by another tab", async (t) => {
@@ -1337,6 +2040,60 @@ test("current sync response preserves a newer HLC allocated by another tab", asy
   assert.equal(outcome.applied, true);
   assert.deepEqual(outcome.hlc, { wallMs: 900, counter: 4 });
   assert.deepEqual((await storage.readCanonicalState(instance.database)).hlc, { wallMs: 900, counter: 4 });
+});
+
+test("stale clock sample cannot advance HLC through offset-derived candidate", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const storedClock = {
+    offsetMs: 0, uncertaintyMs: 25, sampledAtWallMs: 2_000,
+    requestSequence: 2, receivedAtWallMs: 2_050
+  };
+  const staleClock = {
+    offsetMs: 8_000_000, uncertaintyMs: 25, sampledAtWallMs: 1_000,
+    requestSequence: 1, receivedAtWallMs: 1_050
+  };
+  await seedMeta(instance.database, {
+    snapshot: snapshot(8),
+    hlc: { wallMs: 800, counter: 0 },
+    clockOffset: storedClock
+  });
+
+  const outcome = await storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1",
+    snapshot: snapshot(9),
+    hlc: { wallMs: 8_001_000, counter: 0 },
+    serverHlc: { wallMs: 900, counter: 1 },
+    clockOffset: staleClock,
+    queueIds: { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] }
+  });
+
+  assert.deepEqual(outcome.clockOffset, storedClock);
+  assert.deepEqual(outcome.hlc, { wallMs: 900, counter: 1 });
+  const persisted = await storage.readCanonicalState(instance.database);
+  assert.deepEqual(persisted.clockOffset, storedClock);
+  assert.deepEqual(persisted.hlc, { wallMs: 900, counter: 1 });
+});
+
+test("cacheable response without clock sample merges only server HLC", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  await seedMeta(instance.database, {
+    snapshot: snapshot(8),
+    hlc: { wallMs: 800, counter: 0 }
+  });
+
+  const outcome = await storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1",
+    snapshot: snapshot(9),
+    hlc: { wallMs: 8_001_000, counter: 0 },
+    serverHlc: { wallMs: 900, counter: 1 },
+    clockOffset: null,
+    queueIds: { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] }
+  });
+
+  assert.deepEqual(outcome.hlc, { wallMs: 900, counter: 1 });
+  assert.deepEqual((await storage.readCanonicalState(instance.database)).hlc, { wallMs: 900, counter: 1 });
 });
 
 test("delayed high-revision response cannot cross account ownership", async (t) => {

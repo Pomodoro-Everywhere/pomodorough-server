@@ -22,14 +22,15 @@ import (
 const googleIssuer = "https://accounts.google.com"
 
 type Server struct {
-	cfg            config.Config
-	store          *store.Store
-	codec          *authn.Codec
-	logger         *slog.Logger
-	oauthConfig    *oauth2.Config
-	webVerifier    *oidc.IDTokenVerifier
-	nativeVerifier *oidc.IDTokenVerifier
-	hub            *revisionHub
+	cfg                     config.Config
+	store                   *store.Store
+	codec                   *authn.Codec
+	logger                  *slog.Logger
+	oauthConfig             *oauth2.Config
+	webVerifier             *oidc.IDTokenVerifier
+	nativeVerifier          *oidc.IDTokenVerifier
+	hub                     *revisionHub
+	streamKeepaliveInterval time.Duration
 }
 
 type principal struct {
@@ -51,11 +52,12 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 	keySetContext := oidc.ClientContext(context.Background(), &http.Client{Timeout: 10 * time.Second})
 	keySet := oidc.NewRemoteKeySet(keySetContext, "https://www.googleapis.com/oauth2/v3/certs")
 	s := &Server{
-		cfg:    cfg,
-		store:  userStore,
-		codec:  codec,
-		logger: logger,
-		hub:    newRevisionHub(),
+		cfg:                     cfg,
+		store:                   userStore,
+		codec:                   codec,
+		logger:                  logger,
+		hub:                     newRevisionHub(),
+		streamKeepaliveInterval: 20 * time.Second,
 		oauthConfig: &oauth2.Config{
 			ClientID:     cfg.GoogleWebClientID,
 			ClientSecret: cfg.GoogleWebClientSecret,

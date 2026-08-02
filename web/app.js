@@ -112,6 +112,8 @@
   let redirecting = false;
   let inFlightDurationOperationIds = new Set();
   let bootstrapPromise = null;
+  let elapsedMonotonicAnchor = null;
+  let trustedClockRuntime = null;
 
   const state = {
     ready: false,
@@ -124,6 +126,7 @@
     deviceSequence: 0,
     hlcWallMs: 0,
     hlcCounter: 0,
+    clockOffset: null,
     revision: 0,
     activeScreen: "timer",
     selectedPhase: "focus",
@@ -262,7 +265,29 @@
       || String(left.id).localeCompare(String(right.id));
   }
 
-  function elapsedFor(timer, now = Date.now()) {
+  const compareTimerCommands = syncCore.compareTimerCommands;
+
+  function trustedNow(localNowMs = Date.now(), monotonicMs = monotonicNow()) {
+    const sample = syncCore.validClockSample(state.clockOffset) ? state.clockOffset : null;
+    const identity = sample
+      ? `${sample.offsetMs}:${sample.uncertaintyMs}:${sample.sampledAtWallMs}`
+      : "local";
+    if (monotonicMs === null) return syncCore.trustedNow(localNowMs, sample, state.hlcWallMs);
+    if (trustedClockRuntime?.identity !== identity || monotonicMs < trustedClockRuntime.monotonicMs) {
+      const wallMs = syncCore.trustedNow(localNowMs, sample, state.hlcWallMs);
+      trustedClockRuntime = { identity, monotonicMs, wallMs };
+      return wallMs;
+    }
+    const wallMs = trustedClockRuntime.wallMs + Math.round(monotonicMs - trustedClockRuntime.monotonicMs);
+    return syncCore.trustedNow(wallMs, null, state.hlcWallMs);
+  }
+
+  function monotonicNow() {
+    const value = globalThis.performance?.now?.();
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function elapsedFor(timer, now = trustedNow(), monotonicMs = monotonicNow()) {
     if (!timer) return 0;
 
     const planned = positiveNumber(timer.plannedDurationMs, 0);
@@ -271,22 +296,89 @@
     if (timer.status === "running" && timer.anchorAt) {
       const anchorMs = Date.parse(timer.anchorAt);
       if (Number.isFinite(anchorMs)) elapsed += Math.max(0, now - anchorMs);
+      const key = `${timer.id || ""}\u0000${timer.anchorAt}\u0000${timer.elapsedAtAnchorMs}`;
+      if (monotonicMs !== null) {
+        if (elapsedMonotonicAnchor?.key === key && monotonicMs >= elapsedMonotonicAnchor.monotonicMs) {
+          elapsed = elapsedMonotonicAnchor.elapsedMs + monotonicMs - elapsedMonotonicAnchor.monotonicMs;
+        } else {
+          elapsedMonotonicAnchor = { key, elapsedMs: elapsed, monotonicMs };
+        }
+      }
+    } else if (elapsedMonotonicAnchor) {
+      elapsedMonotonicAnchor = null;
     }
 
     return clampNumber(elapsed, 0, planned);
   }
 
   function commandMatches(timer, command) {
-    return Boolean(timer.id && command.timerId === timer.id);
+    return Boolean(timer?.id && command.timerId === timer.id);
+  }
+
+  function terminalHistoryItem(timer, command, status) {
+    return {
+      id: timer.id,
+      timerId: timer.id,
+      commandId: command.id,
+      phase: timer.phase,
+      status,
+      plannedDurationMs: timer.plannedDurationMs,
+      completedAt: status === "completed" ? command.occurredAt : null,
+      endedAt: command.occurredAt,
+      taskId: timer.taskId || null,
+      pending: true
+    };
+  }
+
+  function autoCompleteTimer(timer, history, occurredAt) {
+    if (!timer || timer.status !== "running") return { timer, history };
+    const anchorMs = Date.parse(timer.anchorAt);
+    const occurredAtMs = Date.parse(occurredAt);
+    if (!Number.isFinite(anchorMs) || !Number.isFinite(occurredAtMs)) return { timer, history };
+
+    const planned = Math.max(0, Number(timer.plannedDurationMs) || 0);
+    const stored = clampNumber(timer.elapsedAtAnchorMs, 0, planned);
+    const remaining = planned - stored;
+    if (Math.max(0, occurredAtMs - anchorMs) < remaining) return { timer, history };
+
+    const completedAt = new Date(anchorMs + remaining).toISOString();
+    const completed = {
+      ...timer,
+      status: "completed",
+      elapsedAtAnchorMs: planned,
+      anchorAt: completedAt
+    };
+    if (!history.some((item) => item.timerId === timer.id)) {
+      history.unshift({
+        id: timer.id,
+        timerId: timer.id,
+        commandId: null,
+        phase: timer.phase,
+        status: "completed",
+        plannedDurationMs: timer.plannedDurationMs,
+        completedAt,
+        endedAt: completedAt,
+        taskId: timer.taskId || null
+      });
+    }
+    return { timer: completed, history };
   }
 
   function reduceCommand(timer, history, command) {
-    const nextTimer = clone(timer);
-    const nextHistory = history;
+    const projected = autoCompleteTimer(clone(timer), clone(history || []), command.occurredAt);
+    let nextTimer = projected.timer;
+    let nextHistory = projected.history;
     const intent = { type: command.type, commandId: command.id, occurredAt: command.occurredAt };
+
+    function addTerminalHistory(source, status) {
+      if (nextHistory.some((item) => item.commandId === command.id)) return;
+      nextHistory.unshift(terminalHistoryItem(source, command, status));
+    }
 
     switch (command.type) {
       case "start":
+        if (nextTimer?.id === command.timerId || nextHistory.some((item) => item.timerId === command.timerId)) break;
+        if (["running", "paused"].includes(nextTimer?.status)) addTerminalHistory(nextTimer, "superseded");
         return {
           timer: {
             id: command.timerId,
@@ -305,62 +397,89 @@
       case "pause":
         if (!commandMatches(nextTimer, command) || nextTimer.status !== "running") break;
         nextTimer.status = "paused";
-        nextTimer.elapsedAtAnchorMs = clampNumber(
-          command.observedElapsedMs,
-          0,
-          nextTimer.plannedDurationMs
-        );
+        nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
         nextTimer.anchorAt = command.occurredAt;
         nextTimer.lastIntent = intent;
         break;
 
       case "resume":
-        if (!commandMatches(nextTimer, command) || nextTimer.status !== "paused") break;
-        nextTimer.status = "running";
-        nextTimer.elapsedAtAnchorMs = clampNumber(
-          command.observedElapsedMs,
-          0,
-          nextTimer.plannedDurationMs
-        );
-        nextTimer.anchorAt = command.occurredAt;
-        nextTimer.lastIntent = intent;
-        break;
+        if (commandMatches(nextTimer, command) && ["paused", "superseded"].includes(nextTimer.status)) {
+          if (nextTimer.status === "superseded") {
+            nextHistory = nextHistory.filter((item) =>
+              item.timerId !== nextTimer.id || item.status !== "superseded"
+            );
+          }
+          nextTimer.status = "running";
+          nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
+          nextTimer.anchorAt = command.occurredAt;
+          nextTimer.lastIntent = intent;
+          break;
+        }
+        {
+          const target = nextHistory.find((item) =>
+            item.timerId === command.timerId && item.status === "superseded"
+          );
+          if (!target) break;
+          if (["running", "paused"].includes(nextTimer?.status)) addTerminalHistory(nextTimer, "superseded");
+          nextHistory = nextHistory.filter((item) =>
+            item.timerId !== target.timerId || item.status !== "superseded"
+          );
+          return {
+            timer: {
+              id: target.timerId,
+              phase: target.phase,
+              status: "running",
+              plannedDurationMs: target.plannedDurationMs,
+              elapsedAtAnchorMs: clampNumber(command.observedElapsedMs, 0, target.plannedDurationMs),
+              anchorAt: command.occurredAt,
+              lastIntent: intent,
+              taskId: target.taskId || null,
+              dependsOnCommandId: null
+            },
+            history: nextHistory
+          };
+        }
 
       case "finish":
+        if (commandMatches(nextTimer, command) && nextTimer.status === "completed") {
+          const completionIndex = nextHistory.findIndex((item) =>
+            item.timerId === command.timerId && item.status === "completed" && !item.commandId
+          );
+          if (completionIndex >= 0) {
+            nextHistory[completionIndex] = {
+              ...nextHistory[completionIndex],
+              commandId: command.id,
+              pending: true
+            };
+            nextTimer.lastIntent = intent;
+          }
+          break;
+        }
         if (!commandMatches(nextTimer, command) || !["running", "paused"].includes(nextTimer.status)) break;
-        nextTimer.status = "completed";
-        nextTimer.elapsedAtAnchorMs = nextTimer.plannedDurationMs;
-        nextTimer.anchorAt = command.occurredAt;
-        nextTimer.lastIntent = intent;
-        if (!nextHistory.some((item) => item.commandId === command.id)) {
-          nextHistory.unshift({
-            id: `${command.timerId}:${command.id}`,
-            timerId: command.timerId,
-            commandId: command.id,
-            phase: command.phase,
-            status: "completed",
-            plannedDurationMs: command.plannedDurationMs,
-            completedAt: command.occurredAt,
-            taskId: nextTimer.taskId || null,
-            pending: true
-          });
+        {
+          const source = clone(nextTimer);
+          nextTimer.status = "completed";
+          nextTimer.elapsedAtAnchorMs = nextTimer.plannedDurationMs;
+          nextTimer.anchorAt = command.occurredAt;
+          nextTimer.lastIntent = intent;
+          addTerminalHistory(source, "completed");
         }
         break;
 
       case "cancel":
         if (!commandMatches(nextTimer, command) || !["running", "paused"].includes(nextTimer.status)) break;
-        nextTimer.status = "cancelled";
-        nextTimer.elapsedAtAnchorMs = clampNumber(
-          command.observedElapsedMs,
-          0,
-          nextTimer.plannedDurationMs
-        );
-        nextTimer.anchorAt = command.occurredAt;
-        nextTimer.lastIntent = intent;
+        {
+          const source = clone(nextTimer);
+          nextTimer.status = "cancelled";
+          nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
+          nextTimer.anchorAt = command.occurredAt;
+          nextTimer.lastIntent = intent;
+          addTerminalHistory(source, "cancelled");
+        }
         break;
 
       case "clear":
-        if (!commandMatches(nextTimer, command) || ["running", "paused"].includes(nextTimer.status)) break;
+        if (!commandMatches(nextTimer, command) || !["completed", "cancelled"].includes(nextTimer.status)) break;
         return {
           timer: emptyTimer(command.phase, command.plannedDurationMs),
           history: nextHistory
@@ -376,7 +495,7 @@
     let timer = normalizeTimer(state.baseTimer);
     let history = clone(state.baseHistory || []);
 
-    for (const command of [...state.pending].sort((a, b) => a.deviceSequence - b.deviceSequence)) {
+    for (const command of [...state.pending].sort(compareTimerCommands)) {
       const reduced = reduceCommand(timer, history, command);
       timer = reduced.timer;
       history = reduced.history;
@@ -388,10 +507,10 @@
   }
 
   function rebuildOptimisticDurations() {
-    const durationsMs = normalizeDurationsMs(state.baseDurationsMs);
-    const operations = [...state.pendingDurationOperations].sort(compareDurationOperations);
-    for (const operation of operations) durationsMs[operation.phase] = operation.durationMs;
-    state.durationsMs = durationsMs;
+    state.durationsMs = syncCore.applyDurationOperations(
+      normalizeDurationsMs(state.baseDurationsMs),
+      state.pendingDurationOperations
+    );
   }
 
   function rebuildOptimisticAutoStart() {
@@ -591,7 +710,11 @@
       const record = request.result;
       const pending = record?.value?.pendingDurationOperations;
       if (!Array.isArray(pending)) return;
-      for (const operation of pending) durationStore.put(operation);
+      for (const operation of pending) {
+        durationStore.put(Number(operation?.hlcWallMs) === 0 && Number(operation?.hlcCounter) === 0
+          ? { ...operation, occurredAt: new Date(0).toISOString() }
+          : operation);
+      }
       const { pendingDurationOperations, ...settings } = record.value;
       metaStore.put({ key: "settings", value: settings });
     };
@@ -606,7 +729,6 @@
     request.onsuccess = () => {
       const settings = request.result?.value || {};
       if (settings.durationSyncBootstrapped === true) return;
-      const now = Date.now();
       for (const phase of Object.keys(PHASES)) {
         if (settings.durations?.[phase] == null) continue;
         const durationMs = Math.round(clampNumber(settings.durations[phase], 1, 180)) * 60_000;
@@ -616,7 +738,7 @@
           ownerId: "bootstrap",
           phase,
           durationMs,
-          occurredAt: new Date(now).toISOString(),
+          occurredAt: new Date(0).toISOString(),
           hlcWallMs: 0,
           hlcCounter: 0
         });
@@ -651,6 +773,10 @@
       await migrateDurationQueueFromSettings();
       await bootstrapLegacyDurations();
     }
+    const normalizedLegacyDurations = await syncStorage.normalizeLegacyDurationOperations(db, state.bootstrapGateOwned ? {
+      gateToken: TAB_ID,
+      replacementRequestId: crypto.randomUUID()
+    } : undefined);
 
     const transaction = db.transaction(
       [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
@@ -661,10 +787,11 @@
     const taskPendingStore = transaction.objectStore(TASK_PENDING_STORE);
     const durationPendingStore = transaction.objectStore(DURATION_PENDING_STORE);
     const autoStartPendingStore = transaction.objectStore(AUTO_START_PENDING_STORE);
-    const [deviceId, deviceSequence, hlc, settings, snapshot, bootstrapResolution, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations] = await Promise.all([
+    const [deviceId, deviceSequence, hlc, clockOffset, settings, snapshot, bootstrapResolution, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations] = await Promise.all([
       requestResult(metaStore.get("deviceId")),
       requestResult(metaStore.get("deviceSequence")),
       requestResult(metaStore.get("hlc")),
+      requestResult(metaStore.get("clockOffset")),
       requestResult(metaStore.get("settings")),
       requestResult(metaStore.get("snapshot")),
       requestResult(metaStore.get("bootstrapResolution")),
@@ -678,13 +805,14 @@
     state.deviceSequence = Number(deviceSequence?.value) || 0;
     state.hlcWallMs = Number(hlc?.value?.wallMs) || 0;
     state.hlcCounter = Number(hlc?.value?.counter) || 0;
-    state.pending = (pending || []).sort((a, b) => a.deviceSequence - b.deviceSequence);
+    state.clockOffset = syncCore.validClockSample(clockOffset?.value) ? clockOffset.value : null;
+    state.pending = (pending || []).sort(compareTimerCommands);
     state.pendingTaskOperations = pendingTaskOperations || [];
     state.pendingDurationOperations = (pendingDurationOperations || []).sort(compareDurationOperations);
     state.pendingAutoStartOperations = pendingAutoStartOperations || [];
     state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
     state.autoStartSyncBootstrapped = settings?.value?.autoStartSyncBootstrapped === true;
-    state.bootstrapPending = bootstrapResolution?.value || null;
+    state.bootstrapPending = normalizedLegacyDurations.resolution || bootstrapResolution?.value || null;
 
     if (settings?.value) {
       state.selectedPhase = PHASES[settings.value.selectedPhase]
@@ -757,7 +885,8 @@
   }
 
   async function persistCommand(type, options = {}) {
-    const now = Date.now();
+    const localNow = Date.now();
+    const now = trustedNow(localNow);
     const activeTimer = state.timer;
     const starting = type === "start";
     const timerId = starting ? crypto.randomUUID() : activeTimer.id;
@@ -774,21 +903,23 @@
       storeName: PENDING_STORE,
       nowMs: now,
       withDeviceSequence: true,
+      withUuidV7: true,
       timerOwner: starting ? {
         deviceId: state.deviceId,
         tabId: TAB_ID,
-        nowMs: now,
+        nowMs: localNow,
         leaseMs: TIMER_OWNER_LEASE_MS
       } : null,
-      build: ({ wallMs, counter, deviceSequence }) => {
+      build: ({ id, wallMs, counter, deviceSequence }) => {
         const value = {
-          id: crypto.randomUUID(),
+          id,
+          deviceId: state.deviceId,
           deviceSequence,
           timerId,
           type,
           phase,
           plannedDurationMs,
-          occurredAt: new Date(now).toISOString(),
+          occurredAt: new Date(wallMs).toISOString(),
           hlcWallMs: wallMs,
           hlcCounter: counter,
           observedElapsedMs
@@ -810,17 +941,18 @@
   }
 
   async function persistTaskOperation(type, task) {
-    const now = Date.now();
+    const now = trustedNow();
     const operation = await syncStorage.allocateMutation(db, {
       storeName: TASK_PENDING_STORE,
       nowMs: now,
       withDeviceSequence: false,
-      build: ({ wallMs, counter }) => {
+      withUuidV7: true,
+      build: ({ id, wallMs, counter }) => {
         const value = {
-          id: crypto.randomUUID(),
+          id,
           taskId: task.id,
           type,
-          occurredAt: new Date(now).toISOString(),
+          occurredAt: new Date(wallMs).toISOString(),
           hlcWallMs: wallMs,
           hlcCounter: counter
         };
@@ -835,15 +967,16 @@
   }
 
   async function persistAutoStartOperation(enabled) {
-    const now = Date.now();
+    const now = trustedNow();
     const operation = await syncStorage.allocateMutation(db, {
       storeName: AUTO_START_PENDING_STORE,
       nowMs: now,
       withDeviceSequence: false,
-      build: ({ wallMs, counter }) => ({
-        id: crypto.randomUUID(),
+      withUuidV7: true,
+      build: ({ id, wallMs, counter }) => ({
+        id,
         enabled,
-        occurredAt: new Date(now).toISOString(),
+        occurredAt: new Date(wallMs).toISOString(),
         hlcWallMs: wallMs,
         hlcCounter: counter
       })
@@ -855,18 +988,32 @@
   }
 
   async function persistDurationOperation(phase, durationMs) {
-    const now = Date.now();
-    let existingOperations;
-    let storedHlc;
+    const now = trustedNow();
     let operation;
     let pendingDurationOperations;
-    await syncStorage.guardedMutation(db, [DURATION_PENDING_STORE], (transaction) => {
+    await syncStorage.guardedMutation(db, [
+      PENDING_STORE,
+      TASK_PENDING_STORE,
+      DURATION_PENDING_STORE,
+      AUTO_START_PENDING_STORE
+    ], (transaction, _outcome, fail) => {
       const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
       const metaStore = transaction.objectStore(META_STORE);
-      const operationsRequest = durationStore.getAll();
-      const hlcRequest = metaStore.get("hlc");
+      const requests = {
+        operations: durationStore.getAll(),
+        hlc: metaStore.get("hlc"),
+        uuidV7: metaStore.get(syncStorage.UUID7_KEY),
+        commandIds: transaction.objectStore(PENDING_STORE).getAllKeys(),
+        taskIds: transaction.objectStore(TASK_PENDING_STORE).getAllKeys(),
+        autoStartIds: transaction.objectStore(AUTO_START_PENDING_STORE).getAllKeys()
+      };
+      const results = {};
+      let remaining = Object.keys(requests).length;
       const persist = () => {
-        if (!existingOperations || storedHlc === undefined) return;
+        remaining -= 1;
+        if (remaining !== 0) return;
+        const existingOperations = results.operations || [];
+        const storedHlc = results.hlc?.value || null;
         const storedWallMs = Number(storedHlc?.wallMs) || 0;
         const pendingWallMs = existingOperations.reduce(
           (maximum, existing) => Math.max(maximum, Number(existing.hlcWallMs) || 0),
@@ -886,34 +1033,54 @@
           pendingCounter
         );
         const counter = wallMs === previousWallMs ? previousCounter + 1 : 0;
-        operation = {
-          id: crypto.randomUUID(),
-          ownerId: TAB_ID,
-          phase,
-          durationMs,
-          occurredAt: new Date(now).toISOString(),
-          hlcWallMs: wallMs,
-          hlcCounter: counter
+        if (!Number.isSafeInteger(now) || now <= 0
+          || !Number.isSafeInteger(wallMs) || wallMs <= 0
+          || !Number.isSafeInteger(counter) || counter < 0) {
+          fail(new syncStorage.ClockRangeError());
+          return;
+        }
+        try {
+          const id = syncStorage.reserveUuid7(
+            wallMs,
+            1,
+            results.uuidV7?.value || null,
+            [
+              ...(results.commandIds || []),
+              ...(results.taskIds || []),
+              ...existingOperations.map((existing) => existing.id),
+              ...(results.autoStartIds || [])
+            ]
+          )[0];
+          operation = {
+            id,
+            ownerId: TAB_ID,
+            phase,
+            durationMs,
+            occurredAt: new Date(wallMs).toISOString(),
+            hlcWallMs: wallMs,
+            hlcCounter: counter
+          };
+          const superseded = new Set(existingOperations
+            .filter((existing) => existing.phase === phase && existing.ownerId === TAB_ID && !inFlightDurationOperationIds.has(existing.id))
+            .map((existing) => existing.id));
+          for (const operationID of superseded) durationStore.delete(operationID);
+          durationStore.put(operation);
+          pendingDurationOperations = existingOperations
+            .filter((existing) => !superseded.has(existing.id))
+            .concat(operation)
+            .sort(compareDurationOperations);
+          metaStore.put({ key: "hlc", value: { wallMs, counter } });
+          metaStore.put({ key: syncStorage.UUID7_KEY, value: id });
+        } catch (error) {
+          fail(error);
+        }
+      };
+      for (const [name, request] of Object.entries(requests)) {
+        request.onsuccess = () => {
+          results[name] = request.result;
+          persist();
         };
-        const superseded = new Set(existingOperations
-          .filter((existing) => existing.phase === phase && existing.ownerId === TAB_ID && !inFlightDurationOperationIds.has(existing.id))
-          .map((existing) => existing.id));
-        for (const operationID of superseded) durationStore.delete(operationID);
-        durationStore.put(operation);
-        pendingDurationOperations = existingOperations
-          .filter((existing) => !superseded.has(existing.id))
-          .concat(operation)
-          .sort(compareDurationOperations);
-        metaStore.put({ key: "hlc", value: { wallMs, counter } });
-      };
-      operationsRequest.onsuccess = () => {
-        existingOperations = operationsRequest.result || [];
-        persist();
-      };
-      hlcRequest.onsuccess = () => {
-        storedHlc = hlcRequest.result?.value || null;
-        persist();
-      };
+      }
     });
 
     state.hlcWallMs = operation.hlcWallMs;
@@ -1051,7 +1218,8 @@
   async function finishTimer(automatic = false) {
     if (controlsBlocked() || actionLocked) return false;
     const timer = clone(state.timer);
-    const now = Date.now();
+    const localNow = Date.now();
+    const now = trustedNow(localNow);
     const autoBreak = timer.phase === "focus" && state.autoStartBreaks;
     const breakPhase = autoBreak
       ? nextBreakPhase(state.history.concat({ timerId: timer.id, phase: "focus", status: "completed" }))
@@ -1067,11 +1235,11 @@
         manual: !automatic,
         requireOwner: automatic && timer.phase === "focus",
         nowMs: now,
+        localNowMs: localNow,
         observedElapsedMs: Math.round(elapsedFor(timer, now)),
-        finishCommandId: crypto.randomUUID(),
+        withUuidV7: true,
         breakPhase,
         breakDurationMs: breakPhase ? state.durationsMs[breakPhase] : 0,
-        breakCommandId: breakPhase ? crypto.randomUUID() : null,
         breakTimerId: breakPhase ? crypto.randomUUID() : null
       });
       if (!outcome.transitioned) {
@@ -1125,9 +1293,9 @@
     return true;
   }
 
-  function mergeServerHlc(serverWallMs, serverCounter) {
+  function mergeServerHlc(serverWallMs, serverCounter, clockOffset = state.clockOffset) {
     const candidates = [
-      { wallMs: Date.now(), counter: 0 },
+      { wallMs: syncCore.trustedNow(Date.now(), clockOffset), counter: 0 },
       { wallMs: state.hlcWallMs, counter: state.hlcCounter },
       { wallMs: Number(serverWallMs) || 0, counter: Number(serverCounter) || 0 }
     ];
@@ -1135,6 +1303,16 @@
       candidate.wallMs > latest.wallMs || candidate.wallMs === latest.wallMs && candidate.counter > latest.counter
         ? candidate
         : latest
+    );
+  }
+
+  function responseClockOffset(payload, timing, cacheable) {
+    if (cacheable || !timing) return state.clockOffset;
+    return syncCore.serverClockOffset(
+      payload.serverTime,
+      timing.requestAtMs,
+      timing.receivedAtMs,
+      timing.requestSequence
     );
   }
 
@@ -1154,14 +1332,15 @@
     state.localOwnerId = snapshot.user?.id || state.localOwnerId;
     state.hlcWallMs = Number(syncState.hlc?.wallMs) || state.hlcWallMs;
     state.hlcCounter = Number(syncState.hlc?.counter) || 0;
-    state.pending = (syncState.commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
+    state.clockOffset = syncState.clockOffset || state.clockOffset;
+    state.pending = (syncState.commands || []).sort(compareTimerCommands);
     state.pendingTaskOperations = syncState.taskOperations || [];
     state.pendingDurationOperations = (syncState.durationOperations || []).sort(compareDurationOperations);
     state.pendingAutoStartOperations = syncState.autoStartOperations || [];
     rebuildOptimisticState();
   }
 
-  async function acceptSyncResponse(payload, sent, expectedUserId) {
+  async function acceptSyncResponse(payload, sent, expectedUserId, timing) {
     syncCore.validateCanonicalResponse(payload, sent);
     while (actionLocked) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -1196,7 +1375,9 @@
       const durationsMs = normalizeDurationsMs(rebased.baseDurationsMs);
       const autoStartBreaks = rebased.baseAutoStartBreaks;
       const revision = rebased.revision;
-      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
+      const clockOffset = responseClockOffset(payload, timing, false);
+      const serverHlc = { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) };
+      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter, clockOffset);
       const conflicts = acknowledgements.filter((acknowledgement) => {
         const outcome = String(acknowledgement.outcome || "").toLowerCase();
         return outcome && !ACK_SUCCESS.has(outcome);
@@ -1220,6 +1401,8 @@
         expectedUserId,
         snapshot: nextSnapshot,
         hlc,
+        serverHlc,
+        clockOffset,
         queueIds: {
           commands: [...acknowledgedIds],
           taskOperations: [...acknowledgedTaskOperationIds],
@@ -1318,7 +1501,7 @@
           durationOperations: sent.durationOperations,
           autoStartOperations: sent.autoStartOperations
         });
-        const response = await postMutation("/api/v1/sync", body, expectedUserId);
+        const { response, timing } = await postMutation("/api/v1/sync", body, expectedUserId);
 
         if (response.status === 401) {
           redirectToLogin();
@@ -1327,7 +1510,7 @@
         if (!response.ok) throw new Error(`Sync failed (${response.status}).`);
 
         const payload = await response.json();
-        await acceptSyncResponse(payload, sent, expectedUserId);
+        await acceptSyncResponse(payload, sent, expectedUserId, timing);
         if (state.pending.length || state.pendingTaskOperations.length || state.pendingDurationOperations.length
           || state.pendingAutoStartOperations.length) {
           syncAgain = true;
@@ -1445,14 +1628,18 @@
     return state.csrfToken;
   }
 
-  function postMutation(url, body, expectedUserId) {
-    return syncCore.postJSONWithCsrfRetry({
+  async function postMutation(url, body, expectedUserId) {
+    let timing = null;
+    const response = await syncCore.postJSONWithCsrfRetry({
       fetcher: fetch,
       url,
       body,
       csrfToken: state.csrfToken,
-      refreshCsrf: () => refreshMutationCsrf(expectedUserId)
+      refreshCsrf: () => refreshMutationCsrf(expectedUserId),
+      nextRequestSequence: () => syncStorage.allocateClockRequestSequence(db),
+      onTiming: (value) => { timing = value; }
     });
+    return { response, timing };
   }
 
   async function restartBootstrapForCurrentAccount() {
@@ -1491,10 +1678,13 @@
   }
 
   async function loadBootstrapPreview() {
+    const requestSequence = await syncStorage.allocateClockRequestSequence(db);
+    const requestAtMs = Date.now();
     const response = await fetch("/api/v1/bootstrap", {
       credentials: "same-origin",
       cache: "no-store"
     });
+    const receivedAtMs = Date.now();
 
     if (response.status === 401) {
       redirectToLogin();
@@ -1508,6 +1698,10 @@
       durationOperations: [],
       autoStartOperations: []
     });
+    state.clockOffset = await syncStorage.saveClockOffset(
+      db,
+      syncCore.serverClockOffset(payload.serverTime, requestAtMs, receivedAtMs, requestSequence)
+    );
     return payload;
   }
 
@@ -1568,8 +1762,9 @@
   }
 
   async function refreshAllPendingOperations() {
+    await syncStorage.normalizeLegacyDurationOperations(db);
     const { commands, taskOperations, durationOperations, autoStartOperations } = await syncStorage.readQueues(db);
-    state.pending = (commands || []).sort((left, right) => left.deviceSequence - right.deviceSequence);
+    state.pending = (commands || []).sort(compareTimerCommands);
     state.pendingTaskOperations = taskOperations || [];
     state.pendingDurationOperations = (durationOperations || []).sort(compareDurationOperations);
     state.pendingAutoStartOperations = autoStartOperations || [];
@@ -1588,7 +1783,7 @@
       });
   }
 
-  async function acceptBootstrapResponse(payload, pending) {
+  async function acceptBootstrapResponse(payload, pending, timing) {
     syncCore.validateCanonicalResponse(payload, pending.payload);
     while (actionLocked) {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -1618,7 +1813,9 @@
         : emptyTimer(state.selectedPhase, durationsMs[state.selectedPhase]);
       const revision = Number(applied.revision);
       if (!Number.isFinite(revision) || revision < 0) throw new Error("Bootstrap response omitted revision.");
-      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter);
+      const clockOffset = responseClockOffset(payload, timing, true);
+      const serverHlc = { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) };
+      const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter, clockOffset);
       const queueIds = pending.queueIds || {
         commands: [], taskOperations: [], durationOperations: [], autoStartOperations: []
       };
@@ -1644,6 +1841,8 @@
         {
           snapshot,
           hlc,
+          serverHlc,
+          clockOffset,
           timerOwnerClaim: {
             deviceId: state.deviceId,
             tabId: TAB_ID,
@@ -1687,12 +1886,20 @@
 
   async function submitBootstrapResolution() {
     if (state.bootstrapSubmitting || !state.bootstrapPending || !navigator.onLine) return;
-    const pending = state.bootstrapPending;
+    let pending = state.bootstrapPending;
     if (!syncCore.pendingResolutionCanSubmit(pending, state.user?.id)) {
       queueSessionRevalidation();
       return;
     }
     try {
+      if (state.bootstrapGateOwned) {
+        const normalized = await syncStorage.normalizeLegacyDurationOperations(db, {
+          gateToken: TAB_ID,
+          replacementRequestId: crypto.randomUUID()
+        });
+        pending = normalized.resolution || pending;
+        state.bootstrapPending = pending;
+      }
       await syncStorage.validatePendingForSend(db, {
         pending,
         currentUserId: state.user.id,
@@ -1716,7 +1923,7 @@
     renderBootstrapDialog();
     try {
       const body = JSON.stringify(pending.payload);
-      const response = await postMutation("/api/v1/bootstrap/resolve", body, pending.userId);
+      const { response, timing } = await postMutation("/api/v1/bootstrap/resolve", body, pending.userId);
       if (response.status === 401) {
         redirectToLogin();
         return;
@@ -1731,7 +1938,7 @@
         return;
       }
       if (!response.ok) throw new Error(`History resolution failed (${response.status}).`);
-      await acceptBootstrapResponse(await response.json(), pending);
+      await acceptBootstrapResponse(await response.json(), pending, timing);
     } catch (error) {
       if (!syncCore.pendingMatchesUser(state.bootstrapPending, state.user?.id)) {
         state.bootstrapError = null;
@@ -1908,7 +2115,11 @@
       currentUserId: state.user.id,
       localHistory: local.history,
       remoteHistory: state.bootstrapPreview.history,
-      hasLocalState: syncCore.hasLocalState(local)
+      hasLocalState: syncCore.hasLocalState(local),
+      hasRemoteState: syncCore.hasRemoteState({
+        ...state.bootstrapPreview,
+        defaultDurationsMs: DEFAULT_DURATIONS_MS
+      })
     });
     if (state.bootstrapPlan.mode === "normal_sync") {
       const persisted = await syncStorage.readSyncState(db);
@@ -1922,7 +2133,11 @@
         currentUserId: state.user.id,
         localHistory: local.history,
         remoteHistory: state.bootstrapPreview.history,
-        hasLocalState: syncCore.hasLocalState(local)
+        hasLocalState: syncCore.hasLocalState(local),
+        hasRemoteState: syncCore.hasRemoteState({
+          ...state.bootstrapPreview,
+          defaultDurationsMs: DEFAULT_DURATIONS_MS
+        })
       });
     }
     if (state.bootstrapPlan.mode === "choose") {
@@ -2471,10 +2686,10 @@
 
     const localCount = state.bootstrapPlan?.localHistoryCount ?? syncCore.completedHistoryCount(localBootstrapState().history);
     const remoteCount = state.bootstrapPlan?.remoteHistoryCount ?? syncCore.completedHistoryCount(state.bootstrapPreview?.history);
-    elements.bootstrapTitle.textContent = limitRecovery ? "Local queue too large" : "Choose your history";
+    elements.bootstrapTitle.textContent = limitRecovery ? "Local queue too large" : "Choose synchronized state";
     elements.bootstrapSummary.textContent = limitRecovery
       ? "Upload stopped before any local or remote data changed."
-      : `${localCount} local completed run${localCount === 1 ? "" : "s"}; ${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}.`;
+      : `${localCount} local completed run${localCount === 1 ? "" : "s"}; ${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}. Timers, tasks, or settings may also differ.`;
     elements.bootstrapDialog.setAttribute("aria-busy", String(view.busy));
     elements.bootstrapChoices.hidden = !view.choosing;
     elements.bootstrapConfirmation.hidden = !view.confirming;

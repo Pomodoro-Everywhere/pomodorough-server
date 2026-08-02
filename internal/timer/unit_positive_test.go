@@ -1,31 +1,87 @@
 package timer
 
 import (
-	"math/rand"
 	"reflect"
 	"testing"
 	"time"
 )
 
-func TestReduceDeterministicAcrossShuffledArrival(t *testing.T) {
+func TestReduceDeterministicAcrossEveryArrivalPermutation(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
-	commands := []Command{
-		command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0),
-		command("command-b", "device-a", "timer-a", "pause", 2, 200, base.Add(time.Minute), 60_000),
-		command("command-c", "device-b", "timer-b", "start", 1, 300, base.Add(2*time.Minute), 0),
-		command("command-d", "device-a", "timer-a", "resume", 3, 400, base.Add(3*time.Minute), 60_000),
-		command("command-e", "device-a", "timer-a", "finish", 4, 500, base.Add(4*time.Minute), 240_000),
+	tests := []struct {
+		name     string
+		commands []Command
+	}{
+		{
+			name: "pause supersede resume finish",
+			commands: []Command{
+				command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0),
+				command("command-b", "device-a", "timer-a", "pause", 2, 200, base.Add(time.Minute), 60_000),
+				command("command-c", "device-b", "timer-b", "start", 1, 300, base.Add(2*time.Minute), 0),
+				command("command-d", "device-a", "timer-a", "resume", 3, 400, base.Add(3*time.Minute), 60_000),
+				command("command-e", "device-a", "timer-a", "finish", 4, 500, base.Add(4*time.Minute), 240_000),
+			},
+		},
+		{
+			name: "duplicate start and clear",
+			commands: []Command{
+				command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0),
+				command("command-b", "device-b", "timer-a", "start", 1, 200, base.Add(time.Second), 0),
+				command("command-c", "device-a", "timer-a", "cancel", 2, 300, base.Add(2*time.Second), 2_000),
+				command("command-d", "device-a", "timer-a", "clear", 3, 400, base.Add(3*time.Second), 2_000),
+			},
+		},
+		{
+			name: "equal clock tie breakers",
+			commands: []Command{
+				withCounter(command("command-z", "device-a", "timer-a", "pause", 2, 100, base.Add(time.Second), 1_000), 1),
+				command("command-a", "device-a", "timer-a", "start", 1, 100, base, 0),
+				command("command-b", "device-b", "timer-b", "start", 1, 100, base, 0),
+				withCounter(command("command-y", "device-b", "timer-b", "cancel", 2, 100, base.Add(2*time.Second), 2_000), 1),
+			},
+		},
 	}
-	want := Reduce(commands, base.Add(5*time.Minute))
-	random := rand.New(rand.NewSource(42))
-	for iteration := 0; iteration < 100; iteration++ {
-		shuffled := append([]Command(nil), commands...)
-		random.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-		got := Reduce(shuffled, base.Add(5*time.Minute))
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("shuffle %d changed result\ngot:  %#v\nwant: %#v", iteration, got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := Reduce(test.commands, base.Add(5*time.Minute))
+			permutations := 0
+			forEachCommandPermutation(test.commands, func(permutation []Command) {
+				permutations++
+				got := Reduce(permutation, base.Add(5*time.Minute))
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("permutation %d changed result\ngot:  %#v\nwant: %#v", permutations, got, want)
+				}
+			})
+			if permutations != factorial(len(test.commands)) {
+				t.Fatalf("tested %d permutations, want %d", permutations, factorial(len(test.commands)))
+			}
+		})
+	}
+}
+
+func forEachCommandPermutation(commands []Command, visit func([]Command)) {
+	working := append([]Command(nil), commands...)
+	var permute func(int)
+	permute = func(index int) {
+		if index == len(working) {
+			visit(append([]Command(nil), working...))
+			return
+		}
+		for candidate := index; candidate < len(working); candidate++ {
+			working[index], working[candidate] = working[candidate], working[index]
+			permute(index + 1)
+			working[index], working[candidate] = working[candidate], working[index]
 		}
 	}
+	permute(0)
+}
+
+func factorial(value int) int {
+	result := 1
+	for factor := 2; factor <= value; factor++ {
+		result *= factor
+	}
+	return result
 }
 
 func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
@@ -35,6 +91,14 @@ func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
 		commands []Command
 		winner   string
 	}{
+		{
+			name: "wall",
+			commands: []Command{
+				command("wall-high", "device-a", "shared-timer", "start", 1, 101, base, 0),
+				command("wall-low", "device-z", "shared-timer", "start", 1, 100, base.Add(time.Second), 0),
+			},
+			winner: "wall-low",
+		},
 		{
 			name: "counter",
 			commands: []Command{

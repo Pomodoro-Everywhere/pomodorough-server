@@ -34,22 +34,7 @@ type BootstrapResolutionRequest struct {
 }
 
 func (s *Store) Bootstrap(ctx context.Context, db *sql.DB, userID string, now time.Time) (SyncResult, error) {
-	unlock := s.LockUser(userID)
-	defer unlock()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("begin bootstrap snapshot: %w", err)
-	}
-	defer tx.Rollback()
-	reduction, err := reduceAccount(ctx, tx, now)
-	if err != nil {
-		return SyncResult{}, err
-	}
-	result := resultFromReduction(reduction, reduction.revision, now, nil)
-	if err := tx.Commit(); err != nil {
-		return SyncResult{}, fmt.Errorf("commit bootstrap snapshot: %w", err)
-	}
-	return result, nil
+	return s.materializeProjection(ctx, db, userID, now)
 }
 
 func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string, request BootstrapResolutionRequest, now time.Time) (SyncResult, error) {
@@ -101,7 +86,10 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 		if err := json.Unmarshal([]byte(storedResponse), &result); err != nil {
 			return SyncResult{}, fmt.Errorf("decode stored bootstrap response: %w", err)
 		}
-		return normalizeSyncResult(result), nil
+		if err := validateCanonicalRevision(result.Revision); err != nil {
+			return SyncResult{}, err
+		}
+		return normalizeStoredSyncResult(result)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return SyncResult{}, fmt.Errorf("read bootstrap resolution: %w", err)
@@ -110,6 +98,9 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 	var revision int64
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&revision); err != nil {
 		return SyncResult{}, fmt.Errorf("read account revision: %w", err)
+	}
+	if err := validateCanonicalRevision(revision); err != nil {
+		return SyncResult{}, err
 	}
 	if revision != request.ExpectedRevision {
 		return SyncResult{}, ErrRevisionConflict
@@ -142,6 +133,10 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 			return SyncResult{}, err
 		}
 	}
+	projectionChanged, err := timerProjectionChanged(ctx, tx, reduction.timer)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	changed := application.changed
 	if request.Strategy == BootstrapReplaceRemote {
 		changed = !slices.Equal(before.commands, reduction.commands) ||
@@ -149,10 +144,14 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 			!slices.Equal(before.durationOperations, reduction.durationOperations) ||
 			!slices.Equal(before.autoStartOperations, reduction.autoStartOperations)
 	}
+	changed = changed || projectionChanged
 	if changed {
-		revision++
+		revision, err = safeRevisionIncrement(revision)
+		if err != nil {
+			return SyncResult{}, err
+		}
 	}
-	if request.Strategy == BootstrapReplaceRemote || (request.Strategy == BootstrapMerge && changed) {
+	if changed {
 		if err := persistReduction(ctx, tx, reduction, revision); err != nil {
 			return SyncResult{}, err
 		}

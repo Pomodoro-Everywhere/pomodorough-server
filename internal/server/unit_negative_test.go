@@ -78,6 +78,7 @@ func TestParseSyncRequestRejectsInvalidFields(t *testing.T) {
 		{name: "invalid timer ID", mutate: func(value *syncRequestJSON) { value.Commands[0].TimerID = "short" }},
 		{name: "missing device sequence", mutate: func(value *syncRequestJSON) { value.Commands[0].DeviceSequence = nil }},
 		{name: "zero device sequence", mutate: func(value *syncRequestJSON) { value.Commands[0].DeviceSequence = int64Pointer(0) }},
+		{name: "unsafe device sequence", mutate: func(value *syncRequestJSON) { value.Commands[0].DeviceSequence = int64Pointer(maxSafeInteger + 1) }},
 		{name: "invalid command type", mutate: func(value *syncRequestJSON) { value.Commands[0].Type = "stop" }},
 		{name: "invalid task association", mutate: func(value *syncRequestJSON) { value.Commands[0].TaskID = "short" }},
 		{name: "task association on non-start", mutate: func(value *syncRequestJSON) {
@@ -99,8 +100,15 @@ func TestParseSyncRequestRejectsInvalidFields(t *testing.T) {
 		}},
 		{name: "missing clock counter", mutate: func(value *syncRequestJSON) { value.Commands[0].HLCCounter = nil }},
 		{name: "negative clock counter", mutate: func(value *syncRequestJSON) { value.Commands[0].HLCCounter = int64Pointer(-1) }},
+		{name: "unsafe clock counter", mutate: func(value *syncRequestJSON) { value.Commands[0].HLCCounter = int64Pointer(maxSafeInteger + 1) }},
 		{name: "missing observed elapsed", mutate: func(value *syncRequestJSON) { value.Commands[0].ObservedElapsedMs = nil }},
 		{name: "invalid occurrence time", mutate: func(value *syncRequestJSON) { value.Commands[0].OccurredAt = "yesterday" }},
+		{name: "future occurrence time", mutate: func(value *syncRequestJSON) {
+			value.Commands[0].OccurredAt = now.Add(maxClockSkew + time.Millisecond).Format(time.RFC3339Nano)
+		}},
+		{name: "occurrence and clock disagree", mutate: func(value *syncRequestJSON) {
+			value.Commands[0].OccurredAt = now.Add(-maxClockSkew - time.Millisecond).Format(time.RFC3339Nano)
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -132,7 +140,14 @@ func TestParseSyncRequestRejectsInvalidTaskOperations(t *testing.T) {
 		}},
 		{name: "missing counter", mutate: func(value *syncTaskOperationJSON) { value.HLCCounter = nil }},
 		{name: "negative counter", mutate: func(value *syncTaskOperationJSON) { value.HLCCounter = int64Pointer(-1) }},
+		{name: "unsafe counter", mutate: func(value *syncTaskOperationJSON) { value.HLCCounter = int64Pointer(maxSafeInteger + 1) }},
 		{name: "invalid occurrence time", mutate: func(value *syncTaskOperationJSON) { value.OccurredAt = "yesterday" }},
+		{name: "future occurrence time", mutate: func(value *syncTaskOperationJSON) {
+			value.OccurredAt = now.Add(maxClockSkew + time.Millisecond).Format(time.RFC3339Nano)
+		}},
+		{name: "occurrence and clock disagree", mutate: func(value *syncTaskOperationJSON) {
+			value.OccurredAt = now.Add(-maxClockSkew - time.Millisecond).Format(time.RFC3339Nano)
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -167,7 +182,18 @@ func TestParseSyncRequestRejectsInvalidDurationOperations(t *testing.T) {
 		}},
 		{name: "missing counter", mutate: func(value *syncDurationOperationJSON) { value.HLCCounter = nil }},
 		{name: "negative counter", mutate: func(value *syncDurationOperationJSON) { value.HLCCounter = int64Pointer(-1) }},
+		{name: "unsafe counter", mutate: func(value *syncDurationOperationJSON) { value.HLCCounter = int64Pointer(maxSafeInteger + 1) }},
 		{name: "invalid occurrence time", mutate: func(value *syncDurationOperationJSON) { value.OccurredAt = "yesterday" }},
+		{name: "future occurrence time", mutate: func(value *syncDurationOperationJSON) {
+			value.OccurredAt = now.Add(maxClockSkew + time.Millisecond).Format(time.RFC3339Nano)
+		}},
+		{name: "occurrence and clock disagree", mutate: func(value *syncDurationOperationJSON) {
+			value.OccurredAt = now.Add(-maxClockSkew - time.Millisecond).Format(time.RFC3339Nano)
+		}},
+		{name: "invalid legacy occurrence", mutate: func(value *syncDurationOperationJSON) {
+			value.HLCWallMs = int64Pointer(0)
+			value.HLCCounter = int64Pointer(0)
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

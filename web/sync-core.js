@@ -13,6 +13,9 @@
   const HISTORY_STATUSES = new Set(["completed", "cancelled", "superseded"]);
   const ACK_OUTCOMES = new Set(["applied", "ignored", "rejected"]);
   const RESOLUTION_OPERATION_LIMIT = 4096;
+  const MAX_CLOCK_SKEW_MS = 5 * 60_000;
+  const MAX_CLOCK_UNCERTAINTY_MS = 30_000;
+  const LEGACY_EPOCH = new Date(0).toISOString();
 
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -42,7 +45,7 @@
   }
 
   function hasLocalState(local) {
-    return completedHistoryCount(local.history) > 0
+    return (Array.isArray(local.history) && local.history.length > 0)
       || (Array.isArray(local.commands) && local.commands.length > 0)
       || (Array.isArray(local.taskOperations) && local.taskOperations.length > 0)
       || (Array.isArray(local.durationOperations) && local.durationOperations.length > 0)
@@ -52,6 +55,14 @@
       || Boolean(local.timer?.status && local.timer.status !== "idle")
       || local.autoStartBreaks === true
       || durationsDiffer(local.durationsMs, local.defaultDurationsMs);
+  }
+
+  function hasRemoteState(remote) {
+    return (Array.isArray(remote.history) && remote.history.length > 0)
+      || (Array.isArray(remote.tasks) && remote.tasks.length > 0)
+      || Boolean(remote.canonicalTimer?.id)
+      || remote.autoStartBreaks === true
+      || durationsDiffer(remote.durationsMs, remote.defaultDurationsMs);
   }
 
   function decideBootstrap(input) {
@@ -66,7 +77,12 @@
 
     const localHistoryCount = completedHistoryCount(input.localHistory);
     const remoteHistoryCount = completedHistoryCount(input.remoteHistory);
-    if (localHistoryCount > 0 && remoteHistoryCount > 0) {
+    const localStateExists = Boolean(input.hasLocalState)
+      || (Array.isArray(input.localHistory) && input.localHistory.length > 0);
+    const remoteStateExists = Boolean(input.hasRemoteState)
+      || (Array.isArray(input.remoteHistory) && input.remoteHistory.length > 0);
+    if ((localHistoryCount > 0 && remoteStateExists)
+        || (remoteHistoryCount > 0 && localStateExists)) {
       return { mode: "choose", localHistoryCount, remoteHistoryCount };
     }
     if (localHistoryCount > 0) {
@@ -77,8 +93,8 @@
     }
     return {
       mode: "auto",
-      strategy: input.hasLocalState ? "merge" : "keep_remote",
-      reason: input.hasLocalState ? "local_state_only" : "empty"
+      strategy: localStateExists ? "merge" : "keep_remote",
+      reason: localStateExists ? "local_state_only" : "empty"
     };
   }
 
@@ -225,11 +241,14 @@
   }
 
   function durationRequestOperation(operation) {
+    const occurredAt = Number(operation.hlcWallMs) === 0 && Number(operation.hlcCounter) === 0
+      ? LEGACY_EPOCH
+      : operation.occurredAt;
     return {
       id: operation.id,
       phase: operation.phase,
       durationMs: operation.durationMs,
-      occurredAt: operation.occurredAt,
+      occurredAt,
       hlcWallMs: operation.hlcWallMs,
       hlcCounter: operation.hlcCounter
     };
@@ -254,9 +273,7 @@
 
   function sendableTimerCommands(commands, limit) {
     const result = [];
-    const ordered = [...(commands || [])].sort((left, right) =>
-      Number(left.deviceSequence) - Number(right.deviceSequence) || String(left.id).localeCompare(String(right.id))
-    );
+    const ordered = [...(commands || [])].sort(compareTimerCommands);
     for (const command of ordered) {
       if (command.dependsOnCommandId) break;
       result.push(timerRequestCommand(command));
@@ -278,13 +295,42 @@
   function compareAutoStartOperations(left, right) {
     return Number(left.hlcWallMs) - Number(right.hlcWallMs)
       || Number(left.hlcCounter) - Number(right.hlcCounter)
-      || String(left.deviceId || "").localeCompare(String(right.deviceId || ""))
-      || String(left.id).localeCompare(String(right.id));
+      || compareStrings(left.deviceId, right.deviceId)
+      || compareStrings(left.id, right.id);
+  }
+
+  function compareStrings(left, right) {
+    const leftValue = String(left || "");
+    const rightValue = String(right || "");
+    return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+  }
+
+  function clockComponent(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : -1;
+  }
+
+  function compareTimerCommands(left, right) {
+    return clockComponent(left.hlcWallMs) - clockComponent(right.hlcWallMs)
+      || clockComponent(left.hlcCounter) - clockComponent(right.hlcCounter)
+      || compareStrings(left.deviceId, right.deviceId)
+      || compareStrings(left.id, right.id);
   }
 
   function applyAutoStartOperations(baseAutoStartBreaks, operations) {
     const ordered = [...(operations || [])].sort(compareAutoStartOperations);
     return ordered.length ? ordered[ordered.length - 1].enabled === true : baseAutoStartBreaks === true;
+  }
+
+  function applyDurationOperations(baseDurationsMs, operations) {
+    const durationsMs = clone(baseDurationsMs || {});
+    for (const operation of [...(operations || [])].sort((left, right) =>
+      clockComponent(left.hlcWallMs) - clockComponent(right.hlcWallMs)
+      || clockComponent(left.hlcCounter) - clockComponent(right.hlcCounter)
+      || compareStrings(left.id, right.id)
+    )) {
+      durationsMs[operation.phase] = operation.durationMs;
+    }
+    return durationsMs;
   }
 
   function buildSyncBatch(input, limit = 256) {
@@ -302,21 +348,74 @@
     const promoteCommands = [];
     const dropCommandIds = [];
     const dropTimerIds = [];
-    for (const command of commands || []) {
-      if (!command.dependsOnCommandId || !outcomes.has(command.dependsOnCommandId)) continue;
-      const source = commandsById.get(command.dependsOnCommandId);
-      const sourceAccepted = outcomes.get(command.dependsOnCommandId) === "applied"
-        && source?.type === "finish"
-        && canonical?.canonicalTimer?.id === source.timerId
-        && canonical.canonicalTimer.status === "completed";
-      if (sourceAccepted) {
+    const sourceIds = [...new Set((commands || [])
+      .map((command) => command.dependsOnCommandId)
+      .filter((sourceId) => sourceId && outcomes.has(sourceId)))];
+    for (const sourceId of sourceIds) {
+      const source = commandsById.get(sourceId);
+      const dependents = (commands || []).filter((command) => command.dependsOnCommandId === sourceId);
+      const generatedStart = dependents.find((command) =>
+        command.type === "start" && command.generatedBreak === true
+      );
+      const exactHistory = (canonical?.history || []).some((item) =>
+        item.timerId === source?.timerId
+          && item.commandId === source?.id
+          && item.phase === "focus"
+          && item.status === "completed"
+      );
+      const exactTimer = canonical?.canonicalTimer?.id === source?.timerId
+        && canonical.canonicalTimer.phase === "focus"
+        && canonical.canonicalTimer.status === "completed"
+        && canonical.canonicalTimer.lastIntent?.type === "finish"
+        && canonical.canonicalTimer.lastIntent?.commandId === source?.id;
+      const superseded = canonical?.canonicalTimer
+        && ["running", "paused"].includes(canonical.canonicalTimer.status)
+        && canonical.canonicalTimer.id !== source?.timerId
+        && canonical.canonicalTimer.id !== generatedStart?.timerId;
+      const sourceAccepted = source?.type === "finish"
+        && ["applied", "ignored"].includes(outcomes.get(sourceId))
+        && (exactHistory || exactTimer)
+        && !superseded
+        && generatedStart;
+      if (!sourceAccepted) {
+        for (const command of dependents) {
+          dropCommandIds.push(command.id);
+          if (command.generatedBreak === true) dropTimerIds.push(command.timerId);
+        }
+        continue;
+      }
+      const completedFocuses = (canonical?.history || [])
+        .filter((item) => item.phase === "focus" && item.status === "completed")
+        .sort((left, right) =>
+          compareStrings(left.completedAt || "", right.completedAt || "")
+            || compareStrings(left.commandId || "", right.commandId || "")
+        );
+      const sourceIndex = completedFocuses.findIndex((item) =>
+        item.commandId === source.id || item.timerId === source.timerId
+      );
+      const completedCount = sourceIndex >= 0 ? sourceIndex + 1 : completedFocuses.length;
+      const generatedBreakCompleted = dependents.some((command) => command.type === "finish");
+      const phase = generatedBreakCompleted
+        ? generatedStart.phase
+        : completedCount > 0 && completedCount % 4 === 0
+          ? "long_break"
+          : "short_break";
+      const durationMs = generatedBreakCompleted
+        ? Number(generatedStart.plannedDurationMs)
+        : Number(canonical?.durationsMs?.[phase]);
+      for (const command of dependents) {
         const promoted = clone(command);
         delete promoted.dependsOnCommandId;
         delete promoted.generatedBreak;
+        promoted.phase = phase;
+        if (Number.isSafeInteger(durationMs) && durationMs > 0) {
+          promoted.plannedDurationMs = durationMs;
+          promoted.observedElapsedMs = Math.min(
+            durationMs,
+            Math.max(0, Number(promoted.observedElapsedMs) || 0)
+          );
+        }
         promoteCommands.push(promoted);
-      } else {
-        dropCommandIds.push(command.id);
-        if (command.generatedBreak === true) dropTimerIds.push(command.timerId);
       }
     }
     return { promoteCommands, dropCommandIds, dropTimerIds };
@@ -397,16 +496,61 @@
     return parseDateTime(value) !== null;
   }
 
-  function compareServerTimes(left, right) {
-    const parsedLeft = parseDateTime(left);
-    const parsedRight = parseDateTime(right);
-    if (!parsedLeft || !parsedRight) return null;
-    if (parsedLeft.seconds !== parsedRight.seconds) return parsedLeft.seconds < parsedRight.seconds ? -1 : 1;
-    const width = Math.max(parsedLeft.fraction.length, parsedRight.fraction.length);
-    const leftFraction = parsedLeft.fraction.padEnd(width, "0");
-    const rightFraction = parsedRight.fraction.padEnd(width, "0");
-    if (leftFraction === rightFraction) return 0;
-    return leftFraction < rightFraction ? -1 : 1;
+  function dateTimeMs(value) {
+    const parsed = parseDateTime(value);
+    if (!parsed) return null;
+    const milliseconds = Number((parsed.fraction || "").padEnd(3, "0").slice(0, 3)) || 0;
+    const result = parsed.seconds * 1000 + milliseconds;
+    return Number.isSafeInteger(result) ? result : null;
+  }
+
+  function serverClockOffset(serverTime, requestAtMs, receivedAtMs, requestSequence) {
+    const serverTimeMs = dateTimeMs(serverTime);
+    if (serverTimeMs === null || !Number.isSafeInteger(requestAtMs) || !Number.isSafeInteger(receivedAtMs)
+      || requestAtMs <= 0 || receivedAtMs < requestAtMs || !validInteger(requestSequence, 1)) {
+      throw new Error("Canonical response timing is invalid.");
+    }
+    const roundTripMs = receivedAtMs - requestAtMs;
+    const uncertaintyMs = Math.ceil(roundTripMs / 2);
+    if (uncertaintyMs > MAX_CLOCK_UNCERTAINTY_MS) {
+      throw new Error("Canonical response clock uncertainty is too high.");
+    }
+    const sampledAtWallMs = requestAtMs + Math.floor(roundTripMs / 2);
+    const sample = {
+      offsetMs: serverTimeMs - sampledAtWallMs,
+      uncertaintyMs,
+      sampledAtWallMs,
+      requestSequence,
+      receivedAtWallMs: receivedAtMs
+    };
+    if (!validClockSample(sample)) throw new Error("Canonical response clock sample is invalid.");
+    return sample;
+  }
+
+  function validClockSample(sample) {
+    if (!isObject(sample)
+      || !Number.isSafeInteger(sample.offsetMs)
+      || !validInteger(sample.uncertaintyMs, 0, MAX_CLOCK_UNCERTAINTY_MS)
+      || !validInteger(sample.sampledAtWallMs, 1)
+      || !validInteger(sample.requestSequence, 1)
+      || !validInteger(sample.receivedAtWallMs, 1)) {
+      return false;
+    }
+    if (sample.receivedAtWallMs < sample.sampledAtWallMs) return false;
+    const sampledServerTimeMs = sample.sampledAtWallMs + sample.offsetMs;
+    return Number.isSafeInteger(sampledServerTimeMs) && sampledServerTimeMs > 0;
+  }
+
+  function trustedNow(localNowMs, clockOffset, minimumWallMs = 0) {
+    if (!validInteger(localNowMs, 1)
+      || clockOffset != null && !validClockSample(clockOffset)
+      || !validInteger(minimumWallMs, 0)) {
+      throw new Error("Trusted clock is outside the synchronization range.");
+    }
+    const candidate = localNowMs + (clockOffset?.offsetMs || 0);
+    const result = Math.max(candidate, minimumWallMs);
+    if (!Number.isSafeInteger(result) || result <= 0) throw new Error("Trusted clock is outside the synchronization range.");
+    return result;
   }
 
   function validInteger(value, minimum, maximum = Number.MAX_SAFE_INTEGER) {
@@ -497,19 +641,31 @@
     if (!validInteger(payload.serverHlcWallMs, 1) || !validInteger(payload.serverHlcCounter, 0)) {
       throw new Error("Bootstrap response returned an invalid server HLC.");
     }
+    const serverTimeMs = dateTimeMs(payload.serverTime);
+    if (payload.serverHlcWallMs < serverTimeMs || payload.serverHlcWallMs > serverTimeMs + MAX_CLOCK_SKEW_MS) {
+      throw new Error("Bootstrap response returned a server HLC inconsistent with serverTime.");
+    }
     return acknowledgements;
   }
 
   async function postJSONWithCsrfRetry(input) {
-    const send = (csrfToken) => input.fetcher(input.url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-        "X-CSRF-Token": csrfToken
-      },
-      body: input.body
-    });
+    const now = input.now || Date.now;
+    const send = async (csrfToken) => {
+      const requestSequence = await input.nextRequestSequence();
+      const requestAtMs = now();
+      const response = await input.fetcher(input.url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken
+        },
+        body: input.body
+      });
+      const receivedAtMs = now();
+      input.onTiming?.({ requestAtMs, receivedAtMs, requestSequence });
+      return response;
+    };
     let response = await send(input.csrfToken);
     if (response.status !== 403) return response;
     const refreshedToken = await input.refreshCsrf();
@@ -584,6 +740,7 @@
   return Object.freeze({
     applyResolutionState,
     applyAutoStartOperations,
+    applyDurationOperations,
     applyTaskOperations,
     autoStartRequestOperation,
     bootstrapDialogView,
@@ -592,14 +749,15 @@
     canExposeOwnerState,
     canSubmitResolution,
     canUseCachedOwnerOffline,
-    compareServerTimes,
     completedHistoryCount,
+    compareTimerCommands,
     confirmationFor,
     createPendingResolution,
     decideBootstrap,
     durationRequestOperation,
     generatedBreakUpdates,
     hasLocalState,
+    hasRemoteState,
     isResolutionStrategy,
     pendingMatchesUser,
     pendingResolutionCanSubmit,
@@ -608,8 +766,12 @@
     requiresBootstrapResolution,
     RESOLUTION_OPERATION_LIMIT,
     resolutionLimitViolation,
+    serverClockOffset,
     sendableTimerCommands,
     timerRequestCommand,
+    trustedNow,
+    validClockSample,
+    validDateTime,
     validateCanonicalResponse,
     validateAcknowledgements
   });

@@ -140,6 +140,7 @@ func TestParseSyncRequestAcceptsDurationOperationsAndOmission(t *testing.T) {
 	}
 	payload.DurationOperations[0].HLCWallMs = int64Pointer(0)
 	payload.DurationOperations[0].HLCCounter = int64Pointer(0)
+	payload.DurationOperations[0].OccurredAt = time.Unix(0, 0).UTC().Format(time.RFC3339Nano)
 	payload.DurationOperations[1].ID = "duration-operation-0002"
 	request, response = newJSONRequest(t, http.MethodPost, "/api/v1/sync", payload)
 	result, err = parseSyncRequest(response, request, now)

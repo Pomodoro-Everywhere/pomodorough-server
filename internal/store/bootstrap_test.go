@@ -12,7 +12,7 @@ import (
 	"pomodorough/internal/timer"
 )
 
-func TestBootstrapReturnsReadOnlyCanonicalSnapshot(t *testing.T) {
+func TestBootstrapWithoutDeadlineReturnsCanonicalSnapshotWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	userStore, db, userID, now := openTestUser(t, "bootstrap-preview-subject")
 	defer db.Close()
@@ -50,6 +50,51 @@ func TestBootstrapReturnsReadOnlyCanonicalSnapshot(t *testing.T) {
 	}
 	if afterRevision != beforeRevision || afterLastSeen != beforeLastSeen || resolutionCount != 0 {
 		t.Fatalf("bootstrap preview mutated storage: revision %d->%d last_seen %d->%d resolutions=%d", beforeRevision, afterRevision, beforeLastSeen, afterLastSeen, resolutionCount)
+	}
+}
+
+func TestBootstrapAndHistoryMaterializeDeadlineOnce(t *testing.T) {
+	for _, endpoint := range []string{"bootstrap", "history"} {
+		endpoint := endpoint
+		t.Run(endpoint, func(t *testing.T) {
+			ctx := context.Background()
+			userStore, db, userID, now := openTestUser(t, "materialize-"+endpoint)
+			defer db.Close()
+			start := testTimerCommand("command-materialize-"+endpoint, "device-materialize", "timer-materialize-"+endpoint, "start", 1, now)
+			start.PlannedDurationMs = 60_000
+			if result, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: start.DeviceID, Commands: []timer.Command{start}}, now); err != nil || result.Revision != 1 {
+				t.Fatalf("seed response = %#v, %v", result, err)
+			}
+
+			var revision int64
+			var changed bool
+			var status string
+			switch endpoint {
+			case "bootstrap":
+				result, err := userStore.Bootstrap(ctx, db, userID, now.Add(time.Minute))
+				if err != nil || result.CanonicalTimer == nil {
+					t.Fatalf("bootstrap materialization = %#v, %v", result, err)
+				}
+				revision, changed, status = result.Revision, result.Changed, result.CanonicalTimer.Status
+				second, err := userStore.Bootstrap(ctx, db, userID, now.Add(2*time.Minute))
+				if err != nil || second.Changed || second.Revision != 2 {
+					t.Fatalf("idempotent bootstrap = %#v, %v", second, err)
+				}
+			case "history":
+				history, materializedRevision, materialized, err := userStore.History(ctx, db, userID, now.Add(time.Minute))
+				if err != nil || len(history) != 1 {
+					t.Fatalf("history materialization = %#v, %v", history, err)
+				}
+				revision, changed, status = materializedRevision, materialized, history[0].Status
+				_, secondRevision, secondChanged, err := userStore.History(ctx, db, userID, now.Add(2*time.Minute))
+				if err != nil || secondChanged || secondRevision != 2 {
+					t.Fatalf("idempotent history revision=%d changed=%t err=%v", secondRevision, secondChanged, err)
+				}
+			}
+			if revision != 2 || !changed || status != "completed" {
+				t.Fatalf("materialized revision=%d changed=%t status=%q", revision, changed, status)
+			}
+		})
 	}
 }
 
@@ -186,7 +231,7 @@ func TestBootstrapStrategiesReturnExactHistoryTaskAndDurationState(t *testing.T)
 					t.Fatalf("tasks[%d] = %#v, want title %q", index, result.Tasks[index], title)
 				}
 			}
-			persisted, revision, err := History(ctx, db, now.Add(4*time.Second))
+			persisted, revision, _, err := userStore.History(ctx, db, userID, now.Add(4*time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}

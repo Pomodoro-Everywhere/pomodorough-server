@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -183,6 +184,60 @@ func TestBearerDurationSyncReturnsCanonicalDurationsAndPublishesRevision(t *test
 	fixture.handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("POST duplicate duration sync status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertNoRevision(t, revisions)
+}
+
+func TestBearerSyncMaterializesDeadlineAndPublishesCanonicalRevision(t *testing.T) {
+	fixture := newServerFixture(t)
+	ctx := context.Background()
+	startedAt := time.Now().UTC().Add(-2 * time.Minute)
+	db, err := fixture.userStore.OpenExistingUser(ctx, fixture.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := timer.Command{
+		ID: "command-deadline-start", DeviceID: fixture.deviceID, DeviceSequence: 1, TimerID: "timer-deadline",
+		Type: "start", Phase: "focus", PlannedDurationMs: 60_000, OccurredAt: startedAt,
+		HLCWallMs: startedAt.UnixMilli(), ObservedElapsedMs: 0,
+	}
+	seeded, err := fixture.userStore.Sync(ctx, db, fixture.userID, store.SyncRequest{
+		DeviceID: fixture.deviceID, Commands: []timer.Command{start},
+	}, startedAt)
+	db.Close()
+	if err != nil || seeded.Revision != 1 || seeded.CanonicalTimer == nil || seeded.CanonicalTimer.Status != "running" {
+		t.Fatalf("seeded timer = %#v, %v", seeded, err)
+	}
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	defer unsubscribe()
+
+	payload := validSyncRequestJSON(time.Now().UTC())
+	payload.Commands = []syncCommandJSON{}
+	payload.LastRevision = int64Pointer(1)
+	response := postAuthenticatedJSON(t, fixture, "/api/v1/sync", payload)
+	if response.Code != http.StatusOK {
+		t.Fatalf("deadline sync status=%d body=%s", response.Code, response.Body.String())
+	}
+	var completed store.SyncResult
+	if err := json.Unmarshal(response.Body.Bytes(), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Revision != 2 || completed.CanonicalTimer == nil || completed.CanonicalTimer.Status != "completed" || len(completed.History) != 1 {
+		t.Fatalf("deadline sync response = %#v", completed)
+	}
+	receiveRevision(t, revisions, 2)
+
+	payload.LastRevision = int64Pointer(2)
+	retry := postAuthenticatedJSON(t, fixture, "/api/v1/sync", payload)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("idempotent deadline sync status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var idempotent store.SyncResult
+	if err := json.Unmarshal(retry.Body.Bytes(), &idempotent); err != nil {
+		t.Fatal(err)
+	}
+	if idempotent.Revision != 2 {
+		t.Fatalf("idempotent deadline sync = %#v", idempotent)
 	}
 	assertNoRevision(t, revisions)
 }

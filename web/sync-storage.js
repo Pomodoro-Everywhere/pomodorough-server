@@ -18,6 +18,14 @@
   const GATE_KEY = "bootstrapGate";
   const RESOLUTION_KEY = "bootstrapResolution";
   const TIMER_OWNER_KEY = "timerOwner";
+  const CLOCK_OFFSET_KEY = "clockOffset";
+  const CLOCK_REQUEST_SEQUENCE_KEY = "clockRequestSequence";
+  const UUID7_KEY = "uuidV7";
+  const UUID7_MAX_TIMESTAMP_MS = (2 ** 48) - 1;
+  const UUID7_RANDOM_MAX = (1n << 74n) - 1n;
+  const UUID7_RAND_B_MASK = (1n << 62n) - 1n;
+  const UUID7_ENTROPY_ATTEMPTS = 16;
+  const LEGACY_EPOCH = new Date(0).toISOString();
 
   class BootstrapGateError extends Error {
     constructor(message = "History resolution blocks local changes.") {
@@ -49,6 +57,160 @@
     }
   }
 
+  class ClockRangeError extends Error {
+    constructor() {
+      super("Local clock or sequence is outside the synchronization range.");
+      this.name = "ClockRangeError";
+    }
+  }
+
+  class UUIDRangeError extends Error {
+    constructor(message = "UUIDv7 generator state is outside the supported range.") {
+      super(message);
+      this.name = "UUIDRangeError";
+    }
+  }
+
+  function uuidText(integer) {
+    const hex = integer.toString(16).padStart(32, "0");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  function uuid7FromParts(timestampMs, randomValue) {
+    if (!Number.isSafeInteger(timestampMs) || timestampMs < 0 || timestampMs > UUID7_MAX_TIMESTAMP_MS
+      || typeof randomValue !== "bigint" || randomValue < 0n || randomValue > UUID7_RANDOM_MAX) {
+      throw new UUIDRangeError();
+    }
+    const randA = randomValue >> 62n;
+    const randB = randomValue & UUID7_RAND_B_MASK;
+    return uuidText(
+      (BigInt(timestampMs) << 80n)
+      | (7n << 76n)
+      | (randA << 64n)
+      | (0b10n << 62n)
+      | randB
+    );
+  }
+
+  function uuid7Parts(value) {
+    if (typeof value !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new UUIDRangeError("Persisted UUIDv7 state is invalid.");
+    }
+    const integer = BigInt(`0x${value.replaceAll("-", "")}`);
+    const timestampMs = Number(integer >> 80n);
+    const randA = (integer >> 64n) & 0xFFFn;
+    const randB = integer & UUID7_RAND_B_MASK;
+    return {
+      integer,
+      timestampMs,
+      randomValue: (randA << 62n) | randB
+    };
+  }
+
+  function reserveUuid7(timestampMs, count, stored, pendingIds = [], entropy = null) {
+    if (!Number.isSafeInteger(timestampMs) || timestampMs <= 0 || timestampMs > UUID7_MAX_TIMESTAMP_MS
+      || !Number.isSafeInteger(count) || count <= 0 || BigInt(count) > UUID7_RANDOM_MAX + 1n) {
+      throw new UUIDRangeError();
+    }
+    const storedParts = stored == null ? null : uuid7Parts(stored);
+    const pendingParts = [];
+    for (const identifier of pendingIds || []) {
+      try {
+        pendingParts.push(uuid7Parts(identifier));
+      } catch {
+        // Historical UUIDv4 and opaque identifiers remain valid.
+      }
+    }
+    const latestPending = pendingParts.reduce(
+      (latest, item) => latest == null || item.integer > latest.integer ? item : latest,
+      null
+    );
+    if (storedParts && latestPending && latestPending.integer > storedParts.integer) {
+      throw new UUIDRangeError("Persisted UUIDv7 state predates a pending identifier.");
+    }
+    const previous = storedParts || latestPending;
+    const countBigInt = BigInt(count);
+    if (previous && timestampMs <= previous.timestampMs) {
+      if (previous.randomValue > UUID7_RANDOM_MAX - countBigInt) {
+        throw new UUIDRangeError("UUIDv7 random value has no headroom.");
+      }
+      return Array.from(
+        { length: count },
+        (_, index) => uuid7FromParts(
+          previous.timestampMs,
+          previous.randomValue + 1n + BigInt(index)
+        )
+      );
+    }
+
+    const maximumFirst = UUID7_RANDOM_MAX - (countBigInt - 1n);
+    const fillEntropy = entropy || ((bytes) => {
+      if (!globalThis.crypto?.getRandomValues) {
+        throw new UUIDRangeError("Secure UUIDv7 entropy is unavailable.");
+      }
+      return globalThis.crypto.getRandomValues(bytes);
+    });
+    for (let attempt = 0; attempt < UUID7_ENTROPY_ATTEMPTS; attempt += 1) {
+      const bytes = new Uint8Array(10);
+      const filled = fillEntropy(bytes);
+      const source = filled === undefined ? bytes : filled;
+      if (!(source instanceof Uint8Array) || source.length !== 10) {
+        throw new UUIDRangeError("UUIDv7 entropy source returned invalid data.");
+      }
+      let randomValue = 0n;
+      for (const byte of source) randomValue = (randomValue << 8n) | BigInt(byte);
+      randomValue &= UUID7_RANDOM_MAX;
+      if (randomValue <= maximumFirst) {
+        return Array.from(
+          { length: count },
+          (_, index) => uuid7FromParts(timestampMs, randomValue + BigInt(index))
+        );
+      }
+    }
+    throw new UUIDRangeError("UUIDv7 entropy lacks reservation headroom.");
+  }
+
+  function uuid7RequestSet(transaction, metaStore) {
+    return {
+      uuidV7: metaStore.get(UUID7_KEY),
+      uuidCommands: transaction.objectStore(PENDING_STORE).getAllKeys(),
+      uuidTasks: transaction.objectStore(TASK_PENDING_STORE).getAllKeys(),
+      uuidDurations: transaction.objectStore(DURATION_PENDING_STORE).getAllKeys(),
+      uuidAutoStarts: transaction.objectStore(AUTO_START_PENDING_STORE).getAllKeys()
+    };
+  }
+
+  function pendingUuidIds(results) {
+    return [
+      ...(results.uuidCommands || []),
+      ...(results.uuidTasks || []),
+      ...(results.uuidDurations || []),
+      ...(results.uuidAutoStarts || [])
+    ];
+  }
+
+  function reserveTransactionUuid7(metaStore, results, timestampMs, count, entropy) {
+    const identifiers = reserveUuid7(
+      timestampMs,
+      count,
+      results.uuidV7?.value || null,
+      pendingUuidIds(results),
+      entropy
+    );
+    metaStore.put({ key: UUID7_KEY, value: identifiers.at(-1) });
+    return identifiers;
+  }
+
+  function requireMutationRange(nowMs, wallMs, counter, deviceSequence) {
+    if (!Number.isSafeInteger(nowMs) || nowMs <= 0
+      || !Number.isSafeInteger(wallMs) || wallMs <= 0
+      || !Number.isSafeInteger(counter) || counter < 0
+      || deviceSequence !== undefined && (!Number.isSafeInteger(deviceSequence) || deviceSequence <= 0)) {
+      throw new ClockRangeError();
+    }
+  }
+
   function requestResult(request) {
     return new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -77,6 +239,65 @@
     const rightWallMs = Number(right?.wallMs) || 0;
     if (leftWallMs !== rightWallMs) return leftWallMs > rightWallMs ? left : right;
     return (Number(left?.counter) || 0) >= (Number(right?.counter) || 0) ? left : right;
+  }
+
+  function putLatestClockOffset(metaStore, stored, incoming) {
+    if (incoming == null) return core.validClockSample(stored) ? stored : null;
+    if (!core.validClockSample(incoming)) throw new ClockRangeError();
+    if (core.validClockSample(stored)) {
+      if (stored.requestSequence > incoming.requestSequence
+        || stored.requestSequence === incoming.requestSequence
+          && (stored.receivedAtWallMs > incoming.receivedAtWallMs
+            || stored.receivedAtWallMs === incoming.receivedAtWallMs
+              && stored.uncertaintyMs <= incoming.uncertaintyMs)) {
+        return stored;
+      }
+    }
+    metaStore.put({ key: CLOCK_OFFSET_KEY, value: incoming });
+    return incoming;
+  }
+
+  function allocateClockRequestSequence(database) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(META_STORE, "readwrite");
+      const store = transaction.objectStore(META_STORE);
+      const request = store.get(CLOCK_REQUEST_SEQUENCE_KEY);
+      let sequence;
+      let failure;
+      request.onsuccess = () => {
+        sequence = (Number(request.result?.value) || 0) + 1;
+        if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+          failure = new ClockRangeError();
+          transaction.abort();
+          return;
+        }
+        store.put({ key: CLOCK_REQUEST_SEQUENCE_KEY, value: sequence });
+      };
+      transaction.oncomplete = () => resolve(sequence);
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
+  }
+
+  function saveClockOffset(database, sample) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(META_STORE, "readwrite");
+      const store = transaction.objectStore(META_STORE);
+      const request = store.get(CLOCK_OFFSET_KEY);
+      let saved;
+      let failure;
+      request.onsuccess = () => {
+        try {
+          saved = putLatestClockOffset(store, request.result?.value || null, sample);
+        } catch (error) {
+          failure = error;
+          transaction.abort();
+        }
+      };
+      transaction.oncomplete = () => resolve(saved);
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
   }
 
   function acquireBootstrapGate(database, input) {
@@ -205,7 +426,10 @@
           return;
         }
         try {
-          operation(transaction, outcome);
+          operation(transaction, outcome, (error) => {
+            failure = error;
+            transaction.abort();
+          });
         } catch (error) {
           failure = error;
           transaction.abort();
@@ -229,7 +453,18 @@
 
   function allocateMutation(database, input) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, input.storeName], "readwrite");
+      const transaction = database.transaction(
+        input.withUuidV7
+          ? [
+              META_STORE,
+              PENDING_STORE,
+              TASK_PENDING_STORE,
+              DURATION_PENDING_STORE,
+              AUTO_START_PENDING_STORE
+            ]
+          : [META_STORE, input.storeName],
+        "readwrite"
+      );
       const metaStore = transaction.objectStore(META_STORE);
       const requests = {
         gate: metaStore.get(GATE_KEY),
@@ -237,6 +472,7 @@
         hlc: metaStore.get("hlc")
       };
       if (input.withDeviceSequence) requests.deviceSequence = metaStore.get("deviceSequence");
+      if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
       const results = {};
       let remaining = Object.keys(requests).length;
       let allocated;
@@ -257,20 +493,29 @@
         const deviceSequence = input.withDeviceSequence
           ? (Number(results.deviceSequence?.value) || 0) + 1
           : undefined;
-        allocated = input.build({ wallMs, counter, deviceSequence });
-        transaction.objectStore(input.storeName).add(allocated);
-        metaStore.put({ key: "hlc", value: { wallMs, counter } });
-        if (input.withDeviceSequence) metaStore.put({ key: "deviceSequence", value: deviceSequence });
-        if (input.timerOwner && allocated?.type === "start" && allocated.timerId) {
-          metaStore.put({
-            key: TIMER_OWNER_KEY,
-            value: {
-              timerId: allocated.timerId,
-              deviceId: input.timerOwner.deviceId,
-              tabId: input.timerOwner.tabId,
-              leaseExpiresAtMs: input.timerOwner.nowMs + input.timerOwner.leaseMs
-            }
-          });
+        try {
+          requireMutationRange(input.nowMs, wallMs, counter, deviceSequence);
+          const id = input.withUuidV7
+            ? reserveTransactionUuid7(metaStore, results, wallMs, 1, input.entropy)[0]
+            : undefined;
+          allocated = input.build({ id, wallMs, counter, deviceSequence });
+          transaction.objectStore(input.storeName).add(allocated);
+          metaStore.put({ key: "hlc", value: { wallMs, counter } });
+          if (input.withDeviceSequence) metaStore.put({ key: "deviceSequence", value: deviceSequence });
+          if (input.timerOwner && allocated?.type === "start" && allocated.timerId) {
+            metaStore.put({
+              key: TIMER_OWNER_KEY,
+              value: {
+                timerId: allocated.timerId,
+                deviceId: input.timerOwner.deviceId,
+                tabId: input.timerOwner.tabId,
+                leaseExpiresAtMs: input.timerOwner.nowMs + input.timerOwner.leaseMs
+              }
+            });
+          }
+        } catch (error) {
+          failure = error;
+          transaction.abort();
         }
       };
       for (const [name, request] of Object.entries(requests)) {
@@ -290,9 +535,7 @@
     const matches = (command) => timer && timer.id === command.timerId
       && timer.phase === command.phase
       && Number(timer.plannedDurationMs) === Number(command.plannedDurationMs);
-    for (const command of [...(commands || [])].sort((left, right) =>
-      Number(left.deviceSequence) - Number(right.deviceSequence) || String(left.id).localeCompare(String(right.id))
-    )) {
+    for (const command of [...(commands || [])].sort(core.compareTimerCommands)) {
       switch (command.type) {
         case "start":
           timer = {
@@ -359,7 +602,18 @@
 
   function finishTimer(database, input) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, PENDING_STORE], "readwrite");
+      const transaction = database.transaction(
+        input.withUuidV7
+          ? [
+              META_STORE,
+              PENDING_STORE,
+              TASK_PENDING_STORE,
+              DURATION_PENDING_STORE,
+              AUTO_START_PENDING_STORE
+            ]
+          : [META_STORE, PENDING_STORE],
+        "readwrite"
+      );
       const metaStore = transaction.objectStore(META_STORE);
       const pendingStore = transaction.objectStore(PENDING_STORE);
       const requests = {
@@ -371,6 +625,7 @@
         timerOwner: metaStore.get(TIMER_OWNER_KEY),
         commands: pendingStore.getAll()
       };
+      if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
       const results = {};
       let remaining = Object.keys(requests).length;
       let outcome;
@@ -400,7 +655,8 @@
         );
         const ownerIsCurrentTimer = owner?.timerId === input.timerId;
         const ownerDeviceMatches = ownerIsCurrentTimer && owner.deviceId === input.deviceId;
-        const ownerLeaseLive = Number(owner?.leaseExpiresAtMs) > input.nowMs;
+        const leaseNowMs = input.localNowMs ?? input.nowMs;
+        const ownerLeaseLive = Number(owner?.leaseExpiresAtMs) > leaseNowMs;
         const ownerGranted = input.manual === true || ownerDeviceMatches
           && (owner.tabId === input.tabId || !ownerLeaseLive);
         if (input.requireOwner === true && !ownerGranted) {
@@ -419,9 +675,28 @@
         const storedWallMs = Number(storedHlc.wallMs) || 0;
         const wallMs = Math.max(input.nowMs, storedWallMs);
         let counter = wallMs === storedWallMs ? (Number(storedHlc.counter) || 0) + 1 : 0;
-        const occurredAt = new Date(input.nowMs).toISOString();
+        const generatedCount = input.breakPhase && ownerGranted ? 2 : 1;
+        let commandIds;
+        try {
+          requireMutationRange(input.nowMs, wallMs, counter + generatedCount - 1, highestSequence + generatedCount);
+          commandIds = input.withUuidV7
+            ? reserveTransactionUuid7(
+                metaStore,
+                results,
+                wallMs,
+                generatedCount,
+                input.entropy
+              )
+            : [input.finishCommandId, input.breakCommandId].slice(0, generatedCount);
+        } catch (error) {
+          failure = error;
+          transaction.abort();
+          return;
+        }
+        const occurredAt = new Date(wallMs).toISOString();
         const finishCommand = {
-          id: input.finishCommandId,
+          id: commandIds[0],
+          deviceId: input.deviceId,
           deviceSequence: highestSequence + 1,
           timerId: timer.id,
           type: "finish",
@@ -442,7 +717,8 @@
         if (input.breakPhase && ownerGranted) {
           counter += 1;
           const breakCommand = {
-            id: input.breakCommandId,
+            id: commandIds[1],
+            deviceId: input.deviceId,
             deviceSequence: highestSequence + 2,
             timerId: input.breakTimerId,
             type: "start",
@@ -463,7 +739,7 @@
               timerId: breakCommand.timerId,
               deviceId: input.deviceId,
               tabId: input.tabId,
-              leaseExpiresAtMs: input.nowMs + input.leaseMs
+              leaseExpiresAtMs: leaseNowMs + input.leaseMs
             }
           });
         } else if (ownerGranted) {
@@ -576,18 +852,32 @@
           transaction.abort();
           return;
         }
-        const commands = (results.commands || []).sort((left, right) =>
-          Number(left.deviceSequence) - Number(right.deviceSequence) || String(left.id).localeCompare(String(right.id))
-        );
+        if (existingResolution && (existingResolution.gateToken !== options.gateToken
+          || typeof input.requestId !== "string" || !input.requestId
+          || input.requestId === existingResolution.payload?.requestId)) {
+          failure = new BootstrapGateError("Saved history resolution replacement requires its owner and a fresh request ID.");
+          transaction.abort();
+          return;
+        }
+        const commands = (results.commands || []).sort(core.compareTimerCommands);
         const operationOrder = (left, right) =>
           Number(left.hlcWallMs) - Number(right.hlcWallMs)
           || Number(left.hlcCounter) - Number(right.hlcCounter)
           || String(left.id).localeCompare(String(right.id));
+        const durationOperations = (results.durationOperations || [])
+          .map((operation) => {
+            const normalized = core.durationRequestOperation(operation);
+            if (normalized.occurredAt !== operation.occurredAt) {
+              transaction.objectStore(DURATION_PENDING_STORE).put({ ...operation, occurredAt: normalized.occurredAt });
+            }
+            return { ...operation, occurredAt: normalized.occurredAt };
+          })
+          .sort(operationOrder);
         const resolutionInput = {
           ...input,
           commands,
           taskOperations: (results.taskOperations || []).sort(operationOrder),
-          durationOperations: (results.durationOperations || []).sort(operationOrder)
+          durationOperations
         };
         const autoStartOperations = (results.autoStartOperations || []).sort(operationOrder);
         if (autoStartOperations.length > 0 || input.autoStartOperationsPresent === true) {
@@ -710,6 +1000,9 @@
   }
 
   function applyResolution(database, pending, canonical) {
+    if (canonical.clockOffset != null && !core.validClockSample(canonical.clockOffset)) {
+      return Promise.reject(new ClockRangeError());
+    }
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
         [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
@@ -722,6 +1015,7 @@
         snapshot: metaStore.get("snapshot"),
         hlc: metaStore.get("hlc"),
         settings: metaStore.get("settings"),
+        clockOffset: metaStore.get(CLOCK_OFFSET_KEY),
         timerOwner: metaStore.get(TIMER_OWNER_KEY),
         commands: transaction.objectStore(PENDING_STORE).getAll()
       };
@@ -759,6 +1053,7 @@
             snapshot: storedSnapshot,
             hlc: results.hlc?.value || canonical.hlc
           };
+          outcome.clockOffset = putLatestClockOffset(metaStore, results.clockOffset?.value || null, canonical.clockOffset);
           return;
         }
         if (!resolution || JSON.stringify(resolution) !== JSON.stringify(pending)) {
@@ -784,7 +1079,12 @@
         for (const id of queueIds.autoStartOperations || []) autoStartPendingStore.delete(id);
         completeLegacyAutoStartMigration();
         metaStore.put({ key: "snapshot", value: canonical.snapshot });
-        metaStore.put({ key: "hlc", value: canonical.hlc });
+        const clockOffset = putLatestClockOffset(metaStore, results.clockOffset?.value || null, canonical.clockOffset);
+        const responseHlc = canonical.clockOffset != null && clockOffset === canonical.clockOffset
+          ? canonical.hlc
+          : canonical.serverHlc || canonical.hlc;
+        const hlc = laterHlc(results.hlc?.value, responseHlc);
+        metaStore.put({ key: "hlc", value: hlc });
         const owner = results.timerOwner?.value || null;
         if ((canonical.dropTimerIds || []).includes(owner?.timerId)) metaStore.delete(TIMER_OWNER_KEY);
         else claimMissingTimerOwner(
@@ -800,7 +1100,7 @@
         );
         metaStore.delete(RESOLUTION_KEY);
         metaStore.delete(GATE_KEY);
-        outcome = { applied: true, staleSuccess: false, snapshot: canonical.snapshot, hlc: canonical.hlc };
+        outcome = { applied: true, staleSuccess: false, snapshot: canonical.snapshot, hlc, clockOffset };
       };
       for (const [name, request] of Object.entries(requests)) {
         request.onsuccess = () => {
@@ -815,6 +1115,9 @@
   }
 
   function applySyncResponse(database, input) {
+    if (input.clockOffset != null && !core.validClockSample(input.clockOffset)) {
+      return Promise.reject(new ClockRangeError());
+    }
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
         [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
@@ -826,6 +1129,7 @@
         resolution: metaStore.get(RESOLUTION_KEY),
         snapshot: metaStore.get("snapshot"),
         hlc: metaStore.get("hlc"),
+        clockOffset: metaStore.get(CLOCK_OFFSET_KEY),
         timerOwner: metaStore.get(TIMER_OWNER_KEY),
         commands: transaction.objectStore(PENDING_STORE).getAll()
       };
@@ -849,8 +1153,7 @@
           transaction.abort();
           return;
         }
-        const incomingTimeOrder = core.compareServerTimes(input.snapshot.serverTime, input.snapshot.serverTime);
-        if (incomingTimeOrder !== 0) {
+        if (!core.validDateTime(input.snapshot.serverTime)) {
           failure = new Error("Sync response returned an invalid serverTime.");
           transaction.abort();
           return;
@@ -858,6 +1161,7 @@
         const storedRevision = Number(storedSnapshot?.revision || 0);
         const incomingRevision = Number(input.snapshot.revision);
         if (storedRevision > incomingRevision) {
+          const clockOffset = putLatestClockOffset(metaStore, results.clockOffset?.value || null, input.clockOffset);
           claimMissingTimerOwner(
             metaStore,
             results.timerOwner?.value || null,
@@ -865,38 +1169,8 @@
             results.commands || [],
             input.timerOwnerClaim
           );
-          outcome = { applied: false, stale: true, snapshot: storedSnapshot };
+          outcome = { applied: false, stale: true, snapshot: storedSnapshot, clockOffset };
           return;
-        }
-        if (storedRevision === incomingRevision && storedSnapshot.serverTime !== undefined) {
-          const order = core.compareServerTimes(input.snapshot.serverTime, storedSnapshot.serverTime);
-          if (order === null) {
-            failure = new Error("Persisted canonical state has an invalid serverTime.");
-            transaction.abort();
-            return;
-          }
-          if (order < 0) {
-            claimMissingTimerOwner(
-              metaStore,
-              results.timerOwner?.value || null,
-              storedSnapshot,
-              results.commands || [],
-              input.timerOwnerClaim
-            );
-            outcome = { applied: false, stale: true, idempotent: false, snapshot: storedSnapshot };
-            return;
-          }
-          if (order === 0) {
-            claimMissingTimerOwner(
-              metaStore,
-              results.timerOwner?.value || null,
-              storedSnapshot,
-              results.commands || [],
-              input.timerOwnerClaim
-            );
-            outcome = { applied: false, stale: false, idempotent: true, snapshot: storedSnapshot };
-            return;
-          }
         }
         const pendingStore = transaction.objectStore(PENDING_STORE);
         for (const id of input.queueIds.commands || []) pendingStore.delete(id);
@@ -922,9 +1196,13 @@
           ),
           input.timerOwnerClaim
         );
-        const hlc = laterHlc(results.hlc?.value, input.hlc);
+        const clockOffset = putLatestClockOffset(metaStore, results.clockOffset?.value || null, input.clockOffset);
+        const responseHlc = input.clockOffset != null && clockOffset === input.clockOffset
+          ? input.hlc
+          : input.serverHlc || input.hlc;
+        const hlc = laterHlc(results.hlc?.value, responseHlc);
         metaStore.put({ key: "hlc", value: hlc });
-        outcome = { applied: true, stale: false, snapshot: input.snapshot, hlc };
+        outcome = { applied: true, stale: false, snapshot: input.snapshot, hlc, clockOffset };
       };
       for (const [name, request] of Object.entries(requests)) {
         request.onsuccess = () => {
@@ -955,11 +1233,16 @@
   async function readCanonicalState(database) {
     const transaction = database.transaction(META_STORE, "readonly");
     const store = transaction.objectStore(META_STORE);
-    const [snapshot, hlc] = await Promise.all([
+    const [snapshot, hlc, clockOffset] = await Promise.all([
       requestResult(store.get("snapshot")),
-      requestResult(store.get("hlc"))
+      requestResult(store.get("hlc")),
+      requestResult(store.get(CLOCK_OFFSET_KEY))
     ]);
-    return { snapshot: snapshot?.value || null, hlc: hlc?.value || null };
+    return {
+      snapshot: snapshot?.value || null,
+      hlc: hlc?.value || null,
+      clockOffset: core.validClockSample(clockOffset?.value) ? clockOffset.value : null
+    };
   }
 
   async function readSyncState(database) {
@@ -968,9 +1251,10 @@
       "readonly"
     );
     const metaStore = transaction.objectStore(META_STORE);
-    const [snapshot, hlc, commands, taskOperations, durationOperations, autoStartOperations] = await Promise.all([
+    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations] = await Promise.all([
       requestResult(metaStore.get("snapshot")),
       requestResult(metaStore.get("hlc")),
+      requestResult(metaStore.get(CLOCK_OFFSET_KEY)),
       requestResult(transaction.objectStore(PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(TASK_PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
@@ -979,6 +1263,7 @@
     return {
       snapshot: snapshot?.value || null,
       hlc: hlc?.value || null,
+      clockOffset: core.validClockSample(clockOffset?.value) ? clockOffset.value : null,
       commands,
       taskOperations,
       durationOperations,
@@ -1028,14 +1313,97 @@
     });
   }
 
+  function normalizeLegacyDurationOperations(database, options = {}) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
+      const metaStore = transaction.objectStore(META_STORE);
+      const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+      const durationsRequest = durationStore.getAll();
+      const gateRequest = metaStore.get(GATE_KEY);
+      const resolutionRequest = metaStore.get(RESOLUTION_KEY);
+      let durations;
+      let gateRecord;
+      let resolutionRecord;
+      let remaining = 3;
+      let changed = 0;
+      let resolution = null;
+      let failure = null;
+      const normalize = (operation) => {
+        if (Number(operation?.hlcWallMs) !== 0 || Number(operation?.hlcCounter) !== 0 || operation.occurredAt === LEGACY_EPOCH) return operation;
+        changed += 1;
+        return { ...operation, occurredAt: LEGACY_EPOCH };
+      };
+      const complete = () => {
+        remaining -= 1;
+        if (remaining !== 0) return;
+        for (const operation of durations || []) {
+          const normalized = normalize(operation);
+          if (normalized !== operation) durationStore.put(normalized);
+        }
+        const captured = resolutionRecord?.value || null;
+        const capturedOperations = captured?.payload?.durationOperations;
+        const needsRotation = Array.isArray(capturedOperations) && capturedOperations.some((operation) =>
+          Number(operation?.hlcWallMs) === 0 && Number(operation?.hlcCounter) === 0 && operation.occurredAt !== LEGACY_EPOCH
+        );
+        if (!needsRotation) {
+          resolution = captured;
+          return;
+        }
+        const gate = gateRecord?.value || null;
+        if (!options.gateToken) {
+          resolution = captured;
+          return;
+        }
+        if (gate?.token !== options.gateToken || captured.gateToken !== options.gateToken) {
+          failure = new BootstrapGateError("Bootstrap gate is owned by another tab.");
+          transaction.abort();
+          return;
+        }
+        if (typeof options.replacementRequestId !== "string" || !options.replacementRequestId
+          || options.replacementRequestId === captured.payload.requestId) {
+          failure = new BootstrapGateError("Legacy history resolution requires a fresh request ID.");
+          transaction.abort();
+          return;
+        }
+        const normalized = capturedOperations.map(normalize);
+        resolution = {
+          ...captured,
+          payload: { ...captured.payload, requestId: options.replacementRequestId, durationOperations: normalized }
+        };
+        metaStore.put({ key: RESOLUTION_KEY, value: resolution });
+      };
+      durationsRequest.onsuccess = () => {
+        durations = durationsRequest.result || [];
+        complete();
+      };
+      gateRequest.onsuccess = () => {
+        gateRecord = gateRequest.result;
+        complete();
+      };
+      resolutionRequest.onsuccess = () => {
+        resolutionRecord = resolutionRequest.result;
+        complete();
+      };
+      transaction.oncomplete = () => resolve({ changed, resolution });
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
+  }
+
   return Object.freeze({
     BootstrapGateError,
     AccountOwnershipError,
+    ClockRangeError,
+    UUIDRangeError,
     ResolutionLimitError,
     GATE_KEY,
     RESOLUTION_KEY,
+    UUID7_KEY,
+    UUID7_MAX_TIMESTAMP_MS,
+    UUID7_RANDOM_MAX,
     acquireBootstrapGate,
     acquireBootstrapGateWithLegacyAutoStart,
+    allocateClockRequestSequence,
     allocateMutation,
     applyResolution,
     applySyncResponse,
@@ -1046,6 +1414,7 @@
     invalidateForeignResolution,
     leaseIsLive,
     migrateLegacyAutoStart,
+    normalizeLegacyDurationOperations,
     releaseTimerOwnership,
     readBootstrapState,
     readCanonicalState,
@@ -1053,7 +1422,11 @@
     readSyncState,
     requestResult,
     renewTimerOwnership,
+    saveClockOffset,
     transactionDone,
+    reserveUuid7,
+    uuid7FromParts,
+    uuid7Parts,
     validatePendingForSend
   });
 });

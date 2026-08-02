@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,9 +13,10 @@ import (
 	"time"
 
 	"pomodorough/internal/store"
+	"pomodorough/internal/timer"
 )
 
-func TestHTTPBootstrapPreviewIsReadOnlyAndKeepRemoteDoesNotPublish(t *testing.T) {
+func TestHTTPBootstrapPreviewWithoutDeadlineDoesNotMutateAndKeepRemoteDoesNotPublish(t *testing.T) {
 	fixture := newServerFixture(t)
 	now := time.Now().UTC()
 	syncPayload := validSyncRequestJSON(now)
@@ -74,6 +76,94 @@ func TestHTTPBootstrapPreviewIsReadOnlyAndKeepRemoteDoesNotPublish(t *testing.T)
 		t.Fatalf("keep_remote retry status=%d first=%s retry=%s", retry.Code, first.Body.String(), retry.Body.String())
 	}
 	assertNoRevision(t, revisions)
+}
+
+func TestHTTPStreamDropsOwnMaterializationRevisionEcho(t *testing.T) {
+	fixture := newServerFixture(t)
+	ctx := context.Background()
+	db, err := fixture.userStore.OpenExistingUser(ctx, fixture.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC().Add(-2 * time.Minute)
+	command := timer.Command{
+		ID: "command-stream-materialize", DeviceID: fixture.deviceID, DeviceSequence: 1, TimerID: "timer-stream-materialize",
+		Type: "start", Phase: "focus", PlannedDurationMs: 60_000, OccurredAt: startedAt, HLCWallMs: startedAt.UnixMilli(),
+	}
+	started, err := fixture.userStore.Sync(ctx, db, fixture.userID, store.SyncRequest{DeviceID: fixture.deviceID, Commands: []timer.Command{command}}, startedAt)
+	db.Close()
+	if err != nil || started.Revision != 1 || started.CanonicalTimer == nil || started.CanonicalTimer.Status != "running" {
+		t.Fatalf("seed running timer = %#v, %v", started, err)
+	}
+
+	testServer := httptest.NewServer(fixture.handler)
+	defer testServer.Close()
+	requestContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, testServer.URL+"/api/v1/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+fixture.accessToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	revisions := make(chan int64, 2)
+	go func() {
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			var event struct {
+				Revision int64 `json:"revision"`
+			}
+			if strings.HasPrefix(scanner.Text(), "data: ") && json.Unmarshal([]byte(strings.TrimPrefix(scanner.Text(), "data: ")), &event) == nil {
+				revisions <- event.Revision
+			}
+		}
+	}()
+	select {
+	case revision := <-revisions:
+		if revision != 2 {
+			t.Fatalf("initial revision = %d, want 2", revision)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("missing initial materialized revision")
+	}
+	select {
+	case revision := <-revisions:
+		t.Fatalf("duplicate materialization revision = %d", revision)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHTTPSyncRevisionSaturationReturnsConflictWithoutMutation(t *testing.T) {
+	fixture := newServerFixture(t)
+	db, err := fixture.userStore.OpenExistingUser(context.Background(), fixture.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE account_state SET revision = ? WHERE singleton = 1`, store.MaxSafeRevision); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	payload := validSyncRequestJSON(time.Now().UTC())
+	payload.LastRevision = int64Pointer(store.MaxSafeRevision)
+	response := postAuthenticatedJSON(t, fixture, "/api/v1/sync", payload)
+	if response.Code != http.StatusConflict || strings.TrimSpace(response.Body.String()) != `{"error":"revision exhausted"}` {
+		t.Fatalf("saturated sync status=%d body=%s", response.Code, response.Body.String())
+	}
+	db, err = fixture.userStore.OpenExistingUser(context.Background(), fixture.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var commands int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM timer_commands`).Scan(&commands); err != nil || commands != 0 {
+		t.Fatalf("timer command count = %d, %v", commands, err)
+	}
 }
 
 func TestHTTPBootstrapMergeIsIdempotentAndMapsConflicts(t *testing.T) {

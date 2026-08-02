@@ -317,12 +317,14 @@ paths:
     get:
       tags: [Timer]
       operationId: getBootstrapSnapshot
-      summary: Preview canonical server state for bootstrap
+      summary: Materialize canonical server state for bootstrap
       description: |
         Returns the same complete canonical snapshot shape as synchronization,
-        with empty acknowledgement arrays. This endpoint is strictly read-only:
-        it does not create or update a device, change the account revision, store
-        a bootstrap resolution, or publish a revision event.
+        with empty acknowledgement arrays. It does not create or update a device
+        or store a bootstrap resolution. Before returning, it transactionally
+        reduces immutable timer commands at current server time and persists a
+        changed deadline projection. Such materialization increments revision once
+        and publishes that revision; an unchanged projection performs no mutation.
       security:
         - cookieAuth: []
         - bearerAuth: []
@@ -335,6 +337,12 @@ paths:
                 $ref: "#/components/schemas/SyncResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Deadline materialization requires a revision beyond maximum safe integer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -349,7 +357,9 @@ paths:
         returns `409 revision conflict` without mutation.
 
         `keep_remote` requires all operation arrays to be empty and records the
-        returned remote snapshot without changing revision. `merge` applies the
+        returned remote snapshot. It ordinarily preserves revision, but may
+        transactionally materialize a changed deadline projection and increment
+        revision once in the same resolution. `merge` applies the
         supplied immutable local operations on top of remote history.
         `replace_remote` atomically clears timer commands and projections, task
         operations, and duration operations before applying local history. When
@@ -403,7 +413,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Expected revision is stale or request ID was reused with a changed normalized payload.
+          description: Expected revision is stale, request ID was reused with a changed normalized payload, or canonical revision is exhausted.
           content:
             application/json:
               schema:
@@ -437,9 +447,11 @@ paths:
         operations resolve as one account preference with default `false`.
 
         `lastRevision` reports the client's last observed revision. This version
-        always returns the complete canonical snapshot and history. A revision is
-        incremented once per request that inserts at least one new timer command,
-        task operation, duration operation, or auto-start operation.
+        always returns the complete canonical snapshot and history. Revision is a
+        monotonic canonical-generation number: it increments once when a request
+        inserts one or more operations or when time materializes a changed timer
+        projection, such as deadline completion. Equal revision therefore denotes
+        the same canonical snapshot generation and needs no wall-clock tie-break.
 
         Bearer-authenticated clients may only sync the device bound to their
         access-token session. Web clients must supply both conditional CSRF
@@ -471,6 +483,14 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error: invalid sync request
+        "409":
+          description: Canonical revision reached maximum safe integer and cannot advance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: revision exhausted
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -509,6 +529,12 @@ paths:
                 $ref: "#/components/schemas/HistoryResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Deadline materialization requires a revision beyond maximum safe integer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -520,8 +546,11 @@ paths:
       description: |
         Sends current revision immediately, then sends a `revision` event whenever
         a sync request inserts at least one new timer command, task operation, or
-        duration operation, auto-start operation, or a first bootstrap merge/replacement changes logical
-        history. Sends a comment keepalive every 20 seconds. Events are hints;
+        duration operation, auto-start operation, or a first bootstrap
+        merge/replacement changes logical history, including transactional deadline
+        projection materialization by bootstrap/history/stream reads. Each stream
+        emits a revision at most once and drops stale or duplicate hints. Sends a
+        comment keepalive every 20 seconds. Events are hints;
         reconnect and fetch a bootstrap snapshot or sync to retrieve authoritative
         state.
       security:
@@ -540,6 +569,12 @@ paths:
 
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Deadline materialization requires a revision beyond maximum safe integer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -868,12 +903,13 @@ components:
           type: integer
           format: int64
           minimum: 1
-          description: Monotonic sequence unique within one device ID.
+          maximum: 9007199254740991
+          description: Per-device uniqueness key. Gaps and unseen regressions are allowed; it does not order commands globally.
         timerId:
           $ref: "#/components/schemas/TimerID"
         taskId:
           $ref: "#/components/schemas/TaskID"
-          description: Optional task association. Valid only for a `start` command.
+          description: Optional task association. Valid only for a `start` command whose phase is `focus`.
         type:
           $ref: "#/components/schemas/CommandType"
         phase:
@@ -887,11 +923,15 @@ components:
         occurredAt:
           type: string
           format: date-time
-          description: Client-observed intent time in RFC 3339 format.
+          description: |
+            Client-observed intent time in RFC 3339 format. It must not be more
+            than five minutes ahead of server time or differ from `hlcWallMs`
+            by more than five minutes.
         hlcWallMs:
           type: integer
           format: int64
           minimum: 1
+          maximum: 9007199254740991
           description: |
             Hybrid logical clock wall component in Unix milliseconds. Must not be
             more than five minutes ahead of server time.
@@ -899,6 +939,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
         observedElapsedMs:
           type: integer
           format: int64
@@ -946,11 +987,15 @@ components:
         occurredAt:
           type: string
           format: date-time
-          description: Client-observed intent time in RFC 3339 format.
+          description: |
+            Client-observed intent time in RFC 3339 format. It must not be more
+            than five minutes ahead of server time or differ from `hlcWallMs`
+            by more than five minutes.
         hlcWallMs:
           type: integer
           format: int64
           minimum: 1
+          maximum: 9007199254740991
           description: |
             Hybrid logical clock wall component in Unix milliseconds. Must not be
             more than five minutes ahead of server time.
@@ -958,6 +1003,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
       example:
         id: task-op-01J2YM1N9A7B5C3D1E8F6G4H2J
         taskId: aaf83054-24b2-8c0e-901f-a974147bfe82
@@ -985,11 +1031,16 @@ components:
         occurredAt:
           type: string
           format: date-time
-          description: Client-observed preference change time in RFC 3339 format.
+          description: |
+            Client-observed preference change time in RFC 3339 format. It must
+            not be more than five minutes ahead of server time or differ from
+            `hlcWallMs` by more than five minutes. Legacy `(0, 0)` operations
+            must use the Unix epoch exactly.
         hlcWallMs:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
           description: |
             Hybrid logical clock wall component in Unix milliseconds. Must not be
             more than five minutes ahead of server time. Legacy preference
@@ -998,6 +1049,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
       example:
         id: duration-op-01J2YM1N9A7B5C3D1E8F6G4H2J
         phase: focus
@@ -1019,16 +1071,22 @@ components:
         occurredAt:
           type: string
           format: date-time
-          description: Client-observed preference change time in RFC 3339 format.
+          description: |
+            Client-observed preference change time in RFC 3339 format. It must
+            not be more than five minutes ahead of server time or differ from
+            `hlcWallMs` by more than five minutes. Legacy `(0, 0)` operations
+            must use the Unix epoch exactly.
         hlcWallMs:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
           description: Hybrid logical clock wall component; must not exceed server time by more than five minutes.
         hlcCounter:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
       example:
         id: auto-start-op-01J2YM1N9A7B5C3D1E8F6G4H2J
         enabled: true
@@ -1060,6 +1118,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
           description: Revision returned by bootstrap preview and compared on first execution.
         strategy:
           $ref: "#/components/schemas/BootstrapResolutionStrategy"
@@ -1103,6 +1162,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
           description: Latest account revision applied by this client.
         commands:
           type: array
@@ -1350,6 +1410,8 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
+          description: Monotonic canonical snapshot generation.
         canonicalTimer:
           type: object
           allOf:
@@ -1378,11 +1440,13 @@ components:
           type: integer
           format: int64
           minimum: 1
+          maximum: 9007199254740991
           description: Wall component of the maximum server, persisted, or observed account HLC tuple.
         serverHlcCounter:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
           description: Counter component paired with `serverHlcWallMs`.
 
     HistoryResponse:
