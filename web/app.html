@@ -113,7 +113,6 @@
       <article class="timer-machine" aria-describedby="timerInstruction">
         <div class="machine-plate">
           <span>Current service</span>
-          <span id="timerStateLabel">Idle</span>
         </div>
 
         <div id="dial" class="dial" data-status="idle">
@@ -125,9 +124,9 @@
           </svg>
           <div class="dial-center">
             <span class="board-kicker">Now timing</span>
-            <span id="phaseLabel" class="dial-phase">Focus</span>
+            <span id="phaseLabel" class="dial-phase" aria-hidden="true">Focus</span>
             <time id="timerDisplay" class="timer-display" role="timer" datetime="PT25M">25:00</time>
-            <span id="timerDetail" class="timer-detail">Idle / 25 min</span>
+            <span id="timerDetail" class="timer-detail" aria-hidden="true">Idle / 25 min</span>
           </div>
           <span class="dial-pointer" aria-hidden="true"></span>
         </div>

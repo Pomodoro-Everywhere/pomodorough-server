@@ -82,7 +82,6 @@
     phaseLabel: document.querySelector("#phaseLabel"),
     timerDisplay: document.querySelector("#timerDisplay"),
     timerDetail: document.querySelector("#timerDetail"),
-    timerStateLabel: document.querySelector("#timerStateLabel"),
     timerInstruction: document.querySelector("#timerInstruction"),
     timerToggle: document.querySelector("#timerToggle"),
     finishButton: document.querySelector("#finishButton"),
@@ -2409,7 +2408,6 @@
       `${minutes} minutes ${seconds} seconds remaining, ${phase.label}, ${status}`
     );
     elements.phaseLabel.textContent = phase.label.toUpperCase();
-    elements.timerStateLabel.textContent = status.toUpperCase();
     elements.timerDetail.textContent = `${status.toUpperCase()} / ${Math.round(timer.plannedDurationMs / 60000)} MIN`;
     elements.dial.dataset.status = status;
     elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE * (1 - progress));

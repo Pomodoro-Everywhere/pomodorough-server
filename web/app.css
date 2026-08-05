@@ -970,10 +970,6 @@ main {
   text-transform: uppercase;
 }
 
-.machine-plate span:last-child {
-  color: var(--ticket);
-}
-
 .dial {
   position: relative;
   z-index: 1;
@@ -1711,6 +1707,10 @@ main {
 
   .timer-machine {
     padding: 1rem 0.7rem 1.3rem;
+  }
+
+  .machine-plate {
+    display: none;
   }
 
   .dial {
