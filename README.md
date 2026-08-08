@@ -30,6 +30,7 @@ own SQLite database, so the service requires neither PostgreSQL nor Redis.
 - Server-Sent Events for low-latency revision notifications
 - Static asset delivery from the same process that serves the API
 - Complete OpenAPI 3.0 contract in [`web/openapi.yaml`](web/openapi.yaml)
+- Transport-neutral Iroh peer protocol in [`docs/iroh-sync-v1.md`](docs/iroh-sync-v1.md)
 
 ## Architecture
 

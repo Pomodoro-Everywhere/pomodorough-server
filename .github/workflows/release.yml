@@ -87,7 +87,7 @@ jobs:
             -ldflags="-s -w -buildid=" \
             -o "dist/${package}/pomodorough" \
             ./cmd/pomodorough
-          cp -R web deploy README.md LICENSE "dist/${package}/"
+          cp -R web deploy docs README.md LICENSE "dist/${package}/"
           tar \
             --sort=name \
             --mtime="@${source_date_epoch}" \
