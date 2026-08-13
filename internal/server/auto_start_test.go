@@ -276,10 +276,13 @@ func TestHTTPLegacyBootstrapReplayNormalizesRequiredArrays(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"acknowledgements", "taskAcknowledgements", "durationAcknowledgements", "autoStartAcknowledgements", "history", "tasks"} {
+	for _, field := range []string{"acknowledgements", "taskAcknowledgements", "durationAcknowledgements", "autoStartAcknowledgements", "selectedTaskAcknowledgements", "history", "tasks"} {
 		if string(fields[field]) != "[]" {
 			t.Errorf("%s = %s, want []", field, fields[field])
 		}
+	}
+	if string(fields["selectedTaskId"]) != "null" {
+		t.Errorf("selectedTaskId = %s, want null", fields["selectedTaskId"])
 	}
 	var normalized store.SyncResult
 	if err := json.Unmarshal(response.Body.Bytes(), &normalized); err != nil {

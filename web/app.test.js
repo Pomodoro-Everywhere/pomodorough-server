@@ -23,32 +23,133 @@ function loadTaskProjection() {
     rebuildOptimisticState,
     rebuildOptimisticTasks,
     rebuildOptimisticAutoStart,
+    rebuildOptimisticSelectedTask,
+    selectedTaskIdForNextFocus,
+    refreshAllPendingOperations,
+    renderTaskSelector,
+    issueSelectedTaskOperation,
+    ownerStateValue,
+    resetOwnerState,
+    restoreOwnerState,
+    setDatabaseForTest(value) { db = value; },
     completionRetryDelay,
+    completedFocusCountForDay,
+    longBreakProgress,
     nextBreakPhase,
     releaseCompletionRetry,
     scheduleCompletionRetry,
     setCompletionQueuedForTest(value) { completionQueuedFor = value; },
     completionQueuedForTest() { return completionQueuedFor; },
     closeRevisionStreamForIdentityChange,
+    pollRemoteState,
+    remoteSyncIntervalMs: REMOTE_SYNC_INTERVAL_MS,
+    completionAlertTitle,
+    primeCompletionAlerts,
+    startCompletionAlert,
+    stopCompletionAlert,
+    completionSoundIntervalMs: COMPLETION_SOUND_INTERVAL_MS,
+    completionAlertTimerIDTest() { return completionAlertTimerID; },
+    completionAlertDismissedTimerIDTest() { return completionAlertDismissedTimerID; },
     setRevisionStreamForTest(value) { eventSource = value; },
     hasRevisionStreamForTest() { return Boolean(eventSource); }
   };`
   );
   assert.notEqual(instrumented, source, "app test seam was not installed");
   let scheduledTimeout = null;
+  const scheduledIntervals = [];
+  const clearedIntervals = [];
+  const notifications = [];
+  let toneStarts = 0;
+  let allocatedMutationInput = null;
+  let queues = {
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: []
+  };
+  const taskSelector = {
+    options: [],
+    replaceChildren() { this.options = []; },
+    append(option) { this.options.push(option); },
+    value: "",
+    disabled: false
+  };
+  const testElements = {
+    "#taskSelector": taskSelector,
+    "#syncStatus": { dataset: {} },
+    "#syncStatusText": { textContent: "" }
+  };
   const context = {
     PomodoroughSync: sync,
-    PomodoroughStorage: {},
+    PomodoroughStorage: {
+      async normalizeLegacyDurationOperations() {},
+      async readQueues() { return queues; },
+      async allocateMutation(_database, input) {
+        allocatedMutationInput = input;
+        return input.build({ id: "selected-operation", wallMs: baseTime, counter: 0 });
+      }
+    },
     console,
     crypto: { randomUUID: () => "test-tab-id" },
     sessionStorage: { getItem: () => null, setItem: () => {} },
     document: {
-      querySelector: () => null,
-      querySelectorAll: () => []
+      querySelector: (selector) => testElements[selector] || null,
+      querySelectorAll: () => [],
+      createElement: () => ({ value: "", textContent: "", disabled: false })
+    },
+    navigator: { onLine: true },
+    Notification: class TestNotification {
+      static permission = "granted";
+
+      static async requestPermission() {
+        return this.permission;
+      }
+
+      constructor(title, options) {
+        this.title = title;
+        this.options = options;
+        this.closed = false;
+        notifications.push(this);
+      }
+
+      close() {
+        this.closed = true;
+      }
+    },
+    AudioContext: class TestAudioContext {
+      constructor() {
+        this.state = "suspended";
+        this.currentTime = 10;
+        this.destination = {};
+      }
+
+      async resume() {
+        this.state = "running";
+      }
+
+      createOscillator() {
+        return {
+          frequency: { value: 0 },
+          connect() {},
+          start() { toneStarts += 1; },
+          stop() {}
+        };
+      }
+
+      createGain() {
+        return { gain: { value: 0 }, connect() {} };
+      }
     },
     window: {
+      clearInterval(id) {
+        clearedIntervals.push(id);
+      },
       clearTimeout: () => {},
-      setInterval: () => 0,
+      setInterval(callback, delay) {
+        scheduledIntervals.push({ callback, delay });
+        return scheduledIntervals.length;
+      },
       setTimeout(callback, delay) {
         scheduledTimeout = { callback, delay };
         return 1;
@@ -61,6 +162,30 @@ function loadTaskProjection() {
     ...context.PomodoroughAppTest,
     scheduledTimeoutDelay() {
       return scheduledTimeout?.delay ?? null;
+    },
+    scheduledIntervals() {
+      return scheduledIntervals;
+    },
+    clearedIntervals() {
+      return clearedIntervals;
+    },
+    notifications() {
+      return notifications;
+    },
+    toneStarts() {
+      return toneStarts;
+    },
+    setOnline(value) {
+      context.navigator.onLine = value;
+    },
+    setQueuesForTest(value) {
+      queues = value;
+    },
+    allocatedMutationInput() {
+      return allocatedMutationInput;
+    },
+    taskSelectorOptions() {
+      return taskSelector.options.map(({ value, textContent, disabled }) => ({ value, textContent, disabled: disabled === true }));
     }
   };
 }
@@ -138,18 +263,26 @@ function expectedMatrixTimer(status, type, target) {
   return { id: "timer-state", status };
 }
 
-test("remote task deletion clears selection unless a pending operation recreates task", () => {
-  const { state, rebuildOptimisticTasks } = loadTaskProjection();
+test("task deletion hides independent selection and task reappearance restores it", () => {
+  const app = loadTaskProjection();
+  const { state, rebuildOptimisticTasks, rebuildOptimisticSelectedTask, selectedTaskIdForNextFocus } = app;
   state.baseTasks = [{ id: "selected-task", title: "Selected" }];
   state.pendingTaskOperations = [];
-  state.selectedTaskId = "selected-task";
+  state.baseSelectedTaskId = "selected-task";
+  state.pendingSelectedTaskOperations = [];
+  rebuildOptimisticSelectedTask();
 
   state.baseTasks = [];
   rebuildOptimisticTasks();
   assert.equal(state.tasks.length, 0);
-  assert.equal(state.selectedTaskId, null);
+  assert.equal(state.selectedTaskId, "selected-task");
+  assert.equal(selectedTaskIdForNextFocus(), null);
+  app.renderTaskSelector();
+  assert.deepEqual(app.taskSelectorOptions(), [
+    { value: "", textContent: "No task", disabled: false },
+    { value: "selected-task", textContent: "Selected task unavailable", disabled: true }
+  ]);
 
-  state.selectedTaskId = "selected-task";
   state.pendingTaskOperations = [{
     id: "task-operation-upsert",
     taskId: "selected-task",
@@ -161,6 +294,7 @@ test("remote task deletion clears selection unless a pending operation recreates
   rebuildOptimisticTasks();
   assert.deepEqual(Array.from(state.tasks, (task) => task.id), ["selected-task"]);
   assert.equal(state.selectedTaskId, "selected-task");
+  assert.equal(selectedTaskIdForNextFocus(), "selected-task");
 
   state.pendingTaskOperations.push({
     id: "task-operation-delete",
@@ -171,7 +305,89 @@ test("remote task deletion clears selection unless a pending operation recreates
   });
   rebuildOptimisticTasks();
   assert.equal(state.tasks.length, 0);
-  assert.equal(state.selectedTaskId, null);
+  assert.equal(state.selectedTaskId, "selected-task");
+});
+
+test("No task selection persists nullable operation and schedules sync without changing timer", async () => {
+  const app = loadTaskProjection();
+  app.setDatabaseForTest({});
+  app.state.ready = true;
+  app.state.bootstrapBlocked = false;
+  app.state.baseSelectedTaskId = "task-current";
+  app.state.selectedTaskId = "task-current";
+  app.state.pendingSelectedTaskOperations = [];
+  app.state.timer = timer("running", "canonical-active");
+  const activeTimer = structuredClone(app.state.timer);
+
+  assert.equal(await app.issueSelectedTaskOperation(null), true);
+
+  assert.equal(app.allocatedMutationInput().storeName, "pendingSelectedTasks");
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [{
+    id: "selected-operation",
+    taskId: null,
+    occurredAt: new Date(baseTime).toISOString(),
+    hlcWallMs: baseTime,
+    hlcCounter: 0
+  }]);
+  assert.equal(app.state.selectedTaskId, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.timer)), activeTimer);
+  assert.equal(app.scheduledTimeoutDelay(), 0);
+});
+
+test("queue refresh rebuilds selected-task projection from peer operations", async () => {
+  const app = loadTaskProjection();
+  app.setDatabaseForTest({});
+  app.state.baseTasks = [
+    { id: "task-first", title: "First" },
+    { id: "task-second", title: "Second" }
+  ];
+  app.state.baseSelectedTaskId = "task-first";
+  app.state.pendingSelectedTaskOperations = [];
+  app.rebuildOptimisticState();
+  app.setQueuesForTest({
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: [{
+      id: "peer-selected-operation",
+      taskId: "task-second",
+      occurredAt: new Date(baseTime).toISOString(),
+      hlcWallMs: baseTime,
+      hlcCounter: 0
+    }]
+  });
+
+  await app.refreshAllPendingOperations();
+
+  assert.equal(app.state.selectedTaskId, "task-second");
+  assert.equal(app.selectedTaskIdForNextFocus(), "task-second");
+});
+
+test("owner quarantine round-trip preserves selected-task base and pending claims", () => {
+  const app = loadTaskProjection();
+  app.state.baseSelectedTaskId = "task-canonical";
+  app.state.selectedTaskId = "task-pending";
+  app.state.pendingSelectedTaskOperations = [{
+    id: "selected-pending",
+    taskId: "task-pending",
+    occurredAt: new Date(baseTime).toISOString(),
+    hlcWallMs: baseTime,
+    hlcCounter: 1
+  }];
+  const owner = app.ownerStateValue();
+
+  app.resetOwnerState();
+  assert.equal(app.state.selectedTaskId, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), []);
+  app.restoreOwnerState(owner);
+
+  assert.equal(app.state.baseSelectedTaskId, "task-canonical");
+  assert.equal(app.state.selectedTaskId, "task-pending");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)),
+    JSON.parse(JSON.stringify(owner.pendingSelectedTaskOperations))
+  );
 });
 
 test("changed session identity closes old revision stream before replacement", () => {
@@ -198,6 +414,91 @@ test("unchanged session identity keeps current revision stream", () => {
   assert.equal(app.hasRevisionStreamForTest(), true);
 });
 
+test("periodic reconciliation forces an empty-queue canonical pull after a missed revision hint", () => {
+  const app = loadTaskProjection();
+  const forceValues = [];
+  app.state.ready = true;
+  app.state.sessionIdentityValidated = true;
+  app.state.authenticated = true;
+  app.state.csrfToken = "csrf";
+  app.state.bootstrapBlocked = false;
+  app.state.pending = [];
+  app.state.pendingTaskOperations = [];
+  app.state.pendingDurationOperations = [];
+  app.state.pendingAutoStartOperations = [];
+
+  assert.equal(app.pollRemoteState((force) => forceValues.push(force)), true);
+
+  assert.deepEqual(forceValues, [true]);
+  assert.ok(app.scheduledIntervals().some(({ callback, delay }) => (
+    callback === app.pollRemoteState && delay === app.remoteSyncIntervalMs
+  )));
+});
+
+test("periodic reconciliation stays idle while offline or bootstrap-blocked", () => {
+  const app = loadTaskProjection();
+  let syncCount = 0;
+  app.state.ready = true;
+  app.state.sessionIdentityValidated = true;
+  app.state.authenticated = true;
+  app.state.csrfToken = "csrf";
+  app.state.bootstrapBlocked = true;
+
+  assert.equal(app.pollRemoteState(() => { syncCount += 1; }), false);
+  app.state.bootstrapBlocked = false;
+  app.setOnline(false);
+  assert.equal(app.pollRemoteState(() => { syncCount += 1; }), false);
+
+  assert.equal(syncCount, 0);
+});
+
+test("completion alert notifies and repeats sound until explicitly stopped", async () => {
+  const app = loadTaskProjection();
+  const completed = timer("completed", "completed-focus");
+
+  await app.primeCompletionAlerts();
+  assert.equal(app.completionAlertTitle(completed), "Focus complete");
+  assert.equal(app.startCompletionAlert(completed), true);
+  assert.equal(app.completionAlertTimerIDTest(), completed.id);
+  assert.equal(app.toneStarts(), 1);
+  assert.equal(app.notifications().length, 1);
+  assert.equal(app.notifications()[0].title, "Focus complete");
+  assert.equal(app.notifications()[0].options.requireInteraction, true);
+  const soundInterval = app.scheduledIntervals().find(
+    ({ delay }) => delay === app.completionSoundIntervalMs
+  );
+  assert.ok(soundInterval);
+
+  assert.equal(app.startCompletionAlert(completed), false);
+  assert.equal(app.notifications().length, 1);
+  assert.equal(app.toneStarts(), 1);
+
+  app.stopCompletionAlert();
+  assert.equal(app.notifications()[0].closed, true);
+  assert.ok(app.clearedIntervals().includes(app.scheduledIntervals().indexOf(soundInterval) + 1));
+  assert.equal(app.completionAlertTimerIDTest(), null);
+  assert.equal(app.completionAlertDismissedTimerIDTest(), completed.id);
+  assert.equal(app.startCompletionAlert(completed), false);
+});
+
+test("starting next timer stops completion alert", async () => {
+  const app = loadTaskProjection();
+  const completed = timer("completed", "completed-focus");
+
+  await app.primeCompletionAlerts();
+  assert.equal(app.startCompletionAlert(completed), true);
+  app.state.baseTimer = timer("running", "next-break");
+  app.state.baseHistory = [terminalHistory("completed", completed.id)];
+  app.state.pending = [];
+
+  app.rebuildOptimisticState();
+
+  assert.equal(app.state.timer.id, "next-break");
+  assert.equal(app.completionAlertTimerIDTest(), null);
+  assert.equal(app.notifications()[0].closed, true);
+  assert.equal(app.clearedIntervals().length, 1);
+});
+
 test("auto-start projection follows canonical state and pending local intent", () => {
   const app = loadTaskProjection();
   app.state.baseAutoStartBreaks = true;
@@ -215,19 +516,31 @@ test("auto-start projection follows canonical state and pending local intent", (
 
 test("local completed focuses choose three short breaks then a long break", () => {
   const app = loadTaskProjection();
+  const reference = new Date("2026-07-22T12:00:00Z");
+  app.state.history = [{
+    id: "yesterday",
+    timerId: "yesterday",
+    phase: "focus",
+    status: "completed",
+    completedAt: "2026-07-21T12:00:00Z"
+  }];
 
   for (let count = 1; count <= 4; count += 1) {
-    app.state.history = Array.from({ length: count }, (_, index) => ({
-      id: `focus-${index}`,
-      timerId: `focus-${index}`,
+    app.state.history.push({
+      id: `focus-${count}`,
+      timerId: `focus-${count}`,
       phase: "focus",
-      status: "completed"
-    }));
+      status: "completed",
+      completedAt: `2026-07-22T0${count}:00:00Z`
+    });
+    assert.equal(app.completedFocusCountForDay(app.state.history, reference), count);
     assert.equal(
-      app.nextBreakPhase(),
+      app.nextBreakPhase(app.state.history, reference),
       count === 4 ? "long_break" : "short_break"
     );
   }
+  assert.equal(app.longBreakProgress(4), 4);
+  assert.equal(app.longBreakProgress(5), 1);
 });
 
 test("automatic not-owner completion retries at lease expiry without render-loop polling", () => {
@@ -322,6 +635,20 @@ test("optimistic reducer preserves source metadata through supersede cancel and 
   assert.equal(cancelled.history[0].phase, "focus");
   assert.equal(cancelled.history[0].plannedDurationMs, 60_000);
   assert.equal(cancelled.history[0].taskId, "task-source");
+});
+
+test("cancel and clear rewind timer while retaining cancelled history", () => {
+  const app = loadTaskProjection();
+  const source = timer("running");
+  const cancel = matrixCommand("cancel", "same");
+  const cancelled = app.reduceCommand(source, [], cancel);
+  const clear = { ...matrixCommand("clear", "same"), hlcCounter: 1 };
+  const reset = app.reduceCommand(cancelled.timer, cancelled.history, clear);
+
+  assert.equal(reset.timer.id, null);
+  assert.equal(reset.timer.status, "idle");
+  assert.equal(reset.history.length, 1);
+  assert.equal(reset.history[0].status, "cancelled");
 });
 
 test("optimistic replay follows HLC and command ID despite crossed device sequences", () => {
@@ -460,18 +787,21 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
       taskOperations,
       durationOperations,
       autoStartOperations,
+      selectedTaskOperations: [],
       baseTimer: null,
       baseHistory: [],
       baseTasks: [],
       baseDurationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
       baseAutoStartBreaks: false,
+      baseSelectedTaskId: null,
       revision: 0
     };
     const sent = {
       commands: commands.filter((item) => scenario.sentIds.commands.includes(item.id)),
       taskOperations: taskOperations.filter((item) => scenario.sentIds.taskOperations.includes(item.id)),
       durationOperations: durationOperations.filter((item) => scenario.sentIds.durationOperations.includes(item.id)),
-      autoStartOperations: autoStartOperations.filter((item) => scenario.sentIds.autoStartOperations.includes(item.id))
+      autoStartOperations: autoStartOperations.filter((item) => scenario.sentIds.autoStartOperations.includes(item.id)),
+      selectedTaskOperations: []
     };
     const canonicalTimer = {
       id: scenario.canonical.timer.id,
@@ -500,10 +830,12 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
       tasks: scenario.canonical.tasks,
       durationsMs: scenario.canonical.durationsMs,
       autoStartBreaks: scenario.canonical.autoStartBreaks,
+      selectedTaskId: null,
       acknowledgements: acknowledgements(scenario.acknowledgements.commands, "commandId"),
       taskAcknowledgements: acknowledgements(scenario.acknowledgements.taskOperations, "operationId"),
       durationAcknowledgements: acknowledgements(scenario.acknowledgements.durationOperations, "operationId"),
-      autoStartAcknowledgements: acknowledgements(scenario.acknowledgements.autoStartOperations, "operationId")
+      autoStartAcknowledgements: acknowledgements(scenario.acknowledgements.autoStartOperations, "operationId"),
+      selectedTaskAcknowledgements: []
     };
     const rebased = sync.rebaseSyncState(local, payload, sent);
     assert.deepEqual(rebased.pending.map((item) => item.id), scenario.expected.commandIds, scenario.name);
@@ -529,10 +861,12 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
     app.state.baseTasks = rebased.baseTasks;
     app.state.baseDurationsMs = rebased.baseDurationsMs;
     app.state.baseAutoStartBreaks = rebased.baseAutoStartBreaks;
+    app.state.baseSelectedTaskId = rebased.baseSelectedTaskId;
     app.state.pending = rebased.pending;
     app.state.pendingTaskOperations = rebased.pendingTaskOperations;
     app.state.pendingDurationOperations = rebased.pendingDurationOperations;
     app.state.pendingAutoStartOperations = rebased.pendingAutoStartOperations;
+    app.state.pendingSelectedTaskOperations = rebased.pendingSelectedTaskOperations;
     app.rebuildOptimisticState();
     assert.deepEqual(
       JSON.parse(JSON.stringify(normalizeFixtureProjection(app.state.timer, app.state.history, epochMs))),

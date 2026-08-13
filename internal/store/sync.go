@@ -13,12 +13,13 @@ import (
 )
 
 type SyncRequest struct {
-	DeviceID            string
-	LastRevision        int64
-	Commands            []timer.Command
-	TaskOperations      []task.Operation
-	DurationOperations  []DurationOperation
-	AutoStartOperations []AutoStartOperation
+	DeviceID               string
+	LastRevision           int64
+	Commands               []timer.Command
+	TaskOperations         []task.Operation
+	DurationOperations     []DurationOperation
+	AutoStartOperations    []AutoStartOperation
+	SelectedTaskOperations []SelectedTaskOperation
 }
 
 type Acknowledgement struct {
@@ -64,6 +65,21 @@ type AutoStartAcknowledgement struct {
 	Reason      string `json:"reason"`
 }
 
+type SelectedTaskOperation struct {
+	ID         string
+	DeviceID   string
+	TaskID     *string
+	OccurredAt time.Time
+	HLCWallMs  int64
+	HLCCounter int64
+}
+
+type SelectedTaskAcknowledgement struct {
+	OperationID string `json:"operationId"`
+	Outcome     string `json:"outcome"`
+	Reason      string `json:"reason"`
+}
+
 type DurationsMs struct {
 	Focus      int64 `json:"focus"`
 	ShortBreak int64 `json:"short_break"`
@@ -71,20 +87,22 @@ type DurationsMs struct {
 }
 
 type SyncResult struct {
-	Acknowledgements          []Acknowledgement          `json:"acknowledgements"`
-	TaskAcknowledgements      []TaskAcknowledgement      `json:"taskAcknowledgements"`
-	DurationAcknowledgements  []DurationAcknowledgement  `json:"durationAcknowledgements"`
-	AutoStartAcknowledgements []AutoStartAcknowledgement `json:"autoStartAcknowledgements"`
-	Revision                  int64                      `json:"revision"`
-	CanonicalTimer            *timer.CanonicalTimer      `json:"canonicalTimer"`
-	History                   []timer.HistoryItem        `json:"history"`
-	Tasks                     []task.Task                `json:"tasks"`
-	DurationsMs               DurationsMs                `json:"durationsMs"`
-	AutoStartBreaks           bool                       `json:"autoStartBreaks"`
-	ServerTime                string                     `json:"serverTime"`
-	ServerHLCWallMs           int64                      `json:"serverHlcWallMs"`
-	ServerHLCCounter          int64                      `json:"serverHlcCounter"`
-	Changed                   bool                       `json:"-"`
+	Acknowledgements             []Acknowledgement             `json:"acknowledgements"`
+	TaskAcknowledgements         []TaskAcknowledgement         `json:"taskAcknowledgements"`
+	DurationAcknowledgements     []DurationAcknowledgement     `json:"durationAcknowledgements"`
+	AutoStartAcknowledgements    []AutoStartAcknowledgement    `json:"autoStartAcknowledgements"`
+	SelectedTaskAcknowledgements []SelectedTaskAcknowledgement `json:"selectedTaskAcknowledgements"`
+	Revision                     int64                         `json:"revision"`
+	CanonicalTimer               *timer.CanonicalTimer         `json:"canonicalTimer"`
+	History                      []timer.HistoryItem           `json:"history"`
+	Tasks                        []task.Task                   `json:"tasks"`
+	DurationsMs                  DurationsMs                   `json:"durationsMs"`
+	AutoStartBreaks              bool                          `json:"autoStartBreaks"`
+	SelectedTaskID               *string                       `json:"selectedTaskId"`
+	ServerTime                   string                        `json:"serverTime"`
+	ServerHLCWallMs              int64                         `json:"serverHlcWallMs"`
+	ServerHLCCounter             int64                         `json:"serverHlcCounter"`
+	Changed                      bool                          `json:"-"`
 }
 
 func normalizeSyncResult(result SyncResult) SyncResult {
@@ -99,6 +117,9 @@ func normalizeSyncResult(result SyncResult) SyncResult {
 	}
 	if result.AutoStartAcknowledgements == nil {
 		result.AutoStartAcknowledgements = []AutoStartAcknowledgement{}
+	}
+	if result.SelectedTaskAcknowledgements == nil {
+		result.SelectedTaskAcknowledgements = []SelectedTaskAcknowledgement{}
 	}
 	if result.History == nil {
 		result.History = []timer.HistoryItem{}
@@ -212,26 +233,30 @@ func (s *Store) materializeProjection(ctx context.Context, db *sql.DB, userID st
 }
 
 type operationApplication struct {
-	commandRejections   map[string]timer.Outcome
-	taskRejections      map[string]TaskAcknowledgement
-	durationRejections  map[string]DurationAcknowledgement
-	autoStartRejections map[string]AutoStartAcknowledgement
-	changed             bool
+	commandRejections      map[string]timer.Outcome
+	taskRejections         map[string]TaskAcknowledgement
+	durationRejections     map[string]DurationAcknowledgement
+	autoStartRejections    map[string]AutoStartAcknowledgement
+	selectedTaskRejections map[string]SelectedTaskAcknowledgement
+	changed                bool
 }
 
 type accountReduction struct {
-	revision                  int64
-	commands                  []timer.Command
-	timer                     timer.Result
-	taskOperations            []task.Operation
-	tasks                     []task.Task
-	winningTaskOperations     map[string]string
-	durationOperations        []DurationOperation
-	durations                 DurationsMs
-	winningDurationOperations map[string]struct{}
-	autoStartOperations       []AutoStartOperation
-	autoStartBreaks           bool
-	winningAutoStartOperation string
+	revision                     int64
+	commands                     []timer.Command
+	timer                        timer.Result
+	taskOperations               []task.Operation
+	tasks                        []task.Task
+	winningTaskOperations        map[string]string
+	durationOperations           []DurationOperation
+	durations                    DurationsMs
+	winningDurationOperations    map[string]struct{}
+	autoStartOperations          []AutoStartOperation
+	autoStartBreaks              bool
+	winningAutoStartOperation    string
+	selectedTaskOperations       []SelectedTaskOperation
+	selectedTaskID               *string
+	winningSelectedTaskOperation string
 }
 
 func validateUniqueOperationIDs(request SyncRequest) error {
@@ -263,15 +288,23 @@ func validateUniqueOperationIDs(request SyncRequest) error {
 		}
 		autoStartOperationIDs[operation.ID] = struct{}{}
 	}
+	selectedTaskOperationIDs := make(map[string]struct{}, len(request.SelectedTaskOperations))
+	for _, operation := range request.SelectedTaskOperations {
+		if _, duplicate := selectedTaskOperationIDs[operation.ID]; duplicate {
+			return fmt.Errorf("duplicate selected-task operation id %q", operation.ID)
+		}
+		selectedTaskOperationIDs[operation.ID] = struct{}{}
+	}
 	return nil
 }
 
 func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (operationApplication, error) {
 	application := operationApplication{
-		commandRejections:   make(map[string]timer.Outcome),
-		taskRejections:      make(map[string]TaskAcknowledgement),
-		durationRejections:  make(map[string]DurationAcknowledgement),
-		autoStartRejections: make(map[string]AutoStartAcknowledgement),
+		commandRejections:      make(map[string]timer.Outcome),
+		taskRejections:         make(map[string]TaskAcknowledgement),
+		durationRejections:     make(map[string]DurationAcknowledgement),
+		autoStartRejections:    make(map[string]AutoStartAcknowledgement),
+		selectedTaskRejections: make(map[string]SelectedTaskAcknowledgement),
 	}
 	for _, command := range request.Commands {
 		existing, err := loadCommand(ctx, tx, command.ID)
@@ -368,6 +401,27 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 		}
 		application.changed = true
 	}
+	for _, operation := range request.SelectedTaskOperations {
+		existing, err := loadSelectedTaskOperation(ctx, tx, operation.ID)
+		if err == nil {
+			if !sameSelectedTaskOperation(existing, operation, request.DeviceID) {
+				application.selectedTaskRejections[operation.ID] = SelectedTaskAcknowledgement{
+					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
+				}
+			}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return operationApplication{}, fmt.Errorf("check selected-task operation id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO selected_task_operations(
+			id, device_id, task_id, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, nullableString(operation.TaskID),
+			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
+			return operationApplication{}, fmt.Errorf("insert selected-task operation: %w", err)
+		}
+		application.changed = true
+	}
 	return application, nil
 }
 
@@ -400,6 +454,11 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 		return accountReduction{}, err
 	}
 	reduction.autoStartBreaks, reduction.winningAutoStartOperation = reduceAutoStart(reduction.autoStartOperations)
+	reduction.selectedTaskOperations, err = loadSelectedTaskOperations(ctx, source)
+	if err != nil {
+		return accountReduction{}, err
+	}
+	reduction.selectedTaskID, reduction.winningSelectedTaskOperation = reduceSelectedTask(reduction.selectedTaskOperations, reduction.tasks)
 	return reduction, nil
 }
 
@@ -526,6 +585,9 @@ func resultFromReduction(reduction accountReduction, revision int64, now time.Ti
 	for _, operation := range reduction.autoStartOperations {
 		observeHLC(operation.HLCWallMs, operation.HLCCounter)
 	}
+	for _, operation := range reduction.selectedTaskOperations {
+		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+	}
 	if request != nil {
 		for _, command := range request.Commands {
 			observeHLC(command.HLCWallMs, command.HLCCounter)
@@ -539,21 +601,26 @@ func resultFromReduction(reduction accountReduction, revision int64, now time.Ti
 		for _, operation := range request.AutoStartOperations {
 			observeHLC(operation.HLCWallMs, operation.HLCCounter)
 		}
+		for _, operation := range request.SelectedTaskOperations {
+			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		}
 	}
 	return normalizeSyncResult(SyncResult{
-		Acknowledgements:          []Acknowledgement{},
-		TaskAcknowledgements:      []TaskAcknowledgement{},
-		DurationAcknowledgements:  []DurationAcknowledgement{},
-		AutoStartAcknowledgements: []AutoStartAcknowledgement{},
-		Revision:                  revision,
-		CanonicalTimer:            reduction.timer.Canonical,
-		History:                   nonNilHistory(reduction.timer.History),
-		Tasks:                     reduction.tasks,
-		DurationsMs:               reduction.durations,
-		AutoStartBreaks:           reduction.autoStartBreaks,
-		ServerTime:                now.UTC().Format(time.RFC3339Nano),
-		ServerHLCWallMs:           serverHLCWallMs,
-		ServerHLCCounter:          serverHLCCounter,
+		Acknowledgements:             []Acknowledgement{},
+		TaskAcknowledgements:         []TaskAcknowledgement{},
+		DurationAcknowledgements:     []DurationAcknowledgement{},
+		AutoStartAcknowledgements:    []AutoStartAcknowledgement{},
+		SelectedTaskAcknowledgements: []SelectedTaskAcknowledgement{},
+		Revision:                     revision,
+		CanonicalTimer:               reduction.timer.Canonical,
+		History:                      nonNilHistory(reduction.timer.History),
+		Tasks:                        reduction.tasks,
+		DurationsMs:                  reduction.durations,
+		AutoStartBreaks:              reduction.autoStartBreaks,
+		SelectedTaskID:               reduction.selectedTaskID,
+		ServerTime:                   now.UTC().Format(time.RFC3339Nano),
+		ServerHLCWallMs:              serverHLCWallMs,
+		ServerHLCCounter:             serverHLCCounter,
 	})
 }
 
@@ -604,6 +671,19 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Reason = ""
 		}
 		result.AutoStartAcknowledgements = append(result.AutoStartAcknowledgements, acknowledgement)
+	}
+	result.SelectedTaskAcknowledgements = make([]SelectedTaskAcknowledgement, 0, len(request.SelectedTaskOperations))
+	for _, operation := range request.SelectedTaskOperations {
+		if acknowledgement, rejected := application.selectedTaskRejections[operation.ID]; rejected {
+			result.SelectedTaskAcknowledgements = append(result.SelectedTaskAcknowledgements, acknowledgement)
+			continue
+		}
+		acknowledgement := SelectedTaskAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer selected-task operation"}
+		if reduction.winningSelectedTaskOperation == operation.ID {
+			acknowledgement.Outcome = "applied"
+			acknowledgement.Reason = ""
+		}
+		result.SelectedTaskAcknowledgements = append(result.SelectedTaskAcknowledgements, acknowledgement)
 	}
 }
 
@@ -676,6 +756,24 @@ func loadAutoStartOperation(ctx context.Context, source databaseQueryer, id stri
 	return operation, nil
 }
 
+func loadSelectedTaskOperation(ctx context.Context, source databaseQueryer, id string) (SelectedTaskOperation, error) {
+	var operation SelectedTaskOperation
+	var occurredAt string
+	var taskID sql.NullString
+	err := source.QueryRowContext(ctx, `SELECT id, device_id, task_id, occurred_at, hlc_wall_ms, hlc_counter
+		FROM selected_task_operations WHERE id = ?`, id).Scan(&operation.ID, &operation.DeviceID, &taskID,
+		&occurredAt, &operation.HLCWallMs, &operation.HLCCounter)
+	if err != nil {
+		return SelectedTaskOperation{}, err
+	}
+	operation.TaskID = stringPointer(taskID)
+	operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return SelectedTaskOperation{}, fmt.Errorf("parse stored selected-task operation timestamp: %w", err)
+	}
+	return operation, nil
+}
+
 func sameCommand(stored, submitted timer.Command, deviceID string) bool {
 	return stored.DeviceID == deviceID && stored.DeviceSequence == submitted.DeviceSequence && stored.TimerID == submitted.TimerID &&
 		stored.TaskID == submitted.TaskID && stored.Type == submitted.Type && stored.Phase == submitted.Phase &&
@@ -695,6 +793,11 @@ func sameDurationOperation(stored, submitted DurationOperation, deviceID string)
 
 func sameAutoStartOperation(stored, submitted AutoStartOperation, deviceID string) bool {
 	return stored.DeviceID == deviceID && stored.Enabled == submitted.Enabled && stored.OccurredAt.Equal(submitted.OccurredAt) &&
+		stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
+}
+
+func sameSelectedTaskOperation(stored, submitted SelectedTaskOperation, deviceID string) bool {
+	return stored.DeviceID == deviceID && equalStringPointers(stored.TaskID, submitted.TaskID) && stored.OccurredAt.Equal(submitted.OccurredAt) &&
 		stored.HLCWallMs == submitted.HLCWallMs && stored.HLCCounter == submitted.HLCCounter
 }
 
@@ -877,11 +980,78 @@ func reduceAutoStart(operations []AutoStartOperation) (bool, string) {
 	return winner.Enabled, winner.ID
 }
 
+func loadSelectedTaskOperations(ctx context.Context, source queryer) ([]SelectedTaskOperation, error) {
+	rows, err := source.QueryContext(ctx, `SELECT id, device_id, task_id, occurred_at, hlc_wall_ms, hlc_counter
+		FROM selected_task_operations ORDER BY hlc_wall_ms, hlc_counter, device_id, id`)
+	if err != nil {
+		return nil, fmt.Errorf("read selected-task operations: %w", err)
+	}
+	defer rows.Close()
+	var operations []SelectedTaskOperation
+	for rows.Next() {
+		var operation SelectedTaskOperation
+		var occurredAt string
+		var taskID sql.NullString
+		if err := rows.Scan(&operation.ID, &operation.DeviceID, &taskID, &occurredAt, &operation.HLCWallMs, &operation.HLCCounter); err != nil {
+			return nil, fmt.Errorf("scan selected-task operation: %w", err)
+		}
+		operation.TaskID = stringPointer(taskID)
+		operation.OccurredAt, err = time.Parse(time.RFC3339Nano, occurredAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse stored selected-task operation timestamp: %w", err)
+		}
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate selected-task operations: %w", err)
+	}
+	return operations, nil
+}
+
+func reduceSelectedTask(operations []SelectedTaskOperation, tasks []task.Task) (*string, string) {
+	if len(operations) == 0 {
+		return nil, ""
+	}
+	winner := operations[len(operations)-1]
+	if winner.TaskID == nil {
+		return nil, winner.ID
+	}
+	for _, current := range tasks {
+		if current.ID == *winner.TaskID {
+			selectedTaskID := *winner.TaskID
+			return &selectedTaskID, winner.ID
+		}
+	}
+	return nil, winner.ID
+}
+
 func nullString(value string) any {
 	if value == "" {
 		return nil
 	}
 	return value
+}
+
+func nullableString(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func stringPointer(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	result := value.String
+	return &result
+}
+
+func equalStringPointers(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func nonNilHistory(history []timer.HistoryItem) []timer.HistoryItem {

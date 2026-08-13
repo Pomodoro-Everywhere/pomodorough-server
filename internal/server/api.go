@@ -34,12 +34,13 @@ var (
 )
 
 type syncRequestJSON struct {
-	DeviceID            string                       `json:"deviceId"`
-	LastRevision        *int64                       `json:"lastRevision"`
-	Commands            []syncCommandJSON            `json:"commands"`
-	TaskOperations      []syncTaskOperationJSON      `json:"taskOperations,omitempty"`
-	DurationOperations  []syncDurationOperationJSON  `json:"durationOperations,omitempty"`
-	AutoStartOperations []syncAutoStartOperationJSON `json:"autoStartOperations,omitempty"`
+	DeviceID               string                          `json:"deviceId"`
+	LastRevision           *int64                          `json:"lastRevision"`
+	Commands               []syncCommandJSON               `json:"commands"`
+	TaskOperations         []syncTaskOperationJSON         `json:"taskOperations,omitempty"`
+	DurationOperations     []syncDurationOperationJSON     `json:"durationOperations,omitempty"`
+	AutoStartOperations    []syncAutoStartOperationJSON    `json:"autoStartOperations,omitempty"`
+	SelectedTaskOperations []syncSelectedTaskOperationJSON `json:"selectedTaskOperations,omitempty"`
 }
 
 type syncCommandJSON struct {
@@ -83,15 +84,24 @@ type syncAutoStartOperationJSON struct {
 	HLCCounter *int64 `json:"hlcCounter"`
 }
 
+type syncSelectedTaskOperationJSON struct {
+	ID         string          `json:"id"`
+	TaskID     json.RawMessage `json:"taskId,omitempty"`
+	OccurredAt string          `json:"occurredAt"`
+	HLCWallMs  *int64          `json:"hlcWallMs"`
+	HLCCounter *int64          `json:"hlcCounter"`
+}
+
 type bootstrapResolutionRequestJSON struct {
-	RequestID           string                      `json:"requestId"`
-	DeviceID            string                      `json:"deviceId"`
-	ExpectedRevision    *int64                      `json:"expectedRevision"`
-	Strategy            string                      `json:"strategy"`
-	Commands            []syncCommandJSON           `json:"commands"`
-	TaskOperations      []syncTaskOperationJSON     `json:"taskOperations"`
-	DurationOperations  []syncDurationOperationJSON `json:"durationOperations"`
-	AutoStartOperations json.RawMessage             `json:"autoStartOperations,omitempty"`
+	RequestID              string                      `json:"requestId"`
+	DeviceID               string                      `json:"deviceId"`
+	ExpectedRevision       *int64                      `json:"expectedRevision"`
+	Strategy               string                      `json:"strategy"`
+	Commands               []syncCommandJSON           `json:"commands"`
+	TaskOperations         []syncTaskOperationJSON     `json:"taskOperations"`
+	DurationOperations     []syncDurationOperationJSON `json:"durationOperations"`
+	AutoStartOperations    json.RawMessage             `json:"autoStartOperations,omitempty"`
+	SelectedTaskOperations json.RawMessage             `json:"selectedTaskOperations,omitempty"`
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -357,10 +367,10 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 	if err := decodeJSON(w, r, maxSyncBody, &payload); err != nil {
 		return store.SyncRequest{}, err
 	}
-	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || *payload.LastRevision > store.MaxSafeRevision || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 {
+	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || *payload.LastRevision > store.MaxSafeRevision || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 || len(payload.SelectedTaskOperations) > 256 {
 		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
 	}
-	request, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, 256, now)
+	request, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, payload.SelectedTaskOperations, 256, now)
 	if err != nil {
 		return store.SyncRequest{}, err
 	}
@@ -377,16 +387,20 @@ func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now
 	if err != nil {
 		return store.BootstrapResolutionRequest{}, err
 	}
+	selectedTaskOperations, selectedTaskOperationsPresent, err := parseOptionalSelectedTaskOperations(payload.SelectedTaskOperations)
+	if err != nil {
+		return store.BootstrapResolutionRequest{}, err
+	}
 	_, validStrategy := validBootstrapStrategies[payload.Strategy]
 	if !validID(payload.RequestID) || !validID(payload.DeviceID) || payload.ExpectedRevision == nil || *payload.ExpectedRevision < 0 || *payload.ExpectedRevision > store.MaxSafeRevision || !validStrategy ||
 		payload.Commands == nil || payload.TaskOperations == nil || payload.DurationOperations == nil ||
-		len(payload.Commands) > 4096 || len(payload.TaskOperations) > 4096 || len(payload.DurationOperations) > 4096 || len(autoStartOperations) > 4096 {
+		len(payload.Commands) > 4096 || len(payload.TaskOperations) > 4096 || len(payload.DurationOperations) > 4096 || len(autoStartOperations) > 4096 || len(selectedTaskOperations) > 4096 {
 		return store.BootstrapResolutionRequest{}, fmt.Errorf("invalid bootstrap resolution envelope")
 	}
-	if payload.Strategy == store.BootstrapKeepRemote && (len(payload.Commands) != 0 || len(payload.TaskOperations) != 0 || len(payload.DurationOperations) != 0 || len(autoStartOperations) != 0) {
+	if payload.Strategy == store.BootstrapKeepRemote && (len(payload.Commands) != 0 || len(payload.TaskOperations) != 0 || len(payload.DurationOperations) != 0 || len(autoStartOperations) != 0 || len(selectedTaskOperations) != 0) {
 		return store.BootstrapResolutionRequest{}, fmt.Errorf("keep_remote requires empty operation arrays")
 	}
-	operations, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, autoStartOperations, 4096, now)
+	operations, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, autoStartOperations, selectedTaskOperations, 4096, now)
 	if err != nil {
 		return store.BootstrapResolutionRequest{}, err
 	}
@@ -394,7 +408,24 @@ func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now
 		RequestID: payload.RequestID, DeviceID: payload.DeviceID, ExpectedRevision: *payload.ExpectedRevision, Strategy: payload.Strategy,
 		Commands: operations.Commands, TaskOperations: operations.TaskOperations, DurationOperations: operations.DurationOperations,
 		AutoStartOperations: operations.AutoStartOperations, AutoStartOperationsPresent: autoStartOperationsPresent,
+		SelectedTaskOperations: operations.SelectedTaskOperations, SelectedTaskOperationsPresent: selectedTaskOperationsPresent,
 	}, nil
+}
+
+func parseOptionalSelectedTaskOperations(raw json.RawMessage) ([]syncSelectedTaskOperationJSON, bool, error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false, errors.New("selectedTaskOperations must be an array")
+	}
+	var operations []syncSelectedTaskOperationJSON
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&operations); err != nil || operations == nil {
+		return nil, false, errors.New("selectedTaskOperations must be an array")
+	}
+	return operations, true, nil
 }
 
 func parseOptionalAutoStartOperations(raw json.RawMessage) ([]syncAutoStartOperationJSON, bool, error) {
@@ -413,21 +444,23 @@ func parseOptionalAutoStartOperations(raw json.RawMessage) ([]syncAutoStartOpera
 	return operations, true, nil
 }
 
-func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, autoStartOperations []syncAutoStartOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
-	if len(commands) > maximum || len(taskOperations) > maximum || len(durationOperations) > maximum || len(autoStartOperations) > maximum {
+func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, autoStartOperations []syncAutoStartOperationJSON, selectedTaskOperations []syncSelectedTaskOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
+	if len(commands) > maximum || len(taskOperations) > maximum || len(durationOperations) > maximum || len(autoStartOperations) > maximum || len(selectedTaskOperations) > maximum {
 		return store.SyncRequest{}, fmt.Errorf("too many operations")
 	}
 	request := store.SyncRequest{
-		DeviceID:            deviceID,
-		Commands:            make([]timer.Command, 0, len(commands)),
-		TaskOperations:      make([]task.Operation, 0, len(taskOperations)),
-		DurationOperations:  make([]store.DurationOperation, 0, len(durationOperations)),
-		AutoStartOperations: make([]store.AutoStartOperation, 0, len(autoStartOperations)),
+		DeviceID:               deviceID,
+		Commands:               make([]timer.Command, 0, len(commands)),
+		TaskOperations:         make([]task.Operation, 0, len(taskOperations)),
+		DurationOperations:     make([]store.DurationOperation, 0, len(durationOperations)),
+		AutoStartOperations:    make([]store.AutoStartOperation, 0, len(autoStartOperations)),
+		SelectedTaskOperations: make([]store.SelectedTaskOperation, 0, len(selectedTaskOperations)),
 	}
 	seenCommandIDs := make(map[string]struct{}, len(commands))
 	seenTaskOperationIDs := make(map[string]struct{}, len(taskOperations))
 	seenDurationOperationIDs := make(map[string]struct{}, len(durationOperations))
 	seenAutoStartOperationIDs := make(map[string]struct{}, len(autoStartOperations))
+	seenSelectedTaskOperationIDs := make(map[string]struct{}, len(selectedTaskOperations))
 	for _, input := range commands {
 		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 || *input.DeviceSequence > maxSafeInteger {
 			return store.SyncRequest{}, fmt.Errorf("invalid command identity")
@@ -534,7 +567,42 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
 		})
 	}
+	for _, input := range selectedTaskOperations {
+		if !validID(input.ID) {
+			return store.SyncRequest{}, fmt.Errorf("invalid selected-task operation identity")
+		}
+		if _, duplicate := seenSelectedTaskOperationIDs[input.ID]; duplicate {
+			return store.SyncRequest{}, fmt.Errorf("duplicate selected-task operation identity")
+		}
+		seenSelectedTaskOperationIDs[input.ID] = struct{}{}
+		taskID, err := parseNullableTaskID(input.TaskID)
+		if err != nil {
+			return store.SyncRequest{}, err
+		}
+		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
+		if err != nil {
+			return store.SyncRequest{}, fmt.Errorf("invalid selected-task operation clock: %w", err)
+		}
+		request.SelectedTaskOperations = append(request.SelectedTaskOperations, store.SelectedTaskOperation{
+			ID: input.ID, DeviceID: deviceID, TaskID: taskID, OccurredAt: occurredAt,
+			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
+		})
+	}
 	return request, nil
+}
+
+func parseNullableTaskID(raw json.RawMessage) (*string, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("missing selected-task value")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var taskID string
+	if err := json.Unmarshal(raw, &taskID); err != nil || !validID(taskID) {
+		return nil, errors.New("invalid selected-task value")
+	}
+	return &taskID, nil
 }
 
 func parseOperationClock(occurredAtValue string, wallMs, counter *int64, allowLegacy bool, now time.Time) (time.Time, error) {

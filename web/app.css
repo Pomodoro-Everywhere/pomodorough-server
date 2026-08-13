@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --platform: #142c5c;
   --platform-deep: #0c1b39;
   --signal: #ff604f;
@@ -11,12 +11,18 @@
   --muted: #5d6a75;
   --mint: #a8d9cb;
   --danger: #c33d38;
+  --page-bg: var(--sky);
+  --page-text: var(--track);
+  --surface: var(--porcelain);
+  --surface-alt: var(--sky);
+  --surface-border: var(--track);
+  --subtle: var(--muted);
   --display: Impact, Haettenschweiler, "Arial Narrow Bold", "Arial Black", sans-serif;
   --body: "Trebuchet MS", "Avenir Next", Avenir, "Segoe UI", sans-serif;
   --utility: "Courier New", Courier, monospace;
   font-family: var(--body);
-  color: var(--track);
-  background: var(--sky);
+  color: var(--page-text);
+  background: var(--page-bg);
   font-synthesis: none;
 }
 
@@ -33,7 +39,7 @@ html {
 body {
   min-height: 100vh;
   margin: 0;
-  background: var(--sky);
+  background: var(--page-bg);
 }
 
 button,
@@ -1052,7 +1058,8 @@ main {
 
 .board-kicker,
 .dial-phase,
-.timer-detail {
+.timer-detail,
+.long-break-progress {
   font-family: var(--utility);
   font-weight: 800;
   letter-spacing: 0.13em;
@@ -1091,6 +1098,13 @@ main {
   font-size: clamp(0.51rem, 1vw, 0.65rem);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.long-break-progress {
+  margin-top: 0.45rem;
+  color: var(--ticket);
+  font-size: clamp(0.8rem, 1.4vw, 1rem);
+  letter-spacing: 0.22em;
 }
 
 .dial-pointer {
@@ -1884,6 +1898,88 @@ main {
   .history-count {
     min-width: 3.7rem;
     font-size: 2rem;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-bg: #0d1722;
+    --page-text: #edf3f5;
+    --surface: #172430;
+    --surface-alt: #101d29;
+    --surface-border: #91a7b5;
+    --subtle: #b7c5cd;
+  }
+
+  .screen-nav,
+  .workbench,
+  .history-strip,
+  .tasks-screen,
+  .task-board {
+    border-color: var(--surface-border);
+  }
+
+  .screen-nav button,
+  .bootstrap-ticket > p,
+  .rail-heading small,
+  .task-selector-row small,
+  .phase-index,
+  .minute-unit,
+  .auto-start-copy small,
+  .rail-note,
+  .history-task,
+  .history-empty,
+  .tasks-heading p,
+  .task-empty,
+  .task-stat::before {
+    color: var(--subtle);
+  }
+
+  .notice,
+  .bootstrap-dialog,
+  .recipe-rail {
+    color: var(--page-text);
+    background: var(--surface);
+    border-color: var(--surface-border);
+  }
+
+  .bootstrap-choices button,
+  .task-selector-row select,
+  .stepper button,
+  .stepper label,
+  .stepper input {
+    color: var(--page-text);
+    background: var(--surface-alt);
+    border-color: var(--surface-border);
+  }
+
+  .bootstrap-kicker,
+  .history-kicker {
+    color: var(--ticket);
+  }
+
+  .rail-heading,
+  .task-selector-row,
+  .duration-row,
+  .auto-start-row,
+  .history-heading,
+  .history-item,
+  .tasks-heading,
+  .task-row {
+    border-color: var(--surface-border);
+  }
+
+  .toggle-track,
+  .toggle-knob {
+    border-color: var(--surface-border);
+  }
+
+  .toggle-knob {
+    background: var(--surface);
+  }
+
+  .history-stamp {
+    border-color: var(--page-bg);
   }
 }
 

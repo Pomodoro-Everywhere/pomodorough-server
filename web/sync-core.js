@@ -50,9 +50,11 @@
       || (Array.isArray(local.taskOperations) && local.taskOperations.length > 0)
       || (Array.isArray(local.durationOperations) && local.durationOperations.length > 0)
       || (Array.isArray(local.autoStartOperations) && local.autoStartOperations.length > 0)
+      || (Array.isArray(local.selectedTaskOperations) && local.selectedTaskOperations.length > 0)
       || (Array.isArray(local.tasks) && local.tasks.length > 0)
       || Boolean(local.timer?.id)
       || Boolean(local.timer?.status && local.timer.status !== "idle")
+      || Boolean(local.selectedTaskId)
       || local.autoStartBreaks === true
       || durationsDiffer(local.durationsMs, local.defaultDurationsMs);
   }
@@ -61,6 +63,7 @@
     return (Array.isArray(remote.history) && remote.history.length > 0)
       || (Array.isArray(remote.tasks) && remote.tasks.length > 0)
       || Boolean(remote.canonicalTimer?.id)
+      || Boolean(remote.selectedTaskId)
       || remote.autoStartBreaks === true
       || durationsDiffer(remote.durationsMs, remote.defaultDurationsMs);
   }
@@ -178,14 +181,15 @@
     if (!STRATEGIES.has(strategy)) throw new Error(`Unknown bootstrap strategy: ${strategy}`);
     const includesAutoStart = Object.prototype.hasOwnProperty.call(operations, "autoStartOperations");
     if (strategy === "keep_remote") {
-      const result = { commands: [], taskOperations: [], durationOperations: [] };
+      const result = { commands: [], taskOperations: [], durationOperations: [], selectedTaskOperations: [] };
       if (includesAutoStart) result.autoStartOperations = [];
       return result;
     }
     const result = {
       commands: sendableTimerCommands(operations.commands, Number.POSITIVE_INFINITY),
       taskOperations: clone(operations.taskOperations || []),
-      durationOperations: (operations.durationOperations || []).map(durationRequestOperation)
+      durationOperations: (operations.durationOperations || []).map(durationRequestOperation),
+      selectedTaskOperations: (operations.selectedTaskOperations || []).map(selectedTaskRequestOperation)
     };
     if (includesAutoStart) {
       result.autoStartOperations = (operations.autoStartOperations || []).map(autoStartRequestOperation);
@@ -202,7 +206,8 @@
       strategy: input.strategy,
       commands: operations.commands,
       taskOperations: operations.taskOperations,
-      durationOperations: operations.durationOperations
+      durationOperations: operations.durationOperations,
+      selectedTaskOperations: operations.selectedTaskOperations
     };
     if (Object.prototype.hasOwnProperty.call(operations, "autoStartOperations")) {
       payload.autoStartOperations = operations.autoStartOperations;
@@ -215,7 +220,8 @@
       commands: (input.commands || []).map((item) => item.id),
       taskOperations: (input.taskOperations || []).map((item) => item.id),
       durationOperations: (input.durationOperations || []).map((item) => item.id),
-      autoStartOperations: (input.autoStartOperations || []).map((item) => item.id)
+      autoStartOperations: (input.autoStartOperations || []).map((item) => item.id),
+      selectedTaskOperations: (input.selectedTaskOperations || []).map((item) => item.id)
     };
   }
 
@@ -233,7 +239,7 @@
   }
 
   function resolutionLimitViolation(payload, limit = RESOLUTION_OPERATION_LIMIT) {
-    for (const field of ["commands", "taskOperations", "durationOperations", "autoStartOperations"]) {
+    for (const field of ["commands", "taskOperations", "durationOperations", "autoStartOperations", "selectedTaskOperations"]) {
       const count = Array.isArray(payload?.[field]) ? payload[field].length : 0;
       if (count > limit) return { field, count, limit };
     }
@@ -292,6 +298,16 @@
     };
   }
 
+  function selectedTaskRequestOperation(operation) {
+    return {
+      id: operation.id,
+      taskId: operation.taskId ?? null,
+      occurredAt: operation.occurredAt,
+      hlcWallMs: operation.hlcWallMs,
+      hlcCounter: operation.hlcCounter
+    };
+  }
+
   function compareAutoStartOperations(left, right) {
     return Number(left.hlcWallMs) - Number(right.hlcWallMs)
       || Number(left.hlcCounter) - Number(right.hlcCounter)
@@ -321,6 +337,11 @@
     return ordered.length ? ordered[ordered.length - 1].enabled === true : baseAutoStartBreaks === true;
   }
 
+  function applySelectedTaskOperations(baseSelectedTaskId, operations) {
+    const ordered = [...(operations || [])].sort(compareAutoStartOperations);
+    return ordered.length ? ordered[ordered.length - 1].taskId ?? null : baseSelectedTaskId ?? null;
+  }
+
   function applyDurationOperations(baseDurationsMs, operations) {
     const durationsMs = clone(baseDurationsMs || {});
     for (const operation of [...(operations || [])].sort((left, right) =>
@@ -338,7 +359,8 @@
       commands: sendableTimerCommands(input.commands, limit),
       taskOperations: clone((input.taskOperations || []).slice(0, limit)),
       durationOperations: (input.durationOperations || []).slice(0, limit).map(durationRequestOperation),
-      autoStartOperations: (input.autoStartOperations || []).slice(0, limit).map(autoStartRequestOperation)
+      autoStartOperations: (input.autoStartOperations || []).slice(0, limit).map(autoStartRequestOperation),
+      selectedTaskOperations: (input.selectedTaskOperations || []).slice(0, limit).map(selectedTaskRequestOperation)
     };
   }
 
@@ -357,7 +379,7 @@
       const generatedStart = dependents.find((command) =>
         command.type === "start" && command.generatedBreak === true
       );
-      const exactHistory = (canonical?.history || []).some((item) =>
+      const exactHistoryItem = (canonical?.history || []).find((item) =>
         item.timerId === source?.timerId
           && item.commandId === source?.id
           && item.phase === "focus"
@@ -374,7 +396,7 @@
         && canonical.canonicalTimer.id !== generatedStart?.timerId;
       const sourceAccepted = source?.type === "finish"
         && ["applied", "ignored"].includes(outcomes.get(sourceId))
-        && (exactHistory || exactTimer)
+        && (exactHistoryItem || exactTimer)
         && !superseded
         && generatedStart;
       if (!sourceAccepted) {
@@ -384,8 +406,20 @@
         }
         continue;
       }
+      const sourceCompletedAt = exactHistoryItem?.completedAt || exactHistoryItem?.endedAt
+        || (exactTimer ? canonical.canonicalTimer.anchorAt : null)
+        || source.physicalOccurredAt || source.occurredAt;
+      const sourceDate = new Date(sourceCompletedAt);
+      const sameLocalDay = (timestamp) => {
+        const date = new Date(timestamp);
+        return Number.isFinite(date.getTime()) && Number.isFinite(sourceDate.getTime())
+          && date.getFullYear() === sourceDate.getFullYear()
+          && date.getMonth() === sourceDate.getMonth()
+          && date.getDate() === sourceDate.getDate();
+      };
       const completedFocuses = (canonical?.history || [])
-        .filter((item) => item.phase === "focus" && item.status === "completed")
+        .filter((item) => item.phase === "focus" && item.status === "completed"
+          && sameLocalDay(item.completedAt || item.endedAt))
         .sort((left, right) =>
           compareStrings(left.completedAt || "", right.completedAt || "")
             || compareStrings(left.commandId || "", right.commandId || "")
@@ -393,7 +427,7 @@
       const sourceIndex = completedFocuses.findIndex((item) =>
         item.commandId === source.id || item.timerId === source.timerId
       );
-      const completedCount = sourceIndex >= 0 ? sourceIndex + 1 : completedFocuses.length;
+      const completedCount = sourceIndex >= 0 ? sourceIndex + 1 : completedFocuses.length + 1;
       const generatedBreakCompleted = dependents.some((command) => command.type === "finish");
       const phase = generatedBreakCompleted
         ? generatedStart.phase
@@ -451,7 +485,8 @@
       commands: exactAcknowledgements(payload, "acknowledgements", sent.commands, "commandId"),
       tasks: exactAcknowledgements(payload, "taskAcknowledgements", sent.taskOperations, "operationId"),
       durations: exactAcknowledgements(payload, "durationAcknowledgements", sent.durationOperations, "operationId"),
-      autoStart: exactAcknowledgements(payload, "autoStartAcknowledgements", sent.autoStartOperations, "operationId")
+      autoStart: exactAcknowledgements(payload, "autoStartAcknowledgements", sent.autoStartOperations, "operationId"),
+      selectedTask: exactAcknowledgements(payload, "selectedTaskAcknowledgements", sent.selectedTaskOperations, "operationId")
     };
   }
 
@@ -637,6 +672,10 @@
     if (typeof payload.autoStartBreaks !== "boolean") {
       throw new Error("Bootstrap response omitted autoStartBreaks.");
     }
+    if (!Object.prototype.hasOwnProperty.call(payload, "selectedTaskId")
+      || payload.selectedTaskId !== null && (typeof payload.selectedTaskId !== "string" || !payload.selectedTaskId)) {
+      throw new Error("Bootstrap response returned an invalid selectedTaskId.");
+    }
     if (!validDateTime(payload.serverTime)) throw new Error("Bootstrap response omitted serverTime.");
     if (!validInteger(payload.serverHlcWallMs, 1) || !validInteger(payload.serverHlcCounter, 0)) {
       throw new Error("Bootstrap response returned an invalid server HLC.");
@@ -650,10 +689,11 @@
 
   async function postJSONWithCsrfRetry(input) {
     const now = input.now || Date.now;
+    const fetcher = input.fetcher;
     const send = async (csrfToken) => {
       const requestSequence = await input.nextRequestSequence();
       const requestAtMs = now();
-      const response = await input.fetcher(input.url, {
+      const response = await fetcher(input.url, {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -698,7 +738,8 @@
     const pendingTaskOperations = (local.taskOperations || []).filter((item) => !validated.tasks.acknowledgedIds.has(item.id));
     const pendingDurationOperations = (local.durationOperations || []).filter((item) => !validated.durations.acknowledgedIds.has(item.id));
     const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !validated.autoStart.acknowledgedIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated);
+    const pendingSelectedTaskOperations = (local.selectedTaskOperations || []).filter((item) => !validated.selectedTask.acknowledgedIds.has(item.id));
+    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated);
   }
 
   function applyResolutionState(local, payload, pendingResolution) {
@@ -708,30 +749,38 @@
     const taskOperationIds = new Set(discarded.taskOperations || []);
     const durationOperationIds = new Set(discarded.durationOperations || []);
     const autoStartOperationIds = new Set(discarded.autoStartOperations || []);
+    const selectedTaskOperationIds = new Set(discarded.selectedTaskOperations || []);
     const pending = (local.commands || []).filter((item) => !commandIds.has(item.id));
     const pendingTaskOperations = (local.taskOperations || []).filter((item) => !taskOperationIds.has(item.id));
     const pendingDurationOperations = (local.durationOperations || []).filter((item) => !durationOperationIds.has(item.id));
     const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !autoStartOperationIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated);
+    const pendingSelectedTaskOperations = (local.selectedTaskOperations || []).filter((item) => !selectedTaskOperationIds.has(item.id));
+    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated);
   }
 
-  function canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, validated) {
+  function canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated) {
     const baseTasks = Array.isArray(payload.tasks) ? clone(payload.tasks) : clone(local.baseTasks || []);
     const baseAutoStartBreaks = Object.prototype.hasOwnProperty.call(payload, "autoStartBreaks")
       ? payload.autoStartBreaks
       : local.baseAutoStartBreaks === true;
+    const baseSelectedTaskId = Object.prototype.hasOwnProperty.call(payload, "selectedTaskId")
+      ? payload.selectedTaskId
+      : local.baseSelectedTaskId ?? null;
     return {
       acknowledgements: validated,
       pending,
       pendingTaskOperations,
       pendingDurationOperations,
       pendingAutoStartOperations,
+      pendingSelectedTaskOperations,
       baseTimer: Object.prototype.hasOwnProperty.call(payload, "canonicalTimer") ? clone(payload.canonicalTimer) : clone(local.baseTimer),
       baseHistory: Array.isArray(payload.history) ? clone(payload.history) : clone(local.baseHistory || []),
       baseTasks,
       baseDurationsMs: Object.prototype.hasOwnProperty.call(payload, "durationsMs") ? clone(payload.durationsMs) : clone(local.baseDurationsMs),
       baseAutoStartBreaks,
+      baseSelectedTaskId,
       autoStartBreaks: applyAutoStartOperations(baseAutoStartBreaks, pendingAutoStartOperations),
+      selectedTaskId: applySelectedTaskOperations(baseSelectedTaskId, pendingSelectedTaskOperations),
       tasks: applyTaskOperations(baseTasks, pendingTaskOperations),
       revision: payload.revision ?? local.revision
     };
@@ -740,6 +789,7 @@
   return Object.freeze({
     applyResolutionState,
     applyAutoStartOperations,
+    applySelectedTaskOperations,
     applyDurationOperations,
     applyTaskOperations,
     autoStartRequestOperation,
@@ -768,6 +818,7 @@
     resolutionLimitViolation,
     serverClockOffset,
     sendableTimerCommands,
+    selectedTaskRequestOperation,
     timerRequestCommand,
     trustedNow,
     validClockSample,

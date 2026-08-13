@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#142c5c">
+  <meta name="theme-color" content="#142c5c" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c1b39" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A local-first focus timer that continues across your devices.">
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=16">
-  <script src="/sync-core.js?v=22" defer></script>
-  <script src="/sync-storage.js?v=22" defer></script>
-  <script src="/app.js?v=20" defer></script>
+  <link rel="stylesheet" href="/app.css?v=17">
+  <script src="/sync-core.js?v=24" defer></script>
+  <script src="/sync-storage.js?v=24" defer></script>
+  <script src="/app.js?v=25" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#timer-workbench">Skip to timer</a>
@@ -36,7 +37,6 @@
       </div>
       <div id="profile" class="profile" hidden>
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <span id="profileName" class="profile-name"></span>
         <button id="logoutButton" class="text-button" type="button">Log out</button>
       </div>
     </div>
@@ -127,6 +127,7 @@
             <span id="phaseLabel" class="dial-phase" aria-hidden="true">Focus</span>
             <time id="timerDisplay" class="timer-display" role="timer" datetime="PT25M">25:00</time>
             <span id="timerDetail" class="timer-detail" aria-hidden="true">Idle / 25 min</span>
+            <span id="longBreakProgress" class="long-break-progress">○○○○</span>
           </div>
           <span class="dial-pointer" aria-hidden="true"></span>
         </div>
@@ -137,7 +138,7 @@
           <button id="timerToggle" class="action-primary" type="button">Start focus</button>
           <button id="finishButton" class="action-key" type="button" disabled>Finish</button>
           <button id="cancelButton" class="action-key action-danger" type="button" disabled>Cancel</button>
-          <button id="clearButton" class="action-clear" type="button" disabled>Clear timer</button>
+          <button id="clearButton" class="action-clear" type="button" disabled>Stop sound</button>
         </div>
       </article>
 

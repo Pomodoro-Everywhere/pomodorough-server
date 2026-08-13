@@ -79,22 +79,34 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
 
 test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["app.css"]) {
-    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=16`));
-    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=16`));
+    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=17`));
+    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=17`));
   }
-  assert.match(appSource, /\/app\.js\?v=20/);
-  assert.match(workerSource, /\/app\.js\?v=20/);
-  for (const asset of ["sync-core.js", "sync-storage.js"]) {
-    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
-    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
-  }
-  assert.match(workerSource, /pomodorough-shell-v24/);
+  assert.match(appSource, /\/app\.js\?v=25/);
+  assert.match(workerSource, /\/app\.js\?v=25/);
+  assert.match(appSource, /\/sync-core\.js\?v=24/);
+  assert.match(workerSource, /\/sync-core\.js\?v=24/);
+  assert.match(appSource, /\/sync-storage\.js\?v=24/);
+  assert.match(workerSource, /\/sync-storage\.js\?v=24/);
+  assert.match(workerSource, /pomodorough-shell-v31/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/app"/);
-  for (const asset of ["/landing.css?v=1", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]) {
+  for (const asset of ["/landing.css?v=2", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
+});
+
+test("account controls do not render the account name", () => {
+  assert.doesNotMatch(appSource, /id="profileName"/);
+  assert.doesNotMatch(appScriptSource, /profileName|state\.user\.name/);
+  assert.match(appScriptSource, /alt = "Account profile photo"/);
+});
+
+test("selected-task sync upgrades IndexedDB with a dedicated pending store", () => {
+  assert.match(appScriptSource, /const DB_VERSION = 5;/);
+  assert.match(appScriptSource, /const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";/);
+  assert.match(appScriptSource, /createObjectStore\(SELECTED_TASK_PENDING_STORE, \{ keyPath: "id" \}\)/);
 });
 
 test("manifest and service worker stay scoped to app route", () => {
@@ -130,7 +142,7 @@ test("offline navigation keeps root landing and app route distinct", async () =>
 test("offline landing migration serves exact cached redirect assets", async () => {
   const cachedLanding = { name: "cached landing" };
   const assets = Object.fromEntries(
-    ["/landing.css?v=1", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]
+    ["/landing.css?v=2", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]
       .map((url) => [url, { url }])
   );
   const fixture = workerFixture([], { name: "cached app" }, cachedLanding, assets);

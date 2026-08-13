@@ -366,6 +366,9 @@ paths:
         `autoStartOperations` is omitted, replacement preserves remote auto-start
         history for compatibility with legacy clients. A present empty array
         explicitly replaces auto-start history with default `false`.
+        `selectedTaskOperations` has the same compatibility behavior: omission
+        preserves remote selected-task history, while a present empty array
+        explicitly replaces it with no selected task.
 
         `requestId` provides durable idempotency. An exact retry returns the exact
         stored canonical result without another revision increment or event. Reuse
@@ -435,16 +438,22 @@ paths:
       summary: Submit commands and read canonical timer state
       description: |
         Accepts up to 256 immutable timer commands, 256 immutable task operations,
-        256 immutable duration operations, and 256 immutable auto-start operations.
+        256 immutable duration operations, 256 immutable auto-start operations,
+        and 256 immutable selected-task operations.
         Repeating a stored ID is idempotent
         only when immutable payload and device ID match. A changed stored payload
-        is rejected. Duplicate timer command, task operation, duration operation, or auto-start operation
-        IDs within one request invalidate the entire request before mutation.
+        is rejected. Duplicate timer command, task operation, duration operation,
+        auto-start operation, or selected-task operation IDs within one request
+        invalidate the entire request before mutation.
         Reusing a timer device sequence for a different command produces a
         rejected acknowledgement. Mutations are ordered by `hlcWallMs`,
         `hlcCounter`, device ID, then operation ID; latest valid intent wins.
         Duration preferences resolve independently for each phase. Auto-start
         operations resolve as one account preference with default `false`.
+        Selected-task operations resolve as one nullable account preference. Its
+        winning non-null task ID projects as `null` while that task is absent;
+        immutable preference history remains unchanged so selection reappears if
+        the task later becomes live again.
 
         `lastRevision` reports the client's last observed revision. This version
         always returns the complete canonical snapshot and history. Revision is a
@@ -546,7 +555,7 @@ paths:
       description: |
         Sends current revision immediately, then sends a `revision` event whenever
         a sync request inserts at least one new timer command, task operation, or
-        duration operation, auto-start operation, or a first bootstrap
+        duration operation, auto-start operation, selected-task operation, or a first bootstrap
         merge/replacement changes logical history, including transactional deadline
         projection materialization by bootstrap/history/stream reads. Each stream
         emits a revision at most once and drops stale or duplicate hints. Sends a
@@ -874,6 +883,13 @@ components:
       maxLength: 128
       example: auto-start-op-01J2YM1N9A7B5C3D1E8F6G4H2J
 
+    SelectedTaskOperationID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      minLength: 8
+      maxLength: 128
+      example: selected-task-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+
     TimerPhase:
       type: string
       enum: [focus, short_break, long_break]
@@ -1094,6 +1110,45 @@ components:
         hlcWallMs: 1784134500125
         hlcCounter: 0
 
+    SelectedTaskOperation:
+      type: object
+      additionalProperties: false
+      required: [id, taskId, occurredAt, hlcWallMs, hlcCounter]
+      properties:
+        id:
+          $ref: "#/components/schemas/SelectedTaskOperationID"
+        taskId:
+          type: string
+          allOf:
+            - $ref: "#/components/schemas/TaskID"
+          nullable: true
+          description: Selected task ID, or null to explicitly select no task.
+        occurredAt:
+          type: string
+          format: date-time
+          description: |
+            Client-observed preference change time in RFC 3339 format. It must
+            not be more than five minutes ahead of server time or differ from
+            `hlcWallMs` by more than five minutes. Legacy `(0, 0)` operations
+            must use the Unix epoch exactly.
+        hlcWallMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Hybrid logical clock wall component; must not exceed server time by more than five minutes.
+        hlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+      example:
+        id: selected-task-op-01J2YM1N9A7B5C3D1E8F6G4H2J
+        taskId: aaf83054-24b2-8c0e-901f-a974147bfe82
+        occurredAt: "2026-07-15T16:55:00.125Z"
+        hlcWallMs: 1784134500125
+        hlcCounter: 0
+
     BootstrapResolutionStrategy:
       type: string
       enum: [keep_remote, replace_remote, merge]
@@ -1150,6 +1205,16 @@ components:
             array replaces it with default `false`.
           items:
             $ref: "#/components/schemas/AutoStartOperation"
+        selectedTaskOperations:
+          type: array
+          maxItems: 4096
+          description: |
+            Complete immutable local selected-task history; must be empty for
+            `keep_remote`. Optional for legacy compatibility. Omission during
+            `replace_remote` preserves remote selected-task history; a present empty
+            array replaces it with no selected task.
+          items:
+            $ref: "#/components/schemas/SelectedTaskOperation"
 
     SyncRequest:
       type: object
@@ -1189,6 +1254,13 @@ components:
           description: Optional for compatibility with clients predating auto-start preference sync.
           items:
             $ref: "#/components/schemas/AutoStartOperation"
+        selectedTaskOperations:
+          type: array
+          maxItems: 256
+          default: []
+          description: Optional for compatibility with clients predating selected-task preference sync.
+          items:
+            $ref: "#/components/schemas/SelectedTaskOperation"
 
     Acknowledgement:
       type: object
@@ -1245,6 +1317,20 @@ components:
         reason:
           type: string
           description: Empty for the canonical winner; explanatory text otherwise.
+
+    SelectedTaskAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [operationId, outcome, reason]
+      properties:
+        operationId:
+          $ref: "#/components/schemas/SelectedTaskOperationID"
+        outcome:
+          type: string
+          enum: [applied, ignored, rejected]
+        reason:
+          type: string
+          description: Empty for the immutable LWW winner; explanatory text otherwise.
 
     DurationsMs:
       type: object
@@ -1376,12 +1462,14 @@ components:
         - taskAcknowledgements
         - durationAcknowledgements
         - autoStartAcknowledgements
+        - selectedTaskAcknowledgements
         - revision
         - canonicalTimer
         - history
         - tasks
         - durationsMs
         - autoStartBreaks
+        - selectedTaskId
         - serverTime
         - serverHlcWallMs
         - serverHlcCounter
@@ -1406,6 +1494,11 @@ components:
           description: One entry for each auto-start operation in request order.
           items:
             $ref: "#/components/schemas/AutoStartAcknowledgement"
+        selectedTaskAcknowledgements:
+          type: array
+          description: One entry for each selected-task operation in request order.
+          items:
+            $ref: "#/components/schemas/SelectedTaskAcknowledgement"
         revision:
           type: integer
           format: int64
@@ -1433,6 +1526,12 @@ components:
           type: boolean
           default: false
           description: Canonical account auto-start preference.
+        selectedTaskId:
+          type: string
+          allOf:
+            - $ref: "#/components/schemas/TaskID"
+          nullable: true
+          description: Canonical selected task when winner references a currently live task; null otherwise.
         serverTime:
           type: string
           format: date-time

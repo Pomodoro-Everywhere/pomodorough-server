@@ -15,6 +15,7 @@
   const TASK_PENDING_STORE = "pendingTasks";
   const DURATION_PENDING_STORE = "pendingDurations";
   const AUTO_START_PENDING_STORE = "pendingAutoStarts";
+  const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";
   const GATE_KEY = "bootstrapGate";
   const RESOLUTION_KEY = "bootstrapResolution";
   const TIMER_OWNER_KEY = "timerOwner";
@@ -40,7 +41,8 @@
         commands: "timer commands",
         taskOperations: "task operations",
         durationOperations: "duration operations",
-        autoStartOperations: "auto-start operations"
+        autoStartOperations: "auto-start operations",
+        selectedTaskOperations: "selected-task operations"
       };
       super(`Cannot upload ${violation.count.toLocaleString("en-US")} queued ${labels[violation.field]}; server limit is ${violation.limit.toLocaleString("en-US")}. Keep Remote can discard local queued data without uploading it.`);
       this.name = "ResolutionLimitError";
@@ -177,7 +179,8 @@
       uuidCommands: transaction.objectStore(PENDING_STORE).getAllKeys(),
       uuidTasks: transaction.objectStore(TASK_PENDING_STORE).getAllKeys(),
       uuidDurations: transaction.objectStore(DURATION_PENDING_STORE).getAllKeys(),
-      uuidAutoStarts: transaction.objectStore(AUTO_START_PENDING_STORE).getAllKeys()
+      uuidAutoStarts: transaction.objectStore(AUTO_START_PENDING_STORE).getAllKeys(),
+      uuidSelectedTasks: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAllKeys()
     };
   }
 
@@ -186,7 +189,8 @@
       ...(results.uuidCommands || []),
       ...(results.uuidTasks || []),
       ...(results.uuidDurations || []),
-      ...(results.uuidAutoStarts || [])
+      ...(results.uuidAutoStarts || []),
+      ...(results.uuidSelectedTasks || [])
     ];
   }
 
@@ -352,7 +356,11 @@
       operationId: input.legacyAutoStartOperationId,
       nowMs: input.nowMs
     });
-    return { ...gate, legacyAutoStartMigration };
+    const legacySelectedTaskMigration = await migrateLegacySelectedTask(database, {
+      operationId: input.legacySelectedTaskOperationId,
+      nowMs: input.nowMs
+    });
+    return { ...gate, legacyAutoStartMigration, legacySelectedTaskMigration };
   }
 
   async function readBootstrapState(database) {
@@ -460,7 +468,8 @@
               PENDING_STORE,
               TASK_PENDING_STORE,
               DURATION_PENDING_STORE,
-              AUTO_START_PENDING_STORE
+              AUTO_START_PENDING_STORE,
+              SELECTED_TASK_PENDING_STORE
             ]
           : [META_STORE, input.storeName],
         "readwrite"
@@ -600,6 +609,125 @@
     return [...retained.values()];
   }
 
+  function cancelAndClearTimer(database, input) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(
+        input.withUuidV7
+          ? [
+              META_STORE,
+              PENDING_STORE,
+              TASK_PENDING_STORE,
+              DURATION_PENDING_STORE,
+              AUTO_START_PENDING_STORE,
+              SELECTED_TASK_PENDING_STORE
+            ]
+          : [META_STORE, PENDING_STORE],
+        "readwrite"
+      );
+      const metaStore = transaction.objectStore(META_STORE);
+      const pendingStore = transaction.objectStore(PENDING_STORE);
+      const requests = {
+        gate: metaStore.get(GATE_KEY),
+        resolution: metaStore.get(RESOLUTION_KEY),
+        snapshot: metaStore.get("snapshot"),
+        deviceSequence: metaStore.get("deviceSequence"),
+        hlc: metaStore.get("hlc"),
+        commands: pendingStore.getAll()
+      };
+      if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
+      const results = {};
+      let remaining = Object.keys(requests).length;
+      let outcome;
+      let failure = null;
+      const cancelAndClear = () => {
+        remaining -= 1;
+        if (remaining !== 0) return;
+        if (results.gate || results.resolution) {
+          failure = new BootstrapGateError();
+          transaction.abort();
+          return;
+        }
+        const commands = results.commands || [];
+        const timer = projectedTimer(results.snapshot?.value?.canonicalTimer, commands);
+        if (!timer || timer.id !== input.timerId || timer.phase !== input.phase) {
+          outcome = { transitioned: false, reason: "stale", commands: [] };
+          return;
+        }
+        const types = ["running", "paused"].includes(timer.status)
+          ? ["cancel", "clear"]
+          : ["completed", "cancelled"].includes(timer.status) ? ["clear"] : [];
+        if (types.length === 0) {
+          outcome = { transitioned: false, reason: "stale", commands: [] };
+          return;
+        }
+
+        const highestSequence = commands.reduce(
+          (highest, command) => Math.max(highest, Number(command.deviceSequence) || 0),
+          Number(results.deviceSequence?.value) || 0
+        );
+        const storedHlc = results.hlc?.value || {};
+        const storedWallMs = Number(storedHlc.wallMs) || 0;
+        const wallMs = Math.max(input.nowMs, storedWallMs);
+        const firstCounter = wallMs === storedWallMs ? (Number(storedHlc.counter) || 0) + 1 : 0;
+        let commandIds;
+        try {
+          requireMutationRange(
+            input.nowMs,
+            wallMs,
+            firstCounter + types.length - 1,
+            highestSequence + types.length
+          );
+          commandIds = input.withUuidV7
+            ? reserveTransactionUuid7(metaStore, results, wallMs, types.length, input.entropy)
+            : types.map((type) => type === "cancel" ? input.cancelCommandId : input.clearCommandId);
+        } catch (error) {
+          failure = error;
+          transaction.abort();
+          return;
+        }
+        const occurredAt = new Date(wallMs).toISOString();
+        const elapsedMs = Math.min(
+          Number(timer.plannedDurationMs),
+          Math.max(0, Number(input.observedElapsedMs) || 0)
+        );
+        const persisted = types.map((type, index) => {
+          const command = {
+            id: commandIds[index],
+            deviceId: input.deviceId,
+            deviceSequence: highestSequence + index + 1,
+            timerId: timer.id,
+            type,
+            phase: timer.phase,
+            plannedDurationMs: timer.plannedDurationMs,
+            occurredAt,
+            hlcWallMs: wallMs,
+            hlcCounter: firstCounter + index,
+            observedElapsedMs: elapsedMs
+          };
+          if (timer.dependsOnCommandId) command.dependsOnCommandId = timer.dependsOnCommandId;
+          pendingStore.add(command);
+          return command;
+        });
+        metaStore.delete(TIMER_OWNER_KEY);
+        metaStore.put({ key: "deviceSequence", value: highestSequence + persisted.length });
+        metaStore.put({
+          key: "hlc",
+          value: { wallMs, counter: firstCounter + persisted.length - 1 }
+        });
+        outcome = { transitioned: true, reason: "", commands: persisted };
+      };
+      for (const [name, request] of Object.entries(requests)) {
+        request.onsuccess = () => {
+          results[name] = request.result;
+          cancelAndClear();
+        };
+      }
+      transaction.oncomplete = () => resolve(outcome);
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
+  }
+
   function finishTimer(database, input) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
@@ -609,7 +737,8 @@
               PENDING_STORE,
               TASK_PENDING_STORE,
               DURATION_PENDING_STORE,
-              AUTO_START_PENDING_STORE
+              AUTO_START_PENDING_STORE,
+              SELECTED_TASK_PENDING_STORE
             ]
           : [META_STORE, PENDING_STORE],
         "readwrite"
@@ -821,7 +950,7 @@
   function captureResolution(database, input, options) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
-        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE],
         "readwrite"
       );
       const metaStore = transaction.objectStore(META_STORE);
@@ -831,7 +960,8 @@
         commands: transaction.objectStore(PENDING_STORE).getAll(),
         taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
         durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
-        autoStartOperations: transaction.objectStore(AUTO_START_PENDING_STORE).getAll()
+        autoStartOperations: transaction.objectStore(AUTO_START_PENDING_STORE).getAll(),
+        selectedTaskOperations: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()
       };
       const results = {};
       let remaining = Object.keys(requests).length;
@@ -877,7 +1007,8 @@
           ...input,
           commands,
           taskOperations: (results.taskOperations || []).sort(operationOrder),
-          durationOperations
+          durationOperations,
+          selectedTaskOperations: (results.selectedTaskOperations || []).sort(operationOrder)
         };
         const autoStartOperations = (results.autoStartOperations || []).sort(operationOrder);
         if (autoStartOperations.length > 0 || input.autoStartOperationsPresent === true) {
@@ -1005,7 +1136,7 @@
     }
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
-        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE],
         "readwrite"
       );
       const metaStore = transaction.objectStore(META_STORE);
@@ -1023,12 +1154,20 @@
       let remaining = Object.keys(requests).length;
       let outcome;
       let failure = null;
-      const completeLegacyAutoStartMigration = () => {
-        if (Object.prototype.hasOwnProperty.call(pending.payload || {}, "autoStartOperations")) return;
-        const { autoStartBreaks, autoStartBreaksExplicit, ...settings } = results.settings?.value || {};
+      const completeLegacyMigrations = () => {
+        const value = { ...(results.settings?.value || {}) };
+        if (!Object.prototype.hasOwnProperty.call(pending.payload || {}, "autoStartOperations")) {
+          delete value.autoStartBreaks;
+          delete value.autoStartBreaksExplicit;
+          value.autoStartSyncBootstrapped = true;
+        }
+        if (Object.prototype.hasOwnProperty.call(pending.payload || {}, "selectedTaskOperations")) {
+          delete value.selectedTaskId;
+          value.selectedTaskSyncBootstrapped = true;
+        }
         metaStore.put({
           key: "settings",
-          value: { ...settings, autoStartSyncBootstrapped: true }
+          value
         });
       };
       const apply = () => {
@@ -1039,7 +1178,7 @@
         const storedSnapshot = results.snapshot?.value || null;
         if (!resolution && !gate && storedSnapshot?.user?.id === pending.userId
           && Number(storedSnapshot.revision) >= Number(canonical.snapshot.revision)) {
-          completeLegacyAutoStartMigration();
+          completeLegacyMigrations();
           claimMissingTimerOwner(
             metaStore,
             results.timerOwner?.value || null,
@@ -1077,7 +1216,9 @@
         for (const id of queueIds.durationOperations || []) durationPendingStore.delete(id);
         const autoStartPendingStore = transaction.objectStore(AUTO_START_PENDING_STORE);
         for (const id of queueIds.autoStartOperations || []) autoStartPendingStore.delete(id);
-        completeLegacyAutoStartMigration();
+        const selectedTaskPendingStore = transaction.objectStore(SELECTED_TASK_PENDING_STORE);
+        for (const id of queueIds.selectedTaskOperations || []) selectedTaskPendingStore.delete(id);
+        completeLegacyMigrations();
         metaStore.put({ key: "snapshot", value: canonical.snapshot });
         const clockOffset = putLatestClockOffset(metaStore, results.clockOffset?.value || null, canonical.clockOffset);
         const responseHlc = canonical.clockOffset != null && clockOffset === canonical.clockOffset
@@ -1120,7 +1261,7 @@
     }
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(
-        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+        [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE],
         "readwrite"
       );
       const metaStore = transaction.objectStore(META_STORE);
@@ -1182,6 +1323,8 @@
         for (const id of input.queueIds.durationOperations || []) durationPendingStore.delete(id);
         const autoStartPendingStore = transaction.objectStore(AUTO_START_PENDING_STORE);
         for (const id of input.queueIds.autoStartOperations || []) autoStartPendingStore.delete(id);
+        const selectedTaskPendingStore = transaction.objectStore(SELECTED_TASK_PENDING_STORE);
+        for (const id of input.queueIds.selectedTaskOperations || []) selectedTaskPendingStore.delete(id);
         metaStore.put({ key: "snapshot", value: input.snapshot });
         const owner = results.timerOwner?.value || null;
         if ((input.dropTimerIds || []).includes(owner?.timerId)) metaStore.delete(TIMER_OWNER_KEY);
@@ -1218,16 +1361,17 @@
 
   async function readQueues(database) {
     const transaction = database.transaction(
-      [PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+      [PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE],
       "readonly"
     );
-    const [commands, taskOperations, durationOperations, autoStartOperations] = await Promise.all([
+    const [commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations] = await Promise.all([
       requestResult(transaction.objectStore(PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(TASK_PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
-      requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll())
+      requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll()),
+      requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll())
     ]);
-    return { commands, taskOperations, durationOperations, autoStartOperations };
+    return { commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations };
   }
 
   async function readCanonicalState(database) {
@@ -1247,18 +1391,19 @@
 
   async function readSyncState(database) {
     const transaction = database.transaction(
-      [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE],
+      [META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE, AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE],
       "readonly"
     );
     const metaStore = transaction.objectStore(META_STORE);
-    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations] = await Promise.all([
+    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations] = await Promise.all([
       requestResult(metaStore.get("snapshot")),
       requestResult(metaStore.get("hlc")),
       requestResult(metaStore.get(CLOCK_OFFSET_KEY)),
       requestResult(transaction.objectStore(PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(TASK_PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
-      requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll())
+      requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll()),
+      requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll())
     ]);
     return {
       snapshot: snapshot?.value || null,
@@ -1267,8 +1412,45 @@
       commands,
       taskOperations,
       durationOperations,
-      autoStartOperations
+      autoStartOperations,
+      selectedTaskOperations
     };
+  }
+
+  function migrateLegacySelectedTask(database, input) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction([META_STORE, SELECTED_TASK_PENDING_STORE], "readwrite");
+      const metaStore = transaction.objectStore(META_STORE);
+      const settingsRequest = metaStore.get("settings");
+      let result;
+      settingsRequest.onsuccess = () => {
+        const settings = settingsRequest.result?.value || {};
+        if (settings.selectedTaskSyncBootstrapped === true) {
+          result = { migrated: false, operation: null };
+          return;
+        }
+        const { selectedTaskId, ...nextSettings } = settings;
+        let operation = null;
+        if (typeof selectedTaskId === "string" && selectedTaskId) {
+          operation = {
+            id: input.operationId,
+            taskId: selectedTaskId,
+            occurredAt: LEGACY_EPOCH,
+            hlcWallMs: 0,
+            hlcCounter: 0
+          };
+          transaction.objectStore(SELECTED_TASK_PENDING_STORE).add(operation);
+        }
+        metaStore.put({
+          key: "settings",
+          value: { ...nextSettings, selectedTaskSyncBootstrapped: true }
+        });
+        result = { migrated: operation !== null, operation };
+      };
+      transaction.oncomplete = () => resolve(result);
+      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
   }
 
   function migrateLegacyAutoStart(database, input) {
@@ -1407,6 +1589,7 @@
     allocateMutation,
     applyResolution,
     applySyncResponse,
+    cancelAndClearTimer,
     captureResolution,
     clearBootstrapGate,
     finishTimer,
@@ -1414,6 +1597,7 @@
     invalidateForeignResolution,
     leaseIsLive,
     migrateLegacyAutoStart,
+    migrateLegacySelectedTask,
     normalizeLegacyDurationOperations,
     releaseTimerOwnership,
     readBootstrapState,

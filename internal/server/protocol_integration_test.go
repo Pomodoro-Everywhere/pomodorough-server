@@ -33,20 +33,22 @@ type protocolClient struct {
 }
 
 type protocolNativeStore struct {
-	client              *protocolClient
-	commands            []syncCommandJSON
-	taskOperations      []syncTaskOperationJSON
-	durationOperations  []syncDurationOperationJSON
-	autoStartOperations []syncAutoStartOperationJSON
+	client                 *protocolClient
+	commands               []syncCommandJSON
+	taskOperations         []syncTaskOperationJSON
+	durationOperations     []syncDurationOperationJSON
+	autoStartOperations    []syncAutoStartOperationJSON
+	selectedTaskOperations []syncSelectedTaskOperationJSON
 }
 
 func (s *protocolNativeStore) payload() syncRequestJSON {
 	return syncRequestJSON{
 		DeviceID: s.client.deviceID, LastRevision: int64Pointer(s.client.revision),
-		Commands:            append([]syncCommandJSON(nil), s.commands...),
-		TaskOperations:      append([]syncTaskOperationJSON(nil), s.taskOperations...),
-		DurationOperations:  append([]syncDurationOperationJSON(nil), s.durationOperations...),
-		AutoStartOperations: append([]syncAutoStartOperationJSON(nil), s.autoStartOperations...),
+		Commands:               append([]syncCommandJSON(nil), s.commands...),
+		TaskOperations:         append([]syncTaskOperationJSON(nil), s.taskOperations...),
+		DurationOperations:     append([]syncDurationOperationJSON(nil), s.durationOperations...),
+		AutoStartOperations:    append([]syncAutoStartOperationJSON(nil), s.autoStartOperations...),
+		SelectedTaskOperations: append([]syncSelectedTaskOperationJSON(nil), s.selectedTaskOperations...),
 	}
 }
 
@@ -56,14 +58,16 @@ func (s *protocolNativeStore) apply(t *testing.T, result store.SyncResult) {
 	validateProtocolAcknowledgements(t, taskOperationJSONIDs(s.taskOperations), taskAcknowledgementIDs(result.TaskAcknowledgements))
 	validateProtocolAcknowledgements(t, durationOperationJSONIDs(s.durationOperations), durationAcknowledgementIDs(result.DurationAcknowledgements))
 	validateProtocolAcknowledgements(t, autoStartOperationJSONIDs(s.autoStartOperations), autoStartAcknowledgementIDs(result.AutoStartAcknowledgements))
+	validateProtocolAcknowledgements(t, selectedTaskOperationJSONIDs(s.selectedTaskOperations), selectedTaskAcknowledgementIDs(result.SelectedTaskAcknowledgements))
 	s.commands = nil
 	s.taskOperations = nil
 	s.durationOperations = nil
 	s.autoStartOperations = nil
+	s.selectedTaskOperations = nil
 }
 
 func (s *protocolNativeStore) pendingCount() int {
-	return len(s.commands) + len(s.taskOperations) + len(s.durationOperations) + len(s.autoStartOperations)
+	return len(s.commands) + len(s.taskOperations) + len(s.durationOperations) + len(s.autoStartOperations) + len(s.selectedTaskOperations)
 }
 
 type protocolRevisionStream struct {
@@ -289,7 +293,7 @@ func (s *protocolRevisionStream) close() {
 func comparableProtocolState(result store.SyncResult) string {
 	encoded, _ := json.Marshal(map[string]any{
 		"revision": result.Revision, "canonicalTimer": result.CanonicalTimer, "history": result.History,
-		"tasks": result.Tasks, "durationsMs": result.DurationsMs, "autoStartBreaks": result.AutoStartBreaks,
+		"tasks": result.Tasks, "durationsMs": result.DurationsMs, "autoStartBreaks": result.AutoStartBreaks, "selectedTaskId": result.SelectedTaskID,
 	})
 	return string(encoded)
 }
@@ -346,6 +350,14 @@ func autoStartOperationJSONIDs(values []syncAutoStartOperationJSON) []string {
 	return result
 }
 
+func selectedTaskOperationJSONIDs(values []syncSelectedTaskOperationJSON) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].ID
+	}
+	return result
+}
+
 func acknowledgementIDs(values []store.Acknowledgement) []string {
 	result := make([]string, len(values))
 	for index := range values {
@@ -376,6 +388,49 @@ func autoStartAcknowledgementIDs(values []store.AutoStartAcknowledgement) []stri
 		result[index] = values[index].OperationID
 	}
 	return result
+}
+
+func selectedTaskAcknowledgementIDs(values []store.SelectedTaskAcknowledgement) []string {
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].OperationID
+	}
+	return result
+}
+
+func TestLogicalProtocolClientsConvergeSelectedTaskPreference(t *testing.T) {
+	fixture := newProtocolFixture(t)
+	initiator := fixture.clients[0]
+	taskTitle := "Protocol selected task"
+	taskID := task.ID(taskTitle)
+	selected := fixture.syncPayload(initiator)
+	selected.TaskOperations = []syncTaskOperationJSON{validTaskOperationJSON(fixture.nextTime(), taskTitle)}
+	selected.SelectedTaskOperations = []syncSelectedTaskOperationJSON{validSelectedTaskOperationJSON(t, fixture.nextTime(), &taskID)}
+	result := fixture.sync(t, initiator, selected)
+	if result.SelectedTaskID == nil || *result.SelectedTaskID != taskID || result.SelectedTaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("selected-task mutation = %#v", result)
+	}
+	states := fixture.converge(t, result.Revision)
+	for index, state := range states {
+		if state.SelectedTaskID == nil || *state.SelectedTaskID != taskID {
+			t.Fatalf("client %d selected-task state = %#v", index, state.SelectedTaskID)
+		}
+	}
+
+	clearer := fixture.clients[1]
+	clear := fixture.syncPayload(clearer)
+	clear.SelectedTaskOperations = []syncSelectedTaskOperationJSON{validSelectedTaskOperationJSON(t, fixture.nextTime(), nil)}
+	clear.SelectedTaskOperations[0].ID = fixture.nextID("selected-task-operation")
+	cleared := fixture.sync(t, clearer, clear)
+	if cleared.SelectedTaskID != nil || cleared.SelectedTaskAcknowledgements[0].Outcome != "applied" {
+		t.Fatalf("selected-task clear = %#v", cleared)
+	}
+	states = fixture.converge(t, cleared.Revision)
+	for index, state := range states {
+		if state.SelectedTaskID != nil {
+			t.Fatalf("client %d selected-task clear = %#v", index, state.SelectedTaskID)
+		}
+	}
 }
 
 func (f *protocolFixture) converge(t *testing.T, revision int64) []store.SyncResult {

@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --platform: #142c5c;
   --platform-deep: #0c1b39;
   --signal: #ff604f;
@@ -10,12 +10,20 @@
   --steel: #8fa8b8;
   --muted: #526675;
   --mint: #a8d9cb;
+  --page-bg: var(--sky);
+  --page-text: var(--track);
+  --surface: var(--porcelain);
+  --surface-border: var(--track);
+  --copy: #354753;
+  --subtle: var(--muted);
+  --grid-line: rgba(20, 44, 92, 0.08);
+  --watermark: rgba(20, 44, 92, 0.075);
   --display: Impact, Haettenschweiler, "Arial Narrow Bold", "Arial Black", sans-serif;
   --body: "Trebuchet MS", "Avenir Next", Avenir, "Segoe UI", sans-serif;
   --utility: "Courier New", Courier, monospace;
   font-family: var(--body);
-  color: var(--track);
-  background: var(--sky);
+  color: var(--page-text);
+  background: var(--page-bg);
   font-synthesis: none;
 }
 
@@ -33,9 +41,9 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    linear-gradient(rgba(20, 44, 92, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(20, 44, 92, 0.08) 1px, transparent 1px),
-    var(--sky);
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    var(--page-bg);
   background-size: 3rem 3rem;
 }
 
@@ -164,7 +172,7 @@ main {
   right: -0.03em;
   bottom: -0.22em;
   z-index: 0;
-  color: rgba(20, 44, 92, 0.075);
+  color: var(--watermark);
   font-family: var(--display);
   font-size: min(58vw, 44rem);
   line-height: 0.8;
@@ -205,7 +213,7 @@ h1 {
 .hero-summary {
   max-width: 34rem;
   margin-bottom: 0;
-  color: #354753;
+  color: var(--copy);
   font-size: clamp(1.05rem, 2vw, 1.35rem);
   line-height: 1.65;
 }
@@ -456,7 +464,7 @@ h1 {
 
 .release-note p {
   margin-bottom: 0;
-  color: #3c4d59;
+  color: var(--copy);
   line-height: 1.55;
 }
 
@@ -564,6 +572,51 @@ footer {
 
   footer {
     flex-direction: column;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-bg: #0d1722;
+    --page-text: #edf3f5;
+    --surface: #172430;
+    --surface-border: #91a7b5;
+    --copy: #c7d2d8;
+    --subtle: #b7c5cd;
+    --grid-line: rgba(143, 168, 184, 0.09);
+    --watermark: rgba(143, 168, 184, 0.075);
+  }
+
+  h1 {
+    color: var(--page-text);
+  }
+
+  .hero-copy > .eyebrow {
+    color: var(--ticket);
+  }
+
+  .departure {
+    color: var(--page-text);
+    background: var(--surface);
+    border-color: var(--surface-border);
+  }
+
+  .recommendation,
+  .choice-note {
+    color: var(--subtle);
+  }
+
+  .button {
+    border-color: var(--surface-border);
+  }
+
+  .button:hover {
+    box-shadow: 5px 5px 0 var(--surface-border);
+  }
+
+  .release-note {
+    color: var(--page-text);
+    background: var(--surface);
   }
 }
 

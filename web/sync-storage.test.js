@@ -65,6 +65,16 @@ function autoStartOperation(id, enabled = true, wall = 1, counter = 0) {
   };
 }
 
+function selectedTaskOperation(id, taskId = `task-${id}`, wall = 1, counter = 0) {
+  return {
+    id,
+    taskId,
+    occurredAt: "2026-07-22T12:00:00Z",
+    hlcWallMs: wall,
+    hlcCounter: counter
+  };
+}
+
 function snapshot(revision, userId = "user-1", serverTime = "2026-07-22T12:30:00Z") {
   return {
     revision,
@@ -74,6 +84,7 @@ function snapshot(revision, userId = "user-1", serverTime = "2026-07-22T12:30:00
     tasks: [],
     durationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
     autoStartBreaks: false,
+    selectedTaskId: null,
     user: { id: userId, name: userId }
   };
 }
@@ -100,6 +111,7 @@ function openDatabase(name) {
       request.result.createObjectStore("pendingTasks", { keyPath: "id" });
       request.result.createObjectStore("pendingDurations", { keyPath: "id" });
       request.result.createObjectStore("pendingAutoStarts", { keyPath: "id" });
+      request.result.createObjectStore("pendingSelectedTasks", { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -128,13 +140,14 @@ async function fixture() {
 
 async function seedQueues(database, values) {
   const transaction = database.transaction(
-    ["pending", "pendingTasks", "pendingDurations", "pendingAutoStarts"],
+    ["pending", "pendingTasks", "pendingDurations", "pendingAutoStarts", "pendingSelectedTasks"],
     "readwrite"
   );
   for (const item of values.commands || []) transaction.objectStore("pending").put(item);
   for (const item of values.taskOperations || []) transaction.objectStore("pendingTasks").put(item);
   for (const item of values.durationOperations || []) transaction.objectStore("pendingDurations").put(item);
   for (const item of values.autoStartOperations || []) transaction.objectStore("pendingAutoStarts").put(item);
+  for (const item of values.selectedTaskOperations || []) transaction.objectStore("pendingSelectedTasks").put(item);
   await storage.transactionDone(transaction);
 }
 
@@ -231,7 +244,8 @@ test("capture atomically snapshots stores and survives database reload", async (
     commands: [command("command-2", 2), command("command-1", 1)],
     taskOperations: [taskOperation("task-op-1")],
     durationOperations: [durationOperation("duration-op-1")],
-    autoStartOperations: [autoStartOperation("auto-start-op-1")]
+    autoStartOperations: [autoStartOperation("auto-start-op-1")],
+    selectedTaskOperations: [selectedTaskOperation("selected-task-op-1")]
   });
   assert.equal((await acquire(instance.database)).acquired, true);
   await assert.rejects(storage.guardedMutation(instance.database, ["pending"], (transaction) => {
@@ -243,11 +257,13 @@ test("capture atomically snapshots stores and survives database reload", async (
     commands: ["command-1", "command-2"],
     taskOperations: ["task-op-1"],
     durationOperations: ["duration-op-1"],
-    autoStartOperations: ["auto-start-op-1"]
+    autoStartOperations: ["auto-start-op-1"],
+    selectedTaskOperations: ["selected-task-op-1"]
   });
   assert.equal(pending.gateToken, "tab-1");
   assert.equal(Object.hasOwn(pending.payload.durationOperations[0], "ownerId"), false);
   assert.deepEqual(pending.payload.autoStartOperations, [autoStartOperation("auto-start-op-1")]);
+  assert.deepEqual(pending.payload.selectedTaskOperations, [selectedTaskOperation("selected-task-op-1")]);
 
   instance.database.close();
   instance.database = await openDatabase(instance.name);
@@ -329,6 +345,47 @@ test("legacy auto-start migration stays valid under a far-future local clock", a
     wallMs: 9_000_000_000_000,
     counter: 7
   });
+});
+
+test("legacy selected-task migration queues only an explicit task and strips local setting", async (t) => {
+  for (const testCase of [
+    { name: "selected", selectedTaskId: "task-legacy", migrated: true },
+    { name: "no task", selectedTaskId: null, migrated: false }
+  ]) {
+    await t.test(testCase.name, async () => {
+      const instance = await fixture();
+      try {
+        await seedMeta(instance.database, {
+          settings: { selectedPhase: "focus", selectedTaskId: testCase.selectedTaskId },
+          hlc: { wallMs: 100, counter: 2 }
+        });
+        const first = await storage.migrateLegacySelectedTask(instance.database, {
+          operationId: `selected-task-migration-${testCase.name}`,
+          nowMs: 100
+        });
+        const second = await storage.migrateLegacySelectedTask(instance.database, {
+          operationId: `selected-task-duplicate-${testCase.name}`,
+          nowMs: 101
+        });
+
+        assert.equal(first.migrated, testCase.migrated);
+        assert.deepEqual(second, { migrated: false, operation: null });
+        const persisted = await storage.readSyncState(instance.database);
+        assert.deepEqual(persisted.selectedTaskOperations, testCase.migrated ? [{
+          id: `selected-task-migration-${testCase.name}`,
+          taskId: "task-legacy",
+          occurredAt: "1970-01-01T00:00:00.000Z",
+          hlcWallMs: 0,
+          hlcCounter: 0
+        }] : []);
+        const settings = await readMeta(instance.database, "settings");
+        assert.equal(settings.selectedTaskSyncBootstrapped, true);
+        assert.equal(Object.hasOwn(settings, "selectedTaskId"), false);
+      } finally {
+        await instance.close();
+      }
+    });
+  }
 });
 
 test("legacy duration normalization repairs queue but freezes unowned captured payload", async (t) => {
@@ -718,18 +775,25 @@ test("UUIDv7 mutation allocation persists across domains, restart, and clock rol
     withUuidV7: true,
     build: ({ id, wallMs, counter }) => autoStartOperation(id, true, wallMs, counter)
   });
+  const selectedTask = await storage.allocateMutation(instance.database, {
+    storeName: "pendingSelectedTasks",
+    nowMs: 98,
+    withDeviceSequence: false,
+    withUuidV7: true,
+    build: ({ id, wallMs, counter }) => selectedTaskOperation(id, null, wallMs, counter)
+  });
 
-  const identifiers = [first.id, secondOperation.id, afterRestart.id];
+  const identifiers = [first.id, secondOperation.id, afterRestart.id, selectedTask.id];
   assert.deepEqual(identifiers, [...identifiers].sort());
   assert.deepEqual(
     identifiers.map((identifier) => storage.uuid7Parts(identifier).timestampMs),
-    [100, 100, 100]
+    [100, 100, 100, 100]
   );
   assert.deepEqual(
     identifiers.map((identifier) => storage.uuid7Parts(identifier).randomValue),
-    [9n, 10n, 11n]
+    [9n, 10n, 11n, 12n]
   );
-  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), afterRestart.id);
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), selectedTask.id);
 });
 
 test("UUIDv7 allocator reconstructs missing state without rewriting UUIDv4 queues", async (t) => {
@@ -864,6 +928,67 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
     JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database))),
     firstBody
   );
+});
+
+test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const start = {
+    ...command("generated-break-start", 4, 100, 4),
+    timerId: "generated-break",
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: "finish-source"
+  };
+  await seedMeta(instance.database, {
+    snapshot: snapshot(0),
+    deviceSequence: 4,
+    hlc: { wallMs: 100, counter: 4 },
+    timerOwner: {
+      timerId: "generated-break",
+      deviceId: "device-owner",
+      tabId: "tab-owner",
+      leaseExpiresAtMs: 2_000
+    }
+  });
+  await seedQueues(instance.database, { commands: [start] });
+
+  const result = await storage.cancelAndClearTimer(instance.database, {
+    timerId: "generated-break",
+    phase: "short_break",
+    deviceId: "device-owner",
+    nowMs: 500,
+    observedElapsedMs: 10_000,
+    withUuidV7: true,
+    entropy: fixedEntropy("09")
+  });
+
+  assert.equal(result.transitioned, true);
+  assert.deepEqual(result.commands.map((item) => item.type), ["cancel", "clear"]);
+  assert.deepEqual(result.commands.map((item) => item.deviceSequence), [5, 6]);
+  assert.deepEqual(result.commands.map((item) => item.hlcCounter), [0, 1]);
+  assert.deepEqual(result.commands.map((item) => item.dependsOnCommandId), ["finish-source", "finish-source"]);
+  assert.deepEqual(
+    result.commands.map((item) => storage.uuid7Parts(item.id).randomValue),
+    [9n, 10n]
+  );
+  assert.equal(await readMeta(instance.database, "timerOwner"), undefined);
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), result.commands[1].id);
+
+  instance.database.close();
+  instance.database = await openDatabase(instance.name);
+  const persisted = (await storage.readQueues(instance.database)).commands
+    .sort((left, right) => left.deviceSequence - right.deviceSequence);
+  assert.deepEqual(persisted.map((item) => item.type), ["start", "cancel", "clear"]);
+  assert.deepEqual(await storage.cancelAndClearTimer(instance.database, {
+    timerId: "generated-break",
+    phase: "short_break",
+    deviceId: "device-owner",
+    nowMs: 600,
+    observedElapsedMs: 20_000,
+    cancelCommandId: "cancel-retry",
+    clearCommandId: "clear-retry"
+  }), { transitioned: false, reason: "stale", commands: [] });
 });
 
 test("two tabs allocate unique timer sequences and monotonic timer/task HLC tuples", async (t) => {
@@ -1727,7 +1852,8 @@ test("resolution apply atomically stores exact canonical state and preserves unc
     commands: [command("captured", 1)],
     taskOperations: [taskOperation("captured-task")],
     durationOperations: [durationOperation("captured-duration")],
-    autoStartOperations: [autoStartOperation("captured-auto-start")]
+    autoStartOperations: [autoStartOperation("captured-auto-start")],
+    selectedTaskOperations: [selectedTaskOperation("captured-selected-task", "task-captured")]
   });
   await acquire(instance.database);
   const pending = await capture(instance.database, resolutionInput("replace_remote"));
@@ -1735,7 +1861,8 @@ test("resolution apply atomically stores exact canonical state and preserves unc
     commands: [command("newer", 2)],
     taskOperations: [taskOperation("newer-task")],
     durationOperations: [durationOperation("newer-duration")],
-    autoStartOperations: [autoStartOperation("newer-auto-start", false, 2)]
+    autoStartOperations: [autoStartOperation("newer-auto-start", false, 2)],
+    selectedTaskOperations: [selectedTaskOperation("newer-selected-task", null, 2)]
   });
 
   const canonicalSnapshot = snapshot(4);
@@ -1755,7 +1882,7 @@ test("resolution apply atomically stores exact canonical state and preserves unc
   });
   assert.equal(outcome.applied, true);
   assert.deepEqual(transactions, [{
-    storeNames: ["meta", "pending", "pendingTasks", "pendingDurations", "pendingAutoStarts"],
+    storeNames: ["meta", "pending", "pendingTasks", "pendingDurations", "pendingAutoStarts", "pendingSelectedTasks"],
     mode: "readwrite"
   }]);
   assert.deepEqual((await storage.readCanonicalState(instance.database)).snapshot, canonicalSnapshot);
@@ -1764,6 +1891,7 @@ test("resolution apply atomically stores exact canonical state and preserves unc
   assert.deepEqual(queues.taskOperations.map((item) => item.id), ["newer-task"]);
   assert.deepEqual(queues.durationOperations.map((item) => item.id), ["newer-duration"]);
   assert.deepEqual(queues.autoStartOperations.map((item) => item.id), ["newer-auto-start"]);
+  assert.deepEqual(queues.selectedTaskOperations.map((item) => item.id), ["newer-selected-task"]);
   assert.deepEqual(await storage.readBootstrapState(instance.database), { gate: null, resolution: null });
 });
 
@@ -1774,7 +1902,8 @@ test("merge resolution atomically commits combined canonical history and tasks",
     commands: [command("local-command", 1)],
     taskOperations: [taskOperation("local-task")],
     durationOperations: [durationOperation("local-duration")],
-    autoStartOperations: [autoStartOperation("local-auto-start")]
+    autoStartOperations: [autoStartOperation("local-auto-start")],
+    selectedTaskOperations: [selectedTaskOperation("local-selected-task", "local-task")]
   });
   await acquire(instance.database);
   const pending = await capture(instance.database, resolutionInput("merge"));
@@ -1799,7 +1928,8 @@ test("merge resolution atomically commits combined canonical history and tasks",
     commands: [],
     taskOperations: [],
     durationOperations: [],
-    autoStartOperations: []
+    autoStartOperations: [],
+    selectedTaskOperations: []
   });
   assert.deepEqual(await storage.readBootstrapState(instance.database), { gate: null, resolution: null });
 });
@@ -1815,7 +1945,11 @@ test("applied sync acknowledgement deletes exact mixed IDs and preserves later r
     commands: [command("sent", 1), command("later", 2)],
     taskOperations: [taskOperation("sent-task"), taskOperation("later-task", 2)],
     durationOperations: [durationOperation("sent-duration"), durationOperation("later-duration")],
-    autoStartOperations: [autoStartOperation("sent-auto-start"), autoStartOperation("later-auto-start", false, 2)]
+    autoStartOperations: [autoStartOperation("sent-auto-start"), autoStartOperation("later-auto-start", false, 2)],
+    selectedTaskOperations: [
+      selectedTaskOperation("sent-selected-task", "task-sent"),
+      selectedTaskOperation("later-selected-task", null, 2)
+    ]
   });
   const incoming = snapshot(4);
   incoming.tasks = [{ id: "remote-task", title: "Remote task" }];
@@ -1828,7 +1962,8 @@ test("applied sync acknowledgement deletes exact mixed IDs and preserves later r
       commands: ["sent"],
       taskOperations: ["sent-task"],
       durationOperations: ["sent-duration"],
-      autoStartOperations: ["sent-auto-start"]
+      autoStartOperations: ["sent-auto-start"],
+      selectedTaskOperations: ["sent-selected-task"]
     }
   });
 
@@ -1839,6 +1974,7 @@ test("applied sync acknowledgement deletes exact mixed IDs and preserves later r
   assert.deepEqual(persisted.taskOperations.map((item) => item.id), ["later-task"]);
   assert.deepEqual(persisted.durationOperations.map((item) => item.id), ["later-duration"]);
   assert.deepEqual(persisted.autoStartOperations.map((item) => item.id), ["later-auto-start"]);
+  assert.deepEqual(persisted.selectedTaskOperations.map((item) => item.id), ["later-selected-task"]);
 });
 
 test("waiting tab sees peer-applied owner and queues before planning", async (t) => {
@@ -1883,7 +2019,8 @@ test("sync state reads canonical snapshot, HLC, and queues in one transaction", 
     commands: [command("command-1", 1)],
     taskOperations: [taskOperation("task-1")],
     durationOperations: [durationOperation("duration-1")],
-    autoStartOperations: [autoStartOperation("auto-start-1")]
+    autoStartOperations: [autoStartOperation("auto-start-1")],
+    selectedTaskOperations: [selectedTaskOperation("selected-task-1", null)]
   });
   const transactions = [];
   const observedDatabase = {
@@ -1896,7 +2033,7 @@ test("sync state reads canonical snapshot, HLC, and queues in one transaction", 
   const persisted = await storage.readSyncState(observedDatabase);
 
   assert.deepEqual(transactions, [{
-    storeNames: ["meta", "pending", "pendingTasks", "pendingDurations", "pendingAutoStarts"],
+    storeNames: ["meta", "pending", "pendingTasks", "pendingDurations", "pendingAutoStarts", "pendingSelectedTasks"],
     mode: "readonly"
   }]);
   assert.equal(persisted.snapshot.revision, 6);
@@ -1905,6 +2042,7 @@ test("sync state reads canonical snapshot, HLC, and queues in one transaction", 
   assert.deepEqual(persisted.taskOperations.map((item) => item.id), ["task-1"]);
   assert.deepEqual(persisted.durationOperations.map((item) => item.id), ["duration-1"]);
   assert.deepEqual(persisted.autoStartOperations.map((item) => item.id), ["auto-start-1"]);
+  assert.deepEqual(persisted.selectedTaskOperations.map((item) => item.id), ["selected-task-1"]);
 });
 
 test("delayed sync response retains newer canonical snapshot, HLC, and all pending work", async (t) => {
@@ -2154,12 +2292,14 @@ test("invalid canonical response preserves captured queues and lease", async (t)
     taskAcknowledgements: [],
     durationAcknowledgements: [],
     autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: [],
     revision: 4,
     canonicalTimer: null,
     history: [],
     tasks: [],
     durationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
     autoStartBreaks: false,
+    selectedTaskId: null,
     serverTime: "2026-07-22T12:30:00Z",
     serverHlcWallMs: 1
   };
@@ -2183,12 +2323,14 @@ test("malformed normal sync 200 preserves queue and canonical snapshot", async (
     taskAcknowledgements: [],
     durationAcknowledgements: [],
     autoStartAcknowledgements: [{ operationId: "sent-auto-start", outcome: "applied", reason: "" }],
+    selectedTaskAcknowledgements: [],
     revision: 4,
     canonicalTimer: null,
     history: [],
     tasks: [],
     durationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
     autoStartBreaks: false,
+    selectedTaskId: null,
     serverTime: "2026-07-22 12:30:00Z",
     serverHlcWallMs: 400,
     serverHlcCounter: 0
@@ -2197,7 +2339,8 @@ test("malformed normal sync 200 preserves queue and canonical snapshot", async (
     commands: [sent],
     taskOperations: [],
     durationOperations: [],
-    autoStartOperations: [sentAutoStart]
+    autoStartOperations: [sentAutoStart],
+    selectedTaskOperations: []
   }), /serverTime/);
   assert.equal((await storage.readCanonicalState(instance.database)).snapshot.revision, 3);
   assert.deepEqual((await storage.readQueues(instance.database)).commands.map((item) => item.id), ["sent"]);

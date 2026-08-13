@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	schemaVersion   = 5
+	schemaVersion   = 6
 	MaxSafeRevision = int64(9_007_199_254_740_991)
 )
 
@@ -348,12 +348,28 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		BEGIN SELECT RAISE(ABORT, 'auto-start operations are immutable'); END`,
 		)
 	}
+	if version < 6 {
+		statements = append(statements,
+			`CREATE TABLE selected_task_operations (
+			id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 8 AND 128),
+			device_id TEXT NOT NULL CHECK (length(device_id) BETWEEN 8 AND 128),
+			task_id TEXT CHECK (task_id IS NULL OR length(task_id) BETWEEN 8 AND 128),
+			occurred_at TEXT NOT NULL,
+			occurred_at_ms INTEGER NOT NULL,
+			hlc_wall_ms INTEGER NOT NULL CHECK (hlc_wall_ms >= 0),
+			hlc_counter INTEGER NOT NULL CHECK (hlc_counter >= 0)
+		) STRICT`,
+			`CREATE INDEX selected_task_operations_order_idx ON selected_task_operations(hlc_wall_ms, hlc_counter, device_id, id)`,
+			`CREATE TRIGGER selected_task_operations_no_update BEFORE UPDATE ON selected_task_operations
+		BEGIN SELECT RAISE(ABORT, 'selected-task operations are immutable'); END`,
+		)
+	}
 	for _, statement := range statements {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate user database: %w", err)
 		}
 	}
-	if version < 5 {
+	if version < 6 {
 		immutableTables := []struct {
 			table   string
 			trigger string
@@ -363,6 +379,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			{table: "task_operations", trigger: "task_operations_no_delete", message: "task operations are immutable"},
 			{table: "duration_operations", trigger: "duration_operations_no_delete", message: "duration operations are immutable"},
 			{table: "auto_start_operations", trigger: "auto_start_operations_no_delete", message: "auto-start operations are immutable"},
+			{table: "selected_task_operations", trigger: "selected_task_operations_no_delete", message: "selected-task operations are immutable"},
 		}
 		for _, immutable := range immutableTables {
 			var tableCount int

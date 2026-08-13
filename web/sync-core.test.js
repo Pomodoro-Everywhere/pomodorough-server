@@ -66,6 +66,16 @@ function autoStartOperation(id, enabled, wall = 1, counter = 0) {
   };
 }
 
+function selectedTaskOperation(id, taskId, wall = 1, counter = 0) {
+  return {
+    id,
+    taskId,
+    occurredAt: "2026-07-22T12:00:00Z",
+    hlcWallMs: wall,
+    hlcCounter: counter
+  };
+}
+
 function permutations(values) {
   if (values.length === 0) return [[]];
   return values.flatMap((value, index) => {
@@ -80,12 +90,14 @@ function responseFor(sent, overrides = {}) {
     taskAcknowledgements: sent.taskOperations.map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
     durationAcknowledgements: sent.durationOperations.map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
     autoStartAcknowledgements: (sent.autoStartOperations || []).map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
+    selectedTaskAcknowledgements: (sent.selectedTaskOperations || []).map((item) => ({ operationId: item.id, outcome: "applied", reason: "" })),
     revision: 9,
     canonicalTimer: null,
     history: [],
     tasks: [],
     durationsMs: defaults,
     autoStartBreaks: false,
+    selectedTaskId: null,
     serverTime: "2026-07-22T12:30:00Z",
     serverHlcWallMs: Date.parse("2026-07-22T12:30:00Z"),
     serverHlcCounter: 0,
@@ -210,6 +222,8 @@ test("local-state detection ignores empty defaults and sees queued or projected 
   assert.equal(sync.hasLocalState({ ...empty, durationsMs: { ...defaults, focus: 1_800_000 } }), true);
   assert.equal(sync.hasLocalState({ ...empty, history: [{ ...history("cancelled"), status: "cancelled" }] }), true);
   assert.equal(sync.hasLocalState({ ...empty, autoStartBreaks: true }), true);
+  assert.equal(sync.hasLocalState({ ...empty, selectedTaskId: "task-local" }), true);
+  assert.equal(sync.hasLocalState({ ...empty, selectedTaskOperations: [selectedTaskOperation("selected-local", null)] }), true);
 });
 
 test("remote-state detection covers every synchronized canonical domain", () => {
@@ -227,7 +241,8 @@ test("remote-state detection covers every synchronized canonical domain", () => 
     { ...empty, history: [{ ...history("cancelled"), status: "cancelled" }] },
     { ...empty, tasks: [{ id: "task-remote", title: "Remote" }] },
     { ...empty, durationsMs: { ...defaults, short_break: 600_000 } },
-    { ...empty, autoStartBreaks: true }
+    { ...empty, autoStartBreaks: true },
+    { ...empty, selectedTaskId: "task-remote" }
   ]) {
     assert.equal(sync.hasRemoteState(remote), true);
   }
@@ -289,7 +304,8 @@ test("pending resolution preserves exact retry payload and separate discard iden
     commands: [command("command-1")],
     taskOperations: [taskOperation("task-op-1", "task-1", "One")],
     durationOperations: [durationOperation("duration-op-1")],
-    autoStartOperations: [autoStartOperation("auto-start-op-1", true)]
+    autoStartOperations: [autoStartOperation("auto-start-op-1", true)],
+    selectedTaskOperations: [selectedTaskOperation("selected-task-op-1", "task-1")]
   };
   const first = sync.createPendingResolution(input);
   const retry = sync.createPendingResolution(input);
@@ -303,12 +319,14 @@ test("pending resolution preserves exact retry payload and separate discard iden
     commands: ["command-1"],
     taskOperations: ["task-op-1"],
     durationOperations: ["duration-op-1"],
-    autoStartOperations: ["auto-start-op-1"]
+    autoStartOperations: ["auto-start-op-1"],
+    selectedTaskOperations: ["selected-task-op-1"]
   });
   assert.ok(Array.isArray(first.payload.commands));
   assert.ok(Array.isArray(first.payload.taskOperations));
   assert.ok(Array.isArray(first.payload.durationOperations));
   assert.ok(Array.isArray(first.payload.autoStartOperations));
+  assert.ok(Array.isArray(first.payload.selectedTaskOperations));
 });
 
 test("bootstrap submission requires current owner and defined strategy", () => {
@@ -329,7 +347,7 @@ test("bootstrap submission requires current owner and defined strategy", () => {
 });
 
 test("bootstrap resolution limit accepts 4096 and rejects 4097 for every collection", () => {
-  const fields = ["commands", "taskOperations", "durationOperations", "autoStartOperations"];
+  const fields = ["commands", "taskOperations", "durationOperations", "autoStartOperations", "selectedTaskOperations"];
   for (const field of fields) {
     const exact = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [] };
     exact[field] = new Array(4096);
@@ -451,7 +469,7 @@ test("canonical bootstrap response requires every projection and server clock fi
   invalidOrigin.canonicalTimer.startedByDeviceId = "short";
   assert.throws(() => sync.validateCanonicalResponse(invalidOrigin, sent), /canonicalTimer/);
 
-  for (const field of ["revision", "canonicalTimer", "history", "tasks", "durationsMs", "autoStartBreaks", "serverTime", "serverHlcWallMs", "serverHlcCounter"]) {
+  for (const field of ["revision", "canonicalTimer", "history", "tasks", "durationsMs", "autoStartBreaks", "selectedTaskId", "serverTime", "serverHlcWallMs", "serverHlcCounter"]) {
     const invalid = structuredClone(valid);
     delete invalid[field];
     assert.throws(() => sync.validateCanonicalResponse(invalid, sent), /Bootstrap response/);
@@ -642,6 +660,24 @@ test("403 refresh retries exact JSON body once and never loops", async () => {
   assert.equal(timing.requestSequence, 2);
 });
 
+test("CSRF retry invokes injected fetcher without binding it to input", async () => {
+  const fetcher = async function () {
+    assert.equal(this, undefined);
+    return { status: 200 };
+  };
+
+  const response = await sync.postJSONWithCsrfRetry({
+    fetcher,
+    url: "/api/v1/sync",
+    body: "{}",
+    csrfToken: "token",
+    nextRequestSequence: async () => 1,
+    refreshCsrf: async () => "unused"
+  });
+
+  assert.equal(response.status, 200);
+});
+
 test("sync batching, task acknowledgements, and optimistic task rebase preserve later operations", () => {
   const commands = Array.from({ length: 300 }, (_, index) => command(`command-${index}`, index + 1));
   const sentTask = taskOperation("task-op-sent", "task-sent", "Sent", 1);
@@ -687,7 +723,9 @@ test("sync batching covers protocol boundaries and multiple batches for every qu
       taskOperation(`batch-task-operation-${index}`, `batch-task-${index}`, `Task ${index}`, index + 1),
     durationOperations: (index) => durationOperation(`batch-duration-${index}`, index + 1),
     autoStartOperations: (index) =>
-      autoStartOperation(`batch-auto-start-${index}`, index % 2 === 0, index + 1)
+      autoStartOperation(`batch-auto-start-${index}`, index % 2 === 0, index + 1),
+    selectedTaskOperations: (index) =>
+      selectedTaskOperation(`batch-selected-task-${index}`, index % 2 === 0 ? `task-${index}` : null, index + 1)
   };
 
   for (const [field, factory] of Object.entries(factories)) {
@@ -818,6 +856,111 @@ test("canonical auto-start converges remotely while newer in-flight local intent
     revision: 0
   }, responseFor(empty, { autoStartBreaks: true }), empty);
   assert.equal(remoteOnly.autoStartBreaks, true);
+});
+
+test("selected-task operations preserve nullable wire shape and LWW projection", () => {
+  const operations = Array.from({ length: 257 }, (_, index) =>
+    selectedTaskOperation(`selected-task-${index}`, index % 2 === 0 ? `task-${index}` : null, index + 1)
+  );
+  operations[0].ownerId = "local-only";
+  operations[0].deviceId = "local-device";
+
+  const first = sync.buildSyncBatch({ selectedTaskOperations: operations });
+  const second = sync.buildSyncBatch({ selectedTaskOperations: operations.slice(256) });
+
+  assert.equal(first.selectedTaskOperations.length, 256);
+  assert.equal(second.selectedTaskOperations.length, 1);
+  assert.deepEqual(Object.keys(first.selectedTaskOperations[0]), [
+    "id", "taskId", "occurredAt", "hlcWallMs", "hlcCounter"
+  ]);
+  assert.equal(first.selectedTaskOperations[1].taskId, null);
+  for (const order of permutations([
+    selectedTaskOperation("selected-old", "task-old", 1),
+    selectedTaskOperation("selected-new", null, 2)
+  ])) {
+    assert.equal(sync.applySelectedTaskOperations("task-base", order), null);
+  }
+});
+
+test("canonical selected task installs before newer pending operation reprojects", () => {
+  const sentOperation = selectedTaskOperation("selected-sent", "task-sent", 1);
+  const newerOperation = selectedTaskOperation("selected-newer", "task-newer", 2);
+  const sent = {
+    commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [],
+    selectedTaskOperations: [sentOperation]
+  };
+  const rebased = sync.rebaseSyncState({
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: [sentOperation, newerOperation],
+    baseTasks: [],
+    baseHistory: [],
+    baseDurationsMs: defaults,
+    baseAutoStartBreaks: false,
+    baseSelectedTaskId: "task-base",
+    revision: 0
+  }, responseFor(sent, { selectedTaskId: "task-sent" }), sent);
+
+  assert.equal(rebased.baseSelectedTaskId, "task-sent");
+  assert.equal(rebased.selectedTaskId, "task-newer");
+  assert.deepEqual(rebased.pendingSelectedTaskOperations, [newerOperation]);
+});
+
+test("selected-task acknowledgements require exact operation set without mutation", () => {
+  const operation = selectedTaskOperation("selected-sent", null);
+  const sent = {
+    commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [],
+    selectedTaskOperations: [operation]
+  };
+  const local = {
+    ...sent,
+    baseTasks: [], baseHistory: [], baseDurationsMs: defaults,
+    baseAutoStartBreaks: false, baseSelectedTaskId: "task-old", revision: 0
+  };
+  for (const acknowledgements of [
+    undefined,
+    [],
+    [{ operationId: "selected-extra", outcome: "applied", reason: "" }],
+    [
+      { operationId: operation.id, outcome: "applied", reason: "" },
+      { operationId: operation.id, outcome: "applied", reason: "" }
+    ],
+    [{ operationId: operation.id, outcome: "unknown", reason: "" }],
+    [{ operationId: operation.id, outcome: "applied" }]
+  ]) {
+    const response = responseFor(sent);
+    if (acknowledgements === undefined) delete response.selectedTaskAcknowledgements;
+    else response.selectedTaskAcknowledgements = acknowledgements;
+    const before = structuredClone(local);
+    assert.throws(() => sync.rebaseSyncState(local, response, sent), /selectedTaskAcknowledgements/);
+    assert.deepEqual(local, before);
+  }
+});
+
+test("bootstrap selected-task operations discard on keep and upload on replace or merge", () => {
+  const operation = selectedTaskOperation("selected-local", null, 7);
+  const input = {
+    userId: "user-1",
+    requestId: "request-selected-task",
+    deviceId: "device-1",
+    expectedRevision: 3,
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: [operation]
+  };
+
+  for (const strategy of ["replace_remote", "merge"]) {
+    const pending = sync.createPendingResolution({ ...input, strategy });
+    assert.deepEqual(pending.payload.selectedTaskOperations, [operation]);
+    assert.deepEqual(pending.queueIds.selectedTaskOperations, [operation.id]);
+  }
+  const keep = sync.createPendingResolution({ ...input, strategy: "keep_remote" });
+  assert.deepEqual(keep.payload.selectedTaskOperations, []);
+  assert.deepEqual(keep.queueIds.selectedTaskOperations, [operation.id]);
 });
 
 test("bootstrap auto-start preserves absent, explicit-empty, and exact saved payload semantics", () => {
@@ -970,6 +1113,13 @@ test("generated break resolves every dependent command across outcome evidence a
                 completedAt: `2026-07-22T12:2${index}:00Z`
               }))
             : [];
+          if (phaseCorrection) {
+            prior.unshift({
+              ...history(`yesterday-${suffix}`),
+              commandId: `yesterday-command-${suffix}`,
+              completedAt: "2026-07-21T12:00:00Z"
+            });
+          }
           const evidence = {
             ...history(`completion-${suffix}`),
             timerId: exactCompletion ? source.timerId : `other-${suffix}`,

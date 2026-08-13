@@ -96,7 +96,7 @@ func TestOpenAPIRoutesSchemasStatusesAndSecurityMatchServer(t *testing.T) {
 	}
 }
 
-func TestOpenAPIReferencesAndAutoStartContractsMatchServer(t *testing.T) {
+func TestOpenAPIReferencesAndPreferenceContractsMatchServer(t *testing.T) {
 	document := loadOpenAPIDocument(t)
 	walkOpenAPIRefs(t, document, document)
 	bootstrapOperation := openAPIMap(t, openAPIMap(t, openAPIMap(t, document, "paths"), "/api/v1/bootstrap"), "get")
@@ -112,29 +112,63 @@ func TestOpenAPIReferencesAndAutoStartContractsMatchServer(t *testing.T) {
 	syncResponse := openAPIMap(t, schemas, "SyncResponse")
 	autoStartOperation := openAPIMap(t, schemas, "AutoStartOperation")
 	autoStartAcknowledgement := openAPIMap(t, schemas, "AutoStartAcknowledgement")
+	selectedTaskOperation := openAPIMap(t, schemas, "SelectedTaskOperation")
+	selectedTaskAcknowledgement := openAPIMap(t, schemas, "SelectedTaskAcknowledgement")
 	const maxSafeRevision = 9_007_199_254_740_991
 
-	assertOpenAPIOperationArray(t, syncRequest, "autoStartOperations", 256)
-	assertOpenAPIOperationArray(t, bootstrapRequest, "autoStartOperations", 4096)
+	assertOpenAPIOperationArray(t, syncRequest, "autoStartOperations", 256, "#/components/schemas/AutoStartOperation")
+	assertOpenAPIOperationArray(t, bootstrapRequest, "autoStartOperations", 4096, "#/components/schemas/AutoStartOperation")
+	assertOpenAPIOperationArray(t, syncRequest, "selectedTaskOperations", 256, "#/components/schemas/SelectedTaskOperation")
+	assertOpenAPIOperationArray(t, bootstrapRequest, "selectedTaskOperations", 4096, "#/components/schemas/SelectedTaskOperation")
 	if openAPIRequired(syncRequest, "autoStartOperations") || openAPIRequired(bootstrapRequest, "autoStartOperations") {
 		t.Fatal("autoStartOperations must remain optional for sync and omitted-vs-empty bootstrap compatibility")
+	}
+	if openAPIRequired(syncRequest, "selectedTaskOperations") || openAPIRequired(bootstrapRequest, "selectedTaskOperations") {
+		t.Fatal("selectedTaskOperations must remain optional for sync and omitted-vs-empty bootstrap compatibility")
 	}
 	bootstrapAutoStart := openAPIMap(t, openAPIMap(t, bootstrapRequest, "properties"), "autoStartOperations")
 	bootstrapDescription, _ := bootstrapAutoStart["description"].(string)
 	if !strings.Contains(bootstrapDescription, "Omission") || !strings.Contains(bootstrapDescription, "present empty") {
 		t.Fatalf("bootstrap auto-start compatibility description = %q", bootstrapDescription)
 	}
+	bootstrapSelectedTask := openAPIMap(t, openAPIMap(t, bootstrapRequest, "properties"), "selectedTaskOperations")
+	bootstrapSelectedTaskDescription, _ := bootstrapSelectedTask["description"].(string)
+	if !strings.Contains(bootstrapSelectedTaskDescription, "Omission") || !strings.Contains(bootstrapSelectedTaskDescription, "present empty") {
+		t.Fatalf("bootstrap selected-task compatibility description = %q", bootstrapSelectedTaskDescription)
+	}
 	for _, field := range []string{"id", "enabled", "occurredAt", "hlcWallMs", "hlcCounter"} {
 		if !openAPIRequired(autoStartOperation, field) {
 			t.Fatalf("AutoStartOperation missing required field %q", field)
 		}
+	}
+	for _, field := range []string{"id", "taskId", "occurredAt", "hlcWallMs", "hlcCounter"} {
+		if !openAPIRequired(selectedTaskOperation, field) {
+			t.Fatalf("SelectedTaskOperation missing required field %q", field)
+		}
+	}
+	selectedTaskID := openAPIMap(t, openAPIMap(t, selectedTaskOperation, "properties"), "taskId")
+	if selectedTaskID["nullable"] != true {
+		t.Fatalf("SelectedTaskOperation taskId schema = %#v", selectedTaskID)
+	}
+	if taskIDRef := firstOpenAPIAllOfRef(t, selectedTaskID); taskIDRef != "#/components/schemas/TaskID" {
+		t.Fatalf("SelectedTaskOperation taskId reference = %q", taskIDRef)
 	}
 	for _, field := range []string{"operationId", "outcome", "reason"} {
 		if !openAPIRequired(autoStartAcknowledgement, field) {
 			t.Fatalf("AutoStartAcknowledgement missing required field %q", field)
 		}
 	}
+	for _, field := range []string{"operationId", "outcome", "reason"} {
+		if !openAPIRequired(selectedTaskAcknowledgement, field) {
+			t.Fatalf("SelectedTaskAcknowledgement missing required field %q", field)
+		}
+	}
 	for _, field := range []string{"autoStartAcknowledgements", "autoStartBreaks"} {
+		if !openAPIRequired(syncResponse, field) {
+			t.Fatalf("SyncResponse missing required field %q", field)
+		}
+	}
+	for _, field := range []string{"selectedTaskAcknowledgements", "selectedTaskId"} {
 		if !openAPIRequired(syncResponse, field) {
 			t.Fatalf("SyncResponse missing required field %q", field)
 		}
@@ -158,6 +192,17 @@ func TestOpenAPIReferencesAndAutoStartContractsMatchServer(t *testing.T) {
 	autoStartBreaks := openAPIMap(t, responseProperties, "autoStartBreaks")
 	if autoStartBreaks["type"] != "boolean" || autoStartBreaks["default"] != false {
 		t.Fatalf("autoStartBreaks schema = %#v", autoStartBreaks)
+	}
+	selectedTaskAcknowledgements := openAPIMap(t, responseProperties, "selectedTaskAcknowledgements")
+	if openAPIMap(t, selectedTaskAcknowledgements, "items")["$ref"] != "#/components/schemas/SelectedTaskAcknowledgement" {
+		t.Fatalf("selectedTaskAcknowledgements schema = %#v", selectedTaskAcknowledgements)
+	}
+	selectedTaskResponseID := openAPIMap(t, responseProperties, "selectedTaskId")
+	if selectedTaskResponseID["nullable"] != true {
+		t.Fatalf("selectedTaskId response schema = %#v", selectedTaskResponseID)
+	}
+	if taskIDRef := firstOpenAPIAllOfRef(t, selectedTaskResponseID); taskIDRef != "#/components/schemas/TaskID" {
+		t.Fatalf("selectedTaskId response reference = %q", taskIDRef)
 	}
 }
 
@@ -237,13 +282,13 @@ func assertOpenAPISuccessSchema(t *testing.T, path string, responses map[string]
 	}
 }
 
-func assertOpenAPIOperationArray(t *testing.T, schema map[string]any, field string, maximum int) {
+func assertOpenAPIOperationArray(t *testing.T, schema map[string]any, field string, maximum int, itemRef string) {
 	t.Helper()
 	property, ok := openAPIMap(t, schema, "properties")[field].(map[string]any)
 	if !ok {
 		t.Fatalf("%s property missing", field)
 	}
-	if property["type"] != "array" || property["maxItems"] != maximum || openAPIMap(t, property, "items")["$ref"] != "#/components/schemas/AutoStartOperation" {
+	if property["type"] != "array" || property["maxItems"] != maximum || openAPIMap(t, property, "items")["$ref"] != itemRef {
 		t.Fatalf("%s operation array = %#v", field, property)
 	}
 }
@@ -256,6 +301,20 @@ func openAPIRequired(schema map[string]any, field string) bool {
 		}
 	}
 	return false
+}
+
+func firstOpenAPIAllOfRef(t *testing.T, schema map[string]any) string {
+	t.Helper()
+	allOf, ok := schema["allOf"].([]any)
+	if !ok || len(allOf) != 1 {
+		t.Fatalf("allOf = %#v, want one schema", schema["allOf"])
+	}
+	reference, ok := allOf[0].(map[string]any)
+	if !ok {
+		t.Fatalf("allOf schema = %#v", allOf[0])
+	}
+	value, _ := reference["$ref"].(string)
+	return value
 }
 
 func openAPIMap(t *testing.T, object map[string]any, key string) map[string]any {

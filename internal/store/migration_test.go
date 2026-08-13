@@ -31,6 +31,7 @@ func TestMigrateVersionOneAddsTaskSchema(t *testing.T) {
 		`SELECT task_id FROM timer_sessions LIMIT 0`,
 		`SELECT id FROM task_operations LIMIT 0`,
 		`SELECT id FROM duration_operations LIMIT 0`,
+		`SELECT id FROM selected_task_operations LIMIT 0`,
 	} {
 		rows, err := db.QueryContext(ctx, query)
 		if err != nil {
@@ -248,6 +249,100 @@ func TestMigrateVersionFourRollsBackPartialAutoStartSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	if version != 4 || tableCount != 0 {
+		t.Fatalf("failed migration leaked version=%d tableCount=%d", version, tableCount)
+	}
+}
+
+func TestMigrateVersionFiveAddsImmutableNullableSelectedTaskSchema(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/legacy.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO selected_task_operations(id, device_id, task_id, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter)
+		VALUES ('selected-task-operation-0001', 'device-0001', NULL, '2026-07-15T10:00:00Z', 1784109600000, 1784109600000, 0)`
+	if _, err := db.ExecContext(ctx, insert); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE selected_task_operations SET task_id = 'task-0001'`); err == nil {
+		t.Fatal("migrated selected-task operation was mutable")
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM selected_task_operations`); err == nil {
+		t.Fatal("migrated selected-task operation was deletable")
+	}
+	for _, invalid := range []string{
+		`INSERT INTO selected_task_operations(id, device_id, task_id, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter) VALUES ('selected-task-invalid-id', 'device-0001', 'short', '2026-07-15T10:00:00Z', 0, 0, 0)`,
+		`INSERT INTO selected_task_operations(id, device_id, task_id, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter) VALUES ('selected-task-invalid-clock', 'device-0001', NULL, '2026-07-15T10:00:00Z', 0, -1, 0)`,
+	} {
+		if _, err := db.ExecContext(ctx, invalid); err == nil {
+			t.Fatalf("selected-task schema accepted invalid statement %q", invalid)
+		}
+	}
+	var indexSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'selected_task_operations_order_idx'`).Scan(&indexSQL); err != nil {
+		t.Fatal(err)
+	}
+	if indexSQL != "CREATE INDEX selected_task_operations_order_idx ON selected_task_operations(hlc_wall_ms, hlc_counter, device_id, id)" {
+		t.Fatalf("selected-task order index = %q", indexSQL)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO maintenance_flags(name) VALUES ('bootstrap_replace')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM selected_task_operations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM maintenance_flags`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateVersionFiveRollsBackPartialSelectedTaskSchema(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/legacy.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
+		`CREATE TABLE index_owner (id INTEGER PRIMARY KEY) STRICT`,
+		`CREATE INDEX selected_task_operations_order_idx ON index_owner(id)`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := migrate(ctx, db); err == nil {
+		t.Fatal("migration with conflicting selected-task index succeeded")
+	}
+	var version, tableCount int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'selected_task_operations'`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if version != 5 || tableCount != 0 {
 		t.Fatalf("failed migration leaked version=%d tableCount=%d", version, tableCount)
 	}
 }
