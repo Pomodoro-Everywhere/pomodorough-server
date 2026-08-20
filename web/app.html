@@ -37,7 +37,7 @@
       </div>
       <div id="profile" class="profile" hidden>
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <button id="logoutButton" class="text-button" type="button">Log out</button>
+        <button id="logoutButton" class="text-button" type="button">Sign out</button>
       </div>
     </div>
   </header>
@@ -48,22 +48,22 @@
 
   <dialog id="bootstrapDialog" class="bootstrap-dialog" aria-labelledby="bootstrapTitle" aria-describedby="bootstrapSummary" aria-busy="false">
     <div class="bootstrap-ticket">
-      <span class="bootstrap-kicker">Account arrival / history transfer</span>
-      <h2 id="bootstrapTitle">Choose your history</h2>
-      <p id="bootstrapSummary">Comparing local and remote completed runs.</p>
+      <span class="bootstrap-kicker">Synchronized state</span>
+      <h2 id="bootstrapTitle">Choose synchronized state</h2>
+      <p id="bootstrapSummary">Comparing device and account data.</p>
 
       <div id="bootstrapChoices" class="bootstrap-choices">
         <button type="button" data-bootstrap-strategy="replace_remote">
           <strong>Keep Local</strong>
-          <span>Replace account history with this device.</span>
+          <span>Replace account data with this device's timer, history, tasks, settings, and queued changes.</span>
         </button>
         <button type="button" data-bootstrap-strategy="keep_remote">
           <strong>Keep Remote</strong>
-          <span>Use account history and discard unsigned local data.</span>
+          <span>Replace this device's timer, history, tasks, settings, and queued changes with account data.</span>
         </button>
         <button type="button" data-bootstrap-strategy="merge">
           <strong>Keep Both</strong>
-          <span>Combine histories. Conflicts or rejected changes are possible.</span>
+          <span>Merge queued local changes into account data. Conflicts or rejected changes are possible.</span>
         </button>
       </div>
 
@@ -153,8 +153,8 @@
 
         <label class="task-selector-row" for="taskSelector">
           <span>
-            <strong>Task on this run</strong>
-            <small>Optional / focus service only</small>
+            <strong>Focus task</strong>
+            <small>Optional / focus only</small>
           </span>
           <select id="taskSelector">
             <option value="">No task</option>
@@ -216,7 +216,7 @@
         <label class="auto-start-row">
           <span class="auto-start-copy">
             <strong>Auto-start breaks</strong>
-            <small>Short after focus. Long every fourth focus.</small>
+            <small>Short after focus. Long every fourth completed focus.</small>
           </span>
           <span class="auto-start-toggle">
             <input id="autoStartBreaks" type="checkbox" role="switch">
@@ -238,7 +238,7 @@
           <output id="historyCount" class="history-count" aria-label="Completed timer count">000</output>
         </header>
         <ol id="historyList" class="history-list">
-          <li class="history-empty">No completed runs yet. Your first finish appears here.</li>
+          <li class="history-empty"><strong>No arrivals yet</strong><span>Your first run appears here.</span></li>
         </ol>
       </section>
     </div>
@@ -264,12 +264,12 @@
       <div class="task-board" aria-live="polite">
         <div class="task-board-head" aria-hidden="true">
           <span>Task</span>
-          <span>Finished pomodoros today</span>
-          <span>Time today spent</span>
+          <span>Finished</span>
+          <span>Time</span>
           <span>Action</span>
         </div>
         <div id="taskList" class="task-list">
-          <p class="task-empty">No tasks on the board. Add one for your next focus run.</p>
+          <p class="task-empty"><strong>No tasks yet</strong><span>Add a task, then assign it before starting focus.</span></p>
         </div>
       </div>
     </section>

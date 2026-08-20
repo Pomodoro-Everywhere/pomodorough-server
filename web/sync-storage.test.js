@@ -912,7 +912,8 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
     entropy: fixedEntropy("09"),
     breakPhase: "short_break",
     breakDurationMs: 300_000,
-    breakTimerId: "550e8400-e29b-41d4-a716-446655440000"
+    breakTimerId: "550e8400-e29b-41d4-a716-446655440000",
+    settings: { selectedPhase: "short_break" }
   });
 
   const parts = result.commands.map((item) => storage.uuid7Parts(item.id));
@@ -920,6 +921,9 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
   assert.deepEqual(parts.map((item) => item.randomValue), [9n, 10n]);
   assert.equal(result.commands[1].dependsOnCommandId, result.commands[0].id);
   assert.equal(await readMeta(instance.database, storage.UUID7_KEY), result.commands[1].id);
+  assert.deepEqual(await readMeta(instance.database, "settings"), {
+    selectedPhase: "short_break"
+  });
 
   const firstBody = JSON.stringify(sync.buildSyncBatch({ commands: result.commands }));
   instance.database.close();

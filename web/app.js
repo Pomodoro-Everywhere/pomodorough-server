@@ -1344,20 +1344,32 @@
       : "short_break";
   }
 
+  function nextPhaseAfterCompletion(timer, history = state.history, referenceDate = new Date()) {
+    if (timer?.phase !== "focus") return "focus";
+    const completionAlreadyProjected = history.some((item) =>
+      item.timerId === timer.id && item.phase === "focus" && item.status === "completed"
+    );
+    const projectedHistory = completionAlreadyProjected
+      ? history
+      : history.concat({
+          timerId: timer.id,
+          phase: "focus",
+          status: "completed",
+          completedAt: referenceDate.toISOString()
+        });
+    return nextBreakPhase(projectedHistory, referenceDate);
+  }
+
   async function finishTimer(automatic = false) {
     if (controlsBlocked() || actionLocked) return false;
     const timer = clone(state.timer);
     const localNow = Date.now();
     const now = trustedNow(localNow);
+    const previousPhase = state.selectedPhase;
+    const nextPhase = nextPhaseAfterCompletion(timer, state.history, new Date(localNow));
     const autoBreak = timer.phase === "focus" && state.autoStartBreaks;
-    const breakPhase = autoBreak
-      ? nextBreakPhase(state.history.concat({
-          timerId: timer.id,
-          phase: "focus",
-          status: "completed",
-          completedAt: new Date(localNow).toISOString()
-        }), new Date(localNow))
-      : null;
+    const breakPhase = autoBreak ? nextPhase : null;
+    state.selectedPhase = nextPhase;
     actionLocked = true;
     try {
       const outcome = await syncStorage.finishTimer(db, {
@@ -1374,9 +1386,11 @@
         withUuidV7: true,
         breakPhase,
         breakDurationMs: breakPhase ? state.durationsMs[breakPhase] : 0,
-        breakTimerId: breakPhase ? crypto.randomUUID() : null
+        breakTimerId: breakPhase ? crypto.randomUUID() : null,
+        settings: settingsValue()
       });
       if (!outcome.transitioned) {
+        state.selectedPhase = previousPhase;
         if (automatic && outcome.reason === "not_owner") {
           scheduleCompletionRetry(timer.id, outcome);
           return true;
@@ -1396,6 +1410,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
+      state.selectedPhase = previousPhase;
       showNotice(error.message || "Timer action could not be saved.");
       return false;
     } finally {
@@ -2524,7 +2539,7 @@
       + state.pendingSelectedTaskOperations.length;
     if (pendingCount > 0) {
       const confirmed = window.confirm(
-        `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Logging out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
+        `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Signing out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
       );
       if (!confirmed) return;
     }
@@ -2542,7 +2557,7 @@
         headers: { "X-CSRF-Token": state.csrfToken }
       });
       if (!response.ok && response.status !== 401) {
-        throw new Error(`Logout failed (${response.status}).`);
+        throw new Error(`Sign out failed (${response.status}).`);
       }
 
       closeRevisionStream();
@@ -2550,7 +2565,7 @@
       redirectToLogin();
     } catch (error) {
       elements.logoutButton.disabled = false;
-      showNotice(error.message || "Logout failed. Local timer data was kept.");
+      showNotice(error.message || "Sign out failed. Local timer data was kept.");
     }
   }
 
@@ -2658,12 +2673,13 @@
   }
 
   function displayTimer() {
-    if (state.timer.status !== "idle") return state.timer;
+    if (!["idle", "completed"].includes(state.timer.status)) return state.timer;
     return emptyTimer(state.selectedPhase, selectedDurationMs());
   }
 
   function renderTimer() {
     const timer = displayTimer();
+    const status = state.timer.status;
     const elapsed = elapsedFor(timer);
     const remaining = Math.max(0, timer.plannedDurationMs - elapsed);
     const progress = timer.plannedDurationMs > 0 ? elapsed / timer.plannedDurationMs : 0;
@@ -2672,9 +2688,8 @@
     const seconds = totalSeconds % 60;
     const timeText = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
     const phase = PHASES[timer.phase] || PHASES.focus;
-    const status = timer.status;
     const active = ["running", "paused"].includes(status);
-    if (status === "completed") startCompletionAlert(timer);
+    if (status === "completed") startCompletionAlert(state.timer);
 
     elements.timerDisplay.textContent = timeText;
     elements.timerDisplay.dateTime = `PT${Math.floor(totalSeconds / 60)}M${seconds}S`;
@@ -2739,7 +2754,11 @@
     if (completed.length === 0) {
       const empty = document.createElement("li");
       empty.className = "history-empty";
-      empty.textContent = "No completed runs yet. Your first finish appears here.";
+      const title = document.createElement("strong");
+      title.textContent = "No arrivals yet";
+      const detail = document.createElement("span");
+      detail.textContent = "Your first run appears here.";
+      empty.append(title, detail);
       elements.historyList.append(empty);
       return;
     }
@@ -2802,7 +2821,11 @@
     if (state.tasks.length === 0) {
       const empty = document.createElement("p");
       empty.className = "task-empty";
-      empty.textContent = "No tasks on the board. Add one for your next focus run.";
+      const title = document.createElement("strong");
+      title.textContent = "No tasks yet";
+      const detail = document.createElement("span");
+      detail.textContent = "Add a task, then assign it before starting focus.";
+      empty.append(title, detail);
       elements.taskList.append(empty);
       return;
     }

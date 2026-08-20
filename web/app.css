@@ -342,7 +342,7 @@ main {
   background: transparent;
   border: 0;
   border-left: 0.35rem solid var(--steel);
-  text-align: left;
+  text-align: center;
 }
 
 .screen-nav button span,
@@ -697,6 +697,7 @@ main {
   font-family: var(--utility);
   font-size: 0.72rem;
   font-weight: 800;
+  text-align: right;
 }
 
 .task-selector-row select:disabled {
@@ -1339,12 +1340,25 @@ main {
 
 .history-empty {
   position: relative;
-  padding: 2rem 0 2rem 4rem;
+  padding: 2rem 4rem;
   color: var(--muted);
   font-family: var(--utility);
   font-size: 0.73rem;
   font-weight: 700;
+  text-align: center;
   text-transform: uppercase;
+}
+
+.history-empty strong,
+.history-empty span,
+.task-empty strong,
+.task-empty span {
+  display: block;
+}
+
+.history-empty span,
+.task-empty span {
+  margin-top: 0.35rem;
 }
 
 .history-empty::before {
@@ -1471,6 +1485,18 @@ main {
   padding-inline: 0.8rem;
 }
 
+.task-board-head span:nth-child(2),
+.task-board-head span:nth-child(3),
+.task-row > :nth-child(2),
+.task-row > :nth-child(3) {
+  text-align: center;
+}
+
+.task-board-head span:last-child,
+.task-row > :last-child {
+  text-align: center;
+}
+
 .task-row {
   min-height: 5rem;
   padding: 0.8rem 0;
@@ -1512,6 +1538,7 @@ main {
   font-family: var(--utility);
   font-size: 0.72rem;
   font-weight: 700;
+  text-align: center;
   text-transform: uppercase;
 }
 
@@ -1837,11 +1864,11 @@ main {
   }
 
   .task-stat:nth-child(2)::before {
-    content: "Finished today";
+    content: "Finished";
   }
 
   .task-stat:nth-child(3)::before {
-    content: "Time today";
+    content: "Time";
   }
 
   .task-delete {

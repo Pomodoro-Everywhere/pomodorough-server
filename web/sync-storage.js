@@ -876,6 +876,7 @@
         }
         metaStore.put({ key: "deviceSequence", value: highestSequence + persisted.length });
         metaStore.put({ key: "hlc", value: { wallMs, counter } });
+        if (input.settings) metaStore.put({ key: "settings", value: input.settings });
         outcome = { transitioned: true, reason: "", commands: persisted };
       };
       for (const [name, request] of Object.entries(requests)) {

@@ -105,21 +105,21 @@
     switch (strategy) {
       case "replace_remote":
         return {
-          title: "Replace remote history?",
-          message: "Remote history and current account state will be permanently replaced by data from this device.",
-          confirmLabel: "Replace with local"
+          title: "Confirm Keep Local",
+          message: "Account timer, history, tasks, settings, and queued changes will be replaced by this device's data.",
+          confirmLabel: "Keep Local"
         };
       case "keep_remote":
         return {
-          title: "Discard local history?",
-          message: "Unsigned local history and queued changes on this device will be permanently discarded.",
-          confirmLabel: "Keep remote"
+          title: "Confirm Keep Remote",
+          message: "This device's timer, history, tasks, settings, and queued changes will be replaced by account data.",
+          confirmLabel: "Keep Remote"
         };
       case "merge":
         return {
-          title: "Combine both histories?",
-          message: "Combining concurrent timer, task, and duration changes can produce conflicts or rejected operations. Review any sync warning after completion.",
-          confirmLabel: "Combine histories"
+          title: "Confirm Keep Both",
+          message: "Queued local changes will be merged into account data. Conflicts or rejected changes are possible.",
+          confirmLabel: "Keep Both"
         };
       default:
         throw new Error(`Unknown bootstrap strategy: ${strategy}`);

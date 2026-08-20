@@ -272,9 +272,9 @@ test("chooser strategies require confirmation and expose destructive or merge wa
     assert.ok(sync.confirmationFor(strategy).confirmLabel);
   }
   assert.equal(sync.canSubmitResolution("auto", false), true);
-  assert.match(sync.confirmationFor("replace_remote").message, /permanently replaced/i);
-  assert.match(sync.confirmationFor("keep_remote").message, /permanently discarded/i);
-  assert.match(sync.confirmationFor("merge").message, /conflicts or rejected operations/i);
+  assert.match(sync.confirmationFor("replace_remote").message, /replaced by this device/i);
+  assert.match(sync.confirmationFor("keep_remote").message, /replaced by account data/i);
+  assert.match(sync.confirmationFor("merge").message, /conflicts or rejected changes/i);
 });
 
 test("chooser dialog stays modal and busy while confirmed choice submits", () => {

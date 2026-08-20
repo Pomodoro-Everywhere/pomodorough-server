@@ -16,6 +16,7 @@ function loadTaskProjection() {
     `  globalThis.PomodoroughAppTest = {
     state,
     emptyTimer,
+    displayTimer,
     elapsedFor,
     trustedNow,
     responseClockOffset,
@@ -36,6 +37,7 @@ function loadTaskProjection() {
     completedFocusCountForDay,
     longBreakProgress,
     nextBreakPhase,
+    nextPhaseAfterCompletion,
     releaseCompletionRetry,
     scheduleCompletionRetry,
     setCompletionQueuedForTest(value) { completionQueuedFor = value; },
@@ -541,6 +543,29 @@ test("local completed focuses choose three short breaks then a long break", () =
   }
   assert.equal(app.longBreakProgress(4), 4);
   assert.equal(app.longBreakProgress(5), 1);
+});
+
+test("completed timers display the selected next phase at its full duration", () => {
+  const app = loadTaskProjection();
+  app.state.timer = timer("completed", "completed-focus");
+  app.state.selectedPhase = "short_break";
+  app.state.durationsMs.short_break = 5 * 60_000;
+
+  let displayed = app.displayTimer();
+  assert.equal(app.nextPhaseAfterCompletion(app.state.timer), "short_break");
+  assert.equal(displayed.phase, "short_break");
+  assert.equal(displayed.status, "idle");
+  assert.equal(displayed.plannedDurationMs, 5 * 60_000);
+
+  app.state.timer = { ...timer("completed", "completed-break"), phase: "short_break" };
+  app.state.selectedPhase = "focus";
+  app.state.durationsMs.focus = 25 * 60_000;
+
+  displayed = app.displayTimer();
+  assert.equal(app.nextPhaseAfterCompletion(app.state.timer), "focus");
+  assert.equal(displayed.phase, "focus");
+  assert.equal(displayed.status, "idle");
+  assert.equal(displayed.plannedDurationMs, 25 * 60_000);
 });
 
 test("automatic not-owner completion retries at lease expiry without render-loop polling", () => {
