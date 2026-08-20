@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v31";
+const CACHE_NAME = "pomodorough-shell-v32";
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
@@ -9,10 +9,10 @@ const SHELL = [
   "/platform-selector.js?v=1",
   "/landing.js?v=1",
   "/app",
-  "/app.css?v=17",
-  "/sync-core.js?v=24",
-  "/sync-storage.js?v=24",
-  "/app.js?v=25",
+  "/app.css?v=18",
+  "/sync-core.js?v=25",
+  "/sync-storage.js?v=25",
+  "/app.js?v=26",
   "/manifest.webmanifest",
   "/icon.svg"
 ];
