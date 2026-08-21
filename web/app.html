@@ -9,35 +9,38 @@
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=18">
+  <link rel="stylesheet" href="/app.css?v=20">
   <script src="/sync-core.js?v=25" defer></script>
-  <script src="/sync-storage.js?v=25" defer></script>
-  <script src="/app.js?v=26" defer></script>
+  <script src="/sync-storage.js?v=26" defer></script>
+  <script src="/i18n.js?v=2" defer></script>
+  <script src="/app.js?v=31" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#timer-workbench">Skip to timer</a>
+  <a class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
 
   <header class="masthead">
-    <a class="wordmark" href="/" aria-label="Pomodorough home">
+    <a class="wordmark" href="/" aria-label="Pomodorough home" data-i18n-aria-label="nav.home">
       <span class="wordmark-symbol" aria-hidden="true">P</span>
       <span class="wordmark-copy">
         <span class="wordmark-main">Pomodorough</span>
-        <span class="wordmark-sub">Time, in transit</span>
+        <span class="wordmark-sub" data-i18n="brand.tagline">Time, in transit</span>
       </span>
     </a>
 
     <div class="masthead-tools">
-      <button id="installButton" class="install-button" type="button" hidden>Install</button>
+      <button id="installButton" class="install-button" type="button" hidden data-i18n="account.install">Install</button>
       <div id="syncStatus" class="sync-status" data-state="loading" role="status" aria-live="polite">
         <span class="sync-lamp" aria-hidden="true"></span>
         <span class="sync-label">
-          <small>Line status</small>
-          <span id="syncStatusText">Checking line</span>
+          <small data-i18n="sync.label">Line status</small>
+          <span id="syncStatusText" data-i18n="sync.checking">Checking line</span>
         </span>
       </div>
       <div id="profile" class="profile" hidden>
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <button id="logoutButton" class="text-button" type="button">Sign out</button>
+        <a class="text-button" href="https://pomodoro-everywhere.github.io/pomodorough-server/privacy/" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
+        <button id="logoutButton" class="text-button" type="button" data-i18n="account.signOut">Sign out</button>
+        <button id="deleteAccountButton" class="text-button action-danger" type="button" data-i18n="account.delete">Delete account</button>
       </div>
     </div>
   </header>
@@ -48,71 +51,71 @@
 
   <dialog id="bootstrapDialog" class="bootstrap-dialog" aria-labelledby="bootstrapTitle" aria-describedby="bootstrapSummary" aria-busy="false">
     <div class="bootstrap-ticket">
-      <span class="bootstrap-kicker">Synchronized state</span>
-      <h2 id="bootstrapTitle">Choose synchronized state</h2>
-      <p id="bootstrapSummary">Comparing device and account data.</p>
+      <span class="bootstrap-kicker" data-i18n="bootstrap.kicker">Synchronized state</span>
+      <h2 id="bootstrapTitle" data-i18n="bootstrap.title">Choose synchronized state</h2>
+      <p id="bootstrapSummary" data-i18n="bootstrap.summary">Comparing device and account data.</p>
 
       <div id="bootstrapChoices" class="bootstrap-choices">
         <button type="button" data-bootstrap-strategy="replace_remote">
-          <strong>Keep Local</strong>
-          <span>Replace account data with this device's timer, history, tasks, settings, and queued changes.</span>
+          <strong data-i18n="bootstrap.keepLocal">Keep Local</strong>
+          <span data-i18n="bootstrap.keepLocal.detail">Replace account data with this device's timer, history, tasks, settings, and queued changes.</span>
         </button>
         <button type="button" data-bootstrap-strategy="keep_remote">
-          <strong>Keep Remote</strong>
-          <span>Replace this device's timer, history, tasks, settings, and queued changes with account data.</span>
+          <strong data-i18n="bootstrap.keepRemote">Keep Remote</strong>
+          <span data-i18n="bootstrap.keepRemote.detail">Replace this device's timer, history, tasks, settings, and queued changes with account data.</span>
         </button>
         <button type="button" data-bootstrap-strategy="merge">
-          <strong>Keep Both</strong>
-          <span>Merge queued local changes into account data. Conflicts or rejected changes are possible.</span>
+          <strong data-i18n="bootstrap.keepBoth">Keep Both</strong>
+          <span data-i18n="bootstrap.keepBoth.detail">Merge queued local changes into account data. Conflicts or rejected changes are possible.</span>
         </button>
       </div>
 
       <section id="bootstrapConfirmation" class="bootstrap-confirmation" hidden>
-        <h3 id="bootstrapConfirmationTitle">Confirm history choice</h3>
+        <h3 id="bootstrapConfirmationTitle" data-i18n="bootstrap.confirmTitle">Confirm history choice</h3>
         <p id="bootstrapConfirmationMessage"></p>
         <div class="bootstrap-actions">
-          <button id="bootstrapConfirm" class="bootstrap-confirm" type="button">Confirm</button>
-          <button id="bootstrapCancel" class="bootstrap-cancel" type="button">Cancel</button>
+          <button id="bootstrapConfirm" class="bootstrap-confirm" type="button" data-i18n="bootstrap.confirm">Confirm</button>
+          <button id="bootstrapCancel" class="bootstrap-cancel" type="button" data-i18n="bootstrap.cancel">Cancel</button>
         </div>
       </section>
 
       <p id="bootstrapError" class="bootstrap-error" role="alert" hidden></p>
-      <button id="bootstrapRetry" class="bootstrap-retry" type="button" hidden>Retry saved choice</button>
-      <button id="bootstrapSignOut" class="bootstrap-signout" type="button" hidden>Sign out instead</button>
+      <button id="bootstrapRetry" class="bootstrap-retry" type="button" hidden data-i18n="bootstrap.retry">Retry saved choice</button>
+      <button id="bootstrapSignOut" class="bootstrap-signout" type="button" hidden data-i18n="bootstrap.signOut">Sign out instead</button>
     </div>
   </dialog>
 
   <main>
     <nav class="screen-nav" aria-label="Pomodorough screens">
-      <div role="tablist" aria-label="Workspace">
+      <div role="tablist" aria-label="Workspace" data-i18n-aria-label="nav.workspace">
         <button id="timerTab" type="button" role="tab" aria-selected="true" aria-controls="timerScreen" data-screen-button="timer">
-          <span>Clock</span>
-          <strong>Timer</strong>
+          <span data-i18n="nav.clock">Clock</span>
+          <strong data-i18n="nav.timer">Timer</strong>
         </button>
         <button id="tasksTab" type="button" role="tab" aria-selected="false" aria-controls="tasksScreen" data-screen-button="tasks" tabindex="-1">
-          <span>Board</span>
-          <strong>Tasks</strong>
+          <span data-i18n="nav.board">Board</span>
+          <strong data-i18n="nav.tasks">Tasks</strong>
         </button>
       </div>
     </nav>
 
     <aside id="conflictPanel" class="conflict-panel" hidden>
       <div>
-        <strong>Timer continued elsewhere</strong>
-        <span id="conflictReason">Newer account state arrived during sync.</span>
+        <strong data-i18n="conflict.title">Timer continued elsewhere</strong>
+        <span id="conflictReason" data-i18n="conflict.reason">Newer account state arrived during sync.</span>
       </div>
-      <button id="conflictDismiss" class="text-button" type="button">Dismiss</button>
+      <button id="conflictDismiss" class="text-button" type="button" data-i18n="action.dismiss">Dismiss</button>
     </aside>
 
     <p id="notice" class="notice" role="alert" hidden></p>
 
     <div id="timerScreen" role="tabpanel" aria-labelledby="timerTab">
       <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title">
-      <h1 id="workbench-title" class="visually-hidden">Pomodoro timer</h1>
+      <h1 id="workbench-title" class="visually-hidden" data-i18n="timer.heading">Pomodoro timer</h1>
 
       <article class="timer-machine" aria-describedby="timerInstruction">
         <div class="machine-plate">
-          <span>Current service</span>
+          <span data-i18n="timer.currentService">Current service</span>
         </div>
 
         <div id="dial" class="dial" data-status="idle">
@@ -123,8 +126,8 @@
             <circle id="dialProgress" class="dial-progress" cx="140" cy="140" r="108"></circle>
           </svg>
           <div class="dial-center">
-            <span class="board-kicker">Now timing</span>
-            <span id="phaseLabel" class="dial-phase" aria-hidden="true">Focus</span>
+            <span class="board-kicker" data-i18n="timer.nowTiming">Now timing</span>
+            <span id="phaseLabel" class="dial-phase" aria-hidden="true" data-i18n="phase.focus">Focus</span>
             <time id="timerDisplay" class="timer-display" role="timer" datetime="PT25M">25:00</time>
             <span id="timerDetail" class="timer-detail" aria-hidden="true">Idle / 25 min</span>
             <span id="longBreakProgress" class="long-break-progress">○○○○</span>
@@ -132,91 +135,92 @@
           <span class="dial-pointer" aria-hidden="true"></span>
         </div>
 
-        <p id="timerInstruction" class="timer-instruction">Choose a pattern, then start the clock.</p>
+        <p id="timerInstruction" class="timer-instruction" data-i18n="timer.instruction.idle">Choose a pattern, then start the clock.</p>
 
-        <div class="action-bank" role="group" aria-label="Timer controls">
+        <div class="action-bank" role="group" aria-label="Timer controls" data-i18n-aria-label="timer.controls">
           <button id="timerToggle" class="action-primary" type="button">Start focus</button>
-          <button id="finishButton" class="action-key" type="button" disabled>Finish</button>
-          <button id="cancelButton" class="action-key action-danger" type="button" disabled>Cancel</button>
-          <button id="clearButton" class="action-clear" type="button" disabled>Stop sound</button>
+          <button id="finishButton" class="action-key" type="button" disabled data-i18n="action.finish">Finish</button>
+          <button id="cancelButton" class="action-key action-danger" type="button" disabled data-i18n="action.cancel">Cancel</button>
+          <button id="clearButton" class="action-clear" type="button" disabled data-i18n="action.stopSound">Stop sound</button>
         </div>
+        <p class="completion-limit" role="note" data-i18n="timer.completionLimit">Completion sound and notifications require an active browser or installed PWA. Overdue timers reconcile when you reopen it.</p>
       </article>
 
-      <div id="durationForm" class="recipe-rail" role="group" aria-label="Timer durations">
+      <div id="durationForm" class="recipe-rail" role="group" aria-label="Timer durations" data-i18n-aria-label="pattern.durations">
         <div class="rail-heading">
-          <span class="rail-number">Route</span>
+          <span class="rail-number" data-i18n="pattern.route">Route</span>
           <div>
-            <strong>Service pattern</strong>
-            <small>Choose a mode and duration</small>
+            <strong data-i18n="pattern.title">Service pattern</strong>
+            <small data-i18n="pattern.nextTimer">Changes apply to the next timer; controls lock while a timer is active.</small>
           </div>
         </div>
 
         <label class="task-selector-row" for="taskSelector">
           <span>
-            <strong>Focus task</strong>
-            <small>Optional / focus only</small>
+            <strong data-i18n="pattern.nextTask">Next focus task</strong>
+            <small data-i18n="pattern.nextTask.detail">Optional. Changes affect the next focus; the active timer keeps its assignment.</small>
           </span>
           <select id="taskSelector">
-            <option value="">No task</option>
+            <option value="" data-i18n="pattern.noTask">No task</option>
           </select>
         </label>
 
         <fieldset>
-          <legend class="visually-hidden">Choose phase and duration</legend>
+          <legend class="visually-hidden" data-i18n="pattern.choosePhase">Choose phase and duration</legend>
 
           <div class="duration-row" data-phase-row="focus">
             <button class="phase-button" type="button" data-phase="focus" aria-pressed="true">
-              <span class="phase-index">Work</span>
-              <span>Focus</span>
+              <span class="phase-index" data-i18n="pattern.work">Work</span>
+              <span data-i18n="phase.focus">Focus</span>
             </button>
             <div class="stepper">
-              <button type="button" data-step="-1" data-for="focusDuration" aria-label="Reduce focus duration">&minus;</button>
+              <button type="button" data-step="-1" data-for="focusDuration" aria-label="Reduce focus duration" data-i18n-aria-label="pattern.reduceFocus">&minus;</button>
               <label>
-                <span class="visually-hidden">Focus minutes</span>
+                <span class="visually-hidden" data-i18n="pattern.focusMinutes">Focus minutes</span>
                 <input id="focusDuration" name="focus" type="number" inputmode="numeric" min="1" max="180" value="25">
                 <span class="minute-unit" aria-hidden="true">min</span>
               </label>
-              <button type="button" data-step="1" data-for="focusDuration" aria-label="Increase focus duration">+</button>
+              <button type="button" data-step="1" data-for="focusDuration" aria-label="Increase focus duration" data-i18n-aria-label="pattern.increaseFocus">+</button>
             </div>
           </div>
 
           <div class="duration-row" data-phase-row="short_break">
             <button class="phase-button" type="button" data-phase="short_break" aria-pressed="false">
-              <span class="phase-index">Reset</span>
-              <span>Short break</span>
+              <span class="phase-index" data-i18n="pattern.reset">Reset</span>
+              <span data-i18n="phase.shortBreak">Short break</span>
             </button>
             <div class="stepper">
-              <button type="button" data-step="-1" data-for="shortBreakDuration" aria-label="Reduce short break duration">&minus;</button>
+              <button type="button" data-step="-1" data-for="shortBreakDuration" aria-label="Reduce short break duration" data-i18n-aria-label="pattern.reduceShortBreak">&minus;</button>
               <label>
-                <span class="visually-hidden">Short break minutes</span>
+                <span class="visually-hidden" data-i18n="pattern.shortBreakMinutes">Short break minutes</span>
                 <input id="shortBreakDuration" name="short_break" type="number" inputmode="numeric" min="1" max="180" value="5">
                 <span class="minute-unit" aria-hidden="true">min</span>
               </label>
-              <button type="button" data-step="1" data-for="shortBreakDuration" aria-label="Increase short break duration">+</button>
+              <button type="button" data-step="1" data-for="shortBreakDuration" aria-label="Increase short break duration" data-i18n-aria-label="pattern.increaseShortBreak">+</button>
             </div>
           </div>
 
           <div class="duration-row" data-phase-row="long_break">
             <button class="phase-button" type="button" data-phase="long_break" aria-pressed="false">
-              <span class="phase-index">Recover</span>
-              <span>Long break</span>
+              <span class="phase-index" data-i18n="pattern.recover">Recover</span>
+              <span data-i18n="phase.longBreak">Long break</span>
             </button>
             <div class="stepper">
-              <button type="button" data-step="-1" data-for="longBreakDuration" aria-label="Reduce long break duration">&minus;</button>
+              <button type="button" data-step="-1" data-for="longBreakDuration" aria-label="Reduce long break duration" data-i18n-aria-label="pattern.reduceLongBreak">&minus;</button>
               <label>
-                <span class="visually-hidden">Long break minutes</span>
+                <span class="visually-hidden" data-i18n="pattern.longBreakMinutes">Long break minutes</span>
                 <input id="longBreakDuration" name="long_break" type="number" inputmode="numeric" min="1" max="180" value="15">
                 <span class="minute-unit" aria-hidden="true">min</span>
               </label>
-              <button type="button" data-step="1" data-for="longBreakDuration" aria-label="Increase long break duration">+</button>
+              <button type="button" data-step="1" data-for="longBreakDuration" aria-label="Increase long break duration" data-i18n-aria-label="pattern.increaseLongBreak">+</button>
             </div>
           </div>
         </fieldset>
 
         <label class="auto-start-row">
           <span class="auto-start-copy">
-            <strong>Auto-start breaks</strong>
-            <small>Short after focus. Long every fourth completed focus.</small>
+            <strong data-i18n="pattern.autoStart">Auto-start breaks</strong>
+            <small data-i18n="pattern.autoStart.detail">Short after focus. Long every fourth completed focus.</small>
           </span>
           <span class="auto-start-toggle">
             <input id="autoStartBreaks" type="checkbox" role="switch">
@@ -232,13 +236,13 @@
       <section class="history-strip" aria-labelledby="history-title">
         <header class="history-heading">
           <div>
-            <span class="history-kicker">Run log / this account</span>
-            <h2 id="history-title">Recent arrivals</h2>
+            <span class="history-kicker" data-i18n="history.kicker">Run log / this account</span>
+            <h2 id="history-title" data-i18n="history.title">Recent arrivals</h2>
           </div>
-          <output id="historyCount" class="history-count" aria-label="Completed timer count">000</output>
+          <output id="historyCount" class="history-count" aria-label="Arrival count" data-i18n-aria-label="history.count">000</output>
         </header>
         <ol id="historyList" class="history-list">
-          <li class="history-empty"><strong>No arrivals yet</strong><span>Your first run appears here.</span></li>
+          <li class="history-empty"><strong data-i18n="history.empty">No arrivals yet</strong><span data-i18n="history.empty.detail">Your first run appears here.</span></li>
         </ol>
       </section>
     </div>
@@ -246,38 +250,39 @@
     <section id="tasksScreen" class="tasks-screen" role="tabpanel" aria-labelledby="tasksTab tasks-title" hidden>
       <header class="tasks-heading">
         <div>
-          <span class="history-kicker">Focus manifest / today</span>
-          <h1 id="tasks-title">Task board</h1>
-          <p>Add a task, then assign it before starting a focus run. Recreating the same name restores its history.</p>
+          <span class="history-kicker" data-i18n="tasks.kicker">Focus manifest / today</span>
+          <h1 id="tasks-title" data-i18n="tasks.title">Task board</h1>
+          <p data-i18n="tasks.intro">Add a task, then assign it before starting a focus run. Recreating the same name restores its history.</p>
         </div>
-        <output id="taskCount" class="history-count" aria-label="Active task count">00</output>
+        <output id="taskCount" class="history-count" aria-label="Active task count" data-i18n-aria-label="tasks.count">00</output>
       </header>
 
       <form id="taskForm" class="task-form">
-        <label for="taskInput">New task</label>
+        <label for="taskInput" data-i18n="tasks.new">New task</label>
         <div>
-          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Write release notes">
-          <button type="submit">Add task</button>
+          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Write release notes" data-i18n-placeholder="tasks.placeholder">
+          <button type="submit" data-i18n="tasks.add">Add task</button>
         </div>
       </form>
 
       <div class="task-board" aria-live="polite">
         <div class="task-board-head" aria-hidden="true">
-          <span>Task</span>
-          <span>Finished</span>
-          <span>Time</span>
-          <span>Action</span>
+          <span data-i18n="tasks.column.task">Task</span>
+          <span data-i18n="tasks.column.finished">Finished</span>
+          <span data-i18n="tasks.column.time">Time</span>
+          <span data-i18n="tasks.column.action">Action</span>
         </div>
         <div id="taskList" class="task-list">
-          <p class="task-empty"><strong>No tasks yet</strong><span>Add a task, then assign it before starting focus.</span></p>
+          <p class="task-empty"><strong data-i18n="tasks.empty">No tasks yet</strong><span data-i18n="tasks.empty.detail">Add a task, then assign it before starting focus.</span></p>
         </div>
       </div>
     </section>
   </main>
 
   <footer class="site-footer">
-    <span>Local clock / shared account</span>
-    <span>Device <b id="deviceMark">----</b></span>
+    <span data-i18n="footer.local">Local clock / shared account</span>
+    <a href="https://pomodoro-everywhere.github.io/pomodorough-server/privacy/" data-i18n="account.privacy">Privacy</a>
+    <span><span data-i18n="footer.device">Device</span> <b id="deviceMark">----</b></span>
   </footer>
 </body>
 </html>

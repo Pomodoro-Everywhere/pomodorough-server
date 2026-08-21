@@ -1962,6 +1962,7 @@ test("applied sync acknowledgement deletes exact mixed IDs and preserves later r
     expectedUserId: "user-1",
     snapshot: incoming,
     hlc: { wallMs: 400, counter: 0 },
+    settings: { selectedPhase: "focus" },
     queueIds: {
       commands: ["sent"],
       taskOperations: ["sent-task"],
@@ -1979,6 +1980,7 @@ test("applied sync acknowledgement deletes exact mixed IDs and preserves later r
   assert.deepEqual(persisted.durationOperations.map((item) => item.id), ["later-duration"]);
   assert.deepEqual(persisted.autoStartOperations.map((item) => item.id), ["later-auto-start"]);
   assert.deepEqual(persisted.selectedTaskOperations.map((item) => item.id), ["later-selected-task"]);
+  assert.deepEqual(await readMeta(instance.database, "settings"), { selectedPhase: "focus" });
 });
 
 test("waiting tab sees peer-applied owner and queues before planning", async (t) => {

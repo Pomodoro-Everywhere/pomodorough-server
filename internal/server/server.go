@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +33,10 @@ type Server struct {
 	nativeVerifier          *oidc.IDTokenVerifier
 	hub                     *revisionHub
 	streamKeepaliveInterval time.Duration
+	authIPLimiter           *windowRateLimiter
+	accountLimiter          *windowRateLimiter
+	streamLimiter           *concurrentLimiter
+	metrics                 *requestMetrics
 }
 
 type principal struct {
@@ -58,6 +64,10 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 		logger:                  logger,
 		hub:                     newRevisionHub(),
 		streamKeepaliveInterval: 20 * time.Second,
+		authIPLimiter:           newWindowRateLimiter(30, time.Minute),
+		accountLimiter:          newWindowRateLimiter(240, time.Minute),
+		streamLimiter:           newConcurrentLimiter(4),
+		metrics:                 newRequestMetrics(),
 		oauthConfig: &oauth2.Config{
 			ClientID:     cfg.GoogleWebClientID,
 			ClientSecret: cfg.GoogleWebClientSecret,
@@ -81,14 +91,16 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /openapi.yaml", s.handleOpenAPISpec)
-	mux.HandleFunc("GET /auth/google/start", s.handleGoogleStart)
-	mux.HandleFunc("GET /auth/google/callback", s.handleGoogleCallback)
-	mux.HandleFunc("POST /api/v1/auth/google/challenge", s.handleNativeChallenge)
-	mux.HandleFunc("POST /api/v1/auth/google/exchange", s.handleNativeExchange)
-	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
+	mux.Handle("GET /auth/google/start", s.rateLimitByIP(http.HandlerFunc(s.handleGoogleStart)))
+	mux.Handle("GET /auth/google/callback", s.rateLimitByIP(http.HandlerFunc(s.handleGoogleCallback)))
+	mux.Handle("POST /api/v1/auth/google/challenge", s.rateLimitByIP(http.HandlerFunc(s.handleNativeChallenge)))
+	mux.Handle("POST /api/v1/auth/google/exchange", s.rateLimitByIP(http.HandlerFunc(s.handleNativeExchange)))
+	mux.Handle("POST /api/v1/auth/refresh", s.rateLimitByIP(http.HandlerFunc(s.handleRefresh)))
 	mux.Handle("GET /api/v1/me", s.requireAuth(s.handleMe))
 	mux.Handle("POST /api/v1/auth/logout", s.requireMutation(s.handleLogout))
+	mux.Handle("DELETE /api/v1/account", s.requireMutation(s.handleDeleteAccount))
 	mux.Handle("POST /api/v1/auth/revoke-device", s.requireMutation(s.handleRevokeDevice))
 	mux.Handle("POST /api/v1/sync", s.requireMutation(s.handleSync))
 	mux.Handle("GET /api/v1/bootstrap", s.requireAuth(s.handleBootstrap))
@@ -122,6 +134,10 @@ func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if allowed, retryAfter := s.accountLimiter.allow(identity.UserID, time.Now()); !allowed {
+			s.writeRateLimit(w, r, "account", retryAfter)
+			return
+		}
 		next(w, r, identity)
 	})
 }
@@ -134,6 +150,41 @@ func (s *Server) requireMutation(next authenticatedHandler) http.Handler {
 		}
 		next(w, r, identity)
 	})
+}
+
+func (s *Server) rateLimitByIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowed, retryAfter := s.authIPLimiter.allow(clientIP(r), time.Now()); !allowed {
+			s.writeRateLimit(w, r, "ip", retryAfter)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remote := net.ParseIP(host)
+	if remote != nil && remote.IsLoopback() {
+		forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+		if net.ParseIP(forwarded) != nil {
+			return forwarded
+		}
+	}
+	return host
+}
+
+func (s *Server) writeRateLimit(w http.ResponseWriter, r *http.Request, scope string, retryAfter time.Duration) {
+	seconds := int64((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	s.logger.Warn("request rate limited", "scope", scope, "method", r.Method, "path", r.URL.Path)
+	writeAPIError(w, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
@@ -215,12 +266,14 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		duration := time.Since(started)
+		s.metrics.observe(r.Method, r.Pattern, recorder.status, duration)
 		s.logger.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.status,
 			"bytes", recorder.bytes,
-			"duration_ms", time.Since(started).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 		)
 	})
 }

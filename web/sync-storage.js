@@ -1327,6 +1327,7 @@
         const selectedTaskPendingStore = transaction.objectStore(SELECTED_TASK_PENDING_STORE);
         for (const id of input.queueIds.selectedTaskOperations || []) selectedTaskPendingStore.delete(id);
         metaStore.put({ key: "snapshot", value: input.snapshot });
+        if (input.settings) metaStore.put({ key: "settings", value: input.settings });
         const owner = results.timerOwner?.value || null;
         if ((input.dropTimerIds || []).includes(owner?.timerId)) metaStore.delete(TIMER_OWNER_KEY);
         else claimMissingTimerOwner(

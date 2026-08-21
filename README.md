@@ -60,7 +60,7 @@ device is offline remains local until that device reconnects.
 
 ## Requirements
 
-- Go 1.24 or newer
+- Go 1.25 or newer
 - A Google OAuth web client for browser sign-in
 - Optional native OAuth client IDs for Apple, Android, and Linux clients
 - A writable data directory for per-user SQLite databases
@@ -188,22 +188,78 @@ caddy validate --config /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
+Published archives include an SPDX software bill of materials, a checksum
+manifest, and GitHub build-provenance attestations. Verify both archive checks
+before installation:
+
+```sh
+gh release download vX.Y.Z --repo Pomodoro-Everywhere/pomodorough-server
+sha256sum --check SHA256SUMS
+gh attestation verify SHA256SUMS \
+  --repo Pomodoro-Everywhere/pomodorough-server
+gh attestation verify pomodorough-X.Y.Z-linux-amd64.tar.gz \
+  --repo Pomodoro-Everywhere/pomodorough-server
+```
+
+On macOS, use `shasum -a 256 -c SHA256SUMS` for the checksum step.
+
+The public privacy policy is published independently of the authenticated service at
+<https://pomodoro-everywhere.github.io/pomodorough-server/privacy/>. The same
+policy is served by the application at `/privacy` and `/privacy.html` after a
+server deployment. `scripts/check_privacy_policy.py` prevents the two copies
+from drifting.
+
 Runtime account databases live below `DATA_DIR/users`. Back them up with a
 SQLite-aware online backup process so WAL contents are included.
+
+Run an isolated restore drill against a live or copied account database without
+changing the source:
+
+```sh
+python3 scripts/restore_drill.py \
+  /var/lib/pomodorough/users/<user-id>.sqlite \
+  /var/lib/pomodorough/restore-drills/<user-id>-$(date +%Y%m%d).sqlite
+```
+
+The command refuses to overwrite a destination, uses SQLite's online backup
+API, and requires the restored copy to pass `PRAGMA integrity_check`. After
+verification, remove the isolated copy according to the deployment's backup
+handling policy. Operators must define and disclose a finite backup-retention
+period (30 days or less is recommended). Account deletion removes live storage
+immediately; a restore from an older backup must reapply deletions recorded
+after that backup rather than resurrect deleted accounts.
+
+Application-level abuse controls allow 30 authentication requests per source
+IP per minute, 240 authenticated requests per account per minute, and four
+concurrent revision streams per account. Rejections return `429` with
+`Retry-After`. `X-Forwarded-For` is trusted only when the direct peer is a
+loopback reverse proxy; an external peer cannot select its own limiter key.
+
+Request logs include method, route path, status, byte count, and latency but no
+query strings, account identifiers, task text, timer content, or credentials.
+Sync events add only aggregate operation counts, revision, and whether canonical
+state changed; account deletion emits an identifier-free audit event. Feed these
+structured records to the deployment's metrics system and alert on sustained
+5xx responses, sustained rate-limit events, restore-drill failures, or missing
+backup-success signals. Keep log retention finite and access-controlled.
+The bounded Prometheus endpoint, alert recommendations, backup procedure, and
+recovery checklist are documented in [`docs/operations.md`](docs/operations.md).
 
 ## API surface
 
 | Area | Endpoints |
 | --- | --- |
-| Operations | `GET /healthz`, `GET /openapi.yaml` |
+| Operations | `GET /healthz`, `GET /metrics`, `GET /openapi.yaml` |
 | Browser authentication | `GET /auth/google/start`, `GET /auth/google/callback` |
 | Native authentication | `POST /api/v1/auth/google/challenge`, `POST /api/v1/auth/google/exchange` |
 | Sessions | `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/revoke-device` |
-| Account | `GET /api/v1/me`, `GET /api/v1/history` |
+| Account | `GET /api/v1/me`, `GET /api/v1/history`, `DELETE /api/v1/account` |
 | Synchronization | `GET /api/v1/bootstrap`, `POST /api/v1/bootstrap/resolve`, `POST /api/v1/sync`, `GET /api/v1/stream` |
 
 See [`web/openapi.yaml`](web/openapi.yaml) for schemas, validation constraints,
-and response contracts.
+examples, and security requirements. Shared navigation, timer-state language,
+account-safety, completion guarantees, accessibility, and localization semantics
+are defined in [`docs/client-experience-contract.md`](docs/client-experience-contract.md).
 
 ## Pomodorough projects
 

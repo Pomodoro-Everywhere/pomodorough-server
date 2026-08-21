@@ -162,6 +162,27 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity p
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, identity principal) {
+	var request struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(w, r, 64<<10, &request); err != nil || request.Confirmation != "DELETE" {
+		writeAPIError(w, http.StatusBadRequest, "type DELETE to confirm account deletion")
+		return
+	}
+	if err := s.store.DeleteUser(r.Context(), identity.UserID); err != nil {
+		s.internalAPIError(w, "delete account", err)
+		return
+	}
+	s.hub.disconnect(identity.UserID)
+	s.logger.Info("account deleted")
+	if identity.Method == "cookie" {
+		clearSessionCookies(w)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, identity principal) {
 	var request struct {
 		DeviceID string `json:"deviceId"`
@@ -209,6 +230,15 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		s.internalAPIError(w, "sync account mutations", err)
 		return
 	}
+	s.logger.Info("sync applied",
+		"changed", result.Changed,
+		"revision", result.Revision,
+		"timer_commands", len(request.Commands),
+		"task_operations", len(request.TaskOperations),
+		"duration_operations", len(request.DurationOperations),
+		"auto_start_operations", len(request.AutoStartOperations),
+		"selected_task_operations", len(request.SelectedTaskOperations),
+	)
 	writeJSON(w, http.StatusOK, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, result.Revision)
@@ -300,6 +330,12 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity 
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity principal) {
+	release, allowed := s.streamLimiter.acquire(identity.UserID)
+	if !allowed {
+		s.writeRateLimit(w, r, "account_stream", 30*time.Second)
+		return
+	}
+	defer release()
 	updates, unsubscribe := s.hub.subscribe(identity.UserID)
 	defer unsubscribe()
 	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
@@ -342,7 +378,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 		select {
 		case <-r.Context().Done():
 			return
-		case revision := <-updates:
+		case revision, open := <-updates:
+			if !open {
+				return
+			}
 			if revision <= lastSent {
 				continue
 			}

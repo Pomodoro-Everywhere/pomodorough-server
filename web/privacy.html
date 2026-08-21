@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Pomodorough privacy policy">
+  <title>Privacy policy — Pomodorough</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/landing.css?v=2">
+</head>
+<body>
+  <main class="landing-shell">
+    <nav aria-label="Pomodorough">
+      <a href="/">Pomodorough</a>
+    </nav>
+    <article>
+      <p>Effective 21 August 2026</p>
+      <h1>Privacy policy</h1>
+      <p>Pomodorough is a local-first focus timer. This policy explains the data used when you sign in and synchronize devices.</p>
+
+      <h2>Data we process</h2>
+      <ul>
+        <li><strong>Google profile:</strong> stable Google account identifier, verified email address, display name, and profile-photo URL.</li>
+        <li><strong>Pomodorough data:</strong> timer commands and history, task titles and selection, duration and auto-start preferences, device identifiers, synchronization revisions, and conflict-resolution choices.</li>
+        <li><strong>Authentication data:</strong> hashed session/access/refresh tokens, session expiry, platform, CSRF state, and revocation status. Raw Google passwords are never received.</li>
+        <li><strong>Operations:</strong> request method, route, status, response size, latency, and server errors. Task titles and timer contents are not intentionally written to application logs. Hosting infrastructure may process IP addresses for delivery and abuse prevention.</li>
+        <li><strong>Peer synchronization:</strong> clients may store Iroh room tickets, endpoint identifiers, and room history locally. Peer traffic can use Iroh discovery or relay infrastructure; the Pomodorough account server does not store room membership.</li>
+      </ul>
+
+      <h2>Purpose and sharing</h2>
+      <p>Data is used only to authenticate you, synchronize your timers and settings, operate the service, prevent abuse, and diagnose failures. Pomodorough does not sell personal data or use it for advertising. Data is shared only with infrastructure needed to provide Google authentication, hosting, network delivery, and optional Iroh peer connectivity.</p>
+
+      <h2>Local storage and retention</h2>
+      <p>Clients keep account-bound data and pending changes locally so timers work offline. The server retains synchronized account data while the account exists. Sessions expire or remain until revoked. Operational logs and encrypted backups are retained according to the deployment operator's rotation policy and are not used as active account data.</p>
+
+      <h2>Deletion</h2>
+      <p>Use <strong>Delete account</strong> in an authenticated Pomodorough client to permanently remove the live server account, including profile, tokens, timer history, tasks, preferences, and server device records. Clients clear their local account-bound copy after the server confirms deletion. Deletion cannot be undone.</p>
+      <p>Encrypted backups may contain an older copy until they rotate out. A backup restoration must reapply recorded deletion obligations before the restored service is opened. Data held independently on an offline device or in a peer room must be removed from that device by its user.</p>
+
+      <h2>Your choices</h2>
+      <p>You can use local timer features without sending new changes while offline, sign out to remove the local session, revoke a device, or delete the account. You may also stop using Iroh peer synchronization and leave a room.</p>
+
+      <h2>Policy changes and contact</h2>
+      <p>Material changes will update the effective date on this page. Questions and deletion problems can be reported through the public Pomodorough repository issue tracker.</p>
+      <p><a href="https://github.com/Pomodoro-Everywhere/pomodorough-server/issues">Contact via GitHub Issues</a></p>
+    </article>
+  </main>
+</body>
+</html>

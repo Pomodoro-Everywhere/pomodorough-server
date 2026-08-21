@@ -15,6 +15,7 @@ func TestLandingAndAssetsArePublic(t *testing.T) {
 	writeFixtureWebFile(t, fixture, "platform-selector.js", "globalThis.selectorLoaded = true;")
 	writeFixtureWebFile(t, fixture, "landing.js", "globalThis.landingLoaded = true;")
 	writeFixtureWebFile(t, fixture, "icon.svg", `<svg xmlns="http://www.w3.org/2000/svg"/>`)
+	writeFixtureWebFile(t, fixture, "privacy.html", "<!doctype html><title>Privacy policy</title>")
 
 	tests := []struct {
 		name         string
@@ -29,6 +30,7 @@ func TestLandingAndAssetsArePublic(t *testing.T) {
 		{name: "selector", method: http.MethodGet, path: "/platform-selector.js?v=1", contentType: "text/javascript", cacheControl: "public, max-age=300"},
 		{name: "landing script", method: http.MethodGet, path: "/landing.js?v=1", contentType: "text/javascript", cacheControl: "public, max-age=300"},
 		{name: "icon", method: http.MethodGet, path: "/icon.svg", contentType: "image/svg+xml", cacheControl: "public, max-age=300"},
+		{name: "privacy", method: http.MethodGet, path: "/privacy", contentType: "text/html", cacheControl: "no-store"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

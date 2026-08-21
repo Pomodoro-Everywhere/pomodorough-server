@@ -5,6 +5,7 @@
   const DB_VERSION = 5;
   const syncCore = globalThis.PomodoroughSync;
   const syncStorage = globalThis.PomodoroughStorage;
+  const translations = globalThis.PomodoroughI18n;
   const META_STORE = "meta";
   const PENDING_STORE = "pending";
   const TASK_PENDING_STORE = "pendingTasks";
@@ -12,7 +13,7 @@
   const AUTO_START_PENDING_STORE = "pendingAutoStarts";
   const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";
   const TAB_ID = tabID();
-  const CACHE_PREFIX = "pomodorough-shell-";
+  const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const DIAL_RADIUS = 108;
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const RETRY_MAX_MS = 60000;
@@ -22,9 +23,9 @@
   const TIMER_OWNER_LEASE_MS = 60_000;
   const TIMER_OWNER_HEARTBEAT_MS = 15_000;
   const PHASES = {
-    focus: { label: "Focus", short: "F", defaultMinutes: 25 },
-    short_break: { label: "Short break", short: "SB", defaultMinutes: 5 },
-    long_break: { label: "Long break", short: "LB", defaultMinutes: 15 }
+    focus: { labelKey: "phase.focus", shortKey: "phase.focus.short", defaultMinutes: 25 },
+    short_break: { labelKey: "phase.shortBreak", shortKey: "phase.shortBreak.short", defaultMinutes: 5 },
+    long_break: { labelKey: "phase.longBreak", shortKey: "phase.longBreak.short", defaultMinutes: 15 }
   };
   const DEFAULT_DURATIONS_MS = {
     focus: 1_500_000,
@@ -52,6 +53,7 @@
     profile: document.querySelector("#profile"),
     profileAvatar: document.querySelector("#profileAvatar"),
     logoutButton: document.querySelector("#logoutButton"),
+    deleteAccountButton: document.querySelector("#deleteAccountButton"),
     conflictPanel: document.querySelector("#conflictPanel"),
     conflictReason: document.querySelector("#conflictReason"),
     conflictDismiss: document.querySelector("#conflictDismiss"),
@@ -122,6 +124,33 @@
   let bootstrapPromise = null;
   let elapsedMonotonicAnchor = null;
   let trustedClockRuntime = null;
+  let i18n = null;
+
+  function tr(key, values = {}, fallback = key) {
+    const translated = i18n?.t(key, values);
+    return translated && translated !== key ? translated : fallback;
+  }
+
+  function phaseLabel(phase) {
+    return tr(PHASES[phase].labelKey, {}, phase === "focus" ? "Focus" : phase === "short_break" ? "Short break" : "Long break");
+  }
+
+  function phaseShortLabel(phase) {
+    return tr(PHASES[phase].shortKey, {}, phase === "focus" ? "F" : phase === "short_break" ? "SB" : "LB");
+  }
+
+  function timerStatusLabel(status) {
+    const keys = {
+      idle: ["timer.status.idle", "Idle"],
+      running: ["timer.status.running", "Running"],
+      paused: ["timer.status.paused", "Paused"],
+      completed: ["timer.status.completed", "Completed"],
+      cancelled: ["timer.status.cancelled", "Cancelled"],
+      superseded: ["timer.status.superseded", "Superseded"]
+    };
+    const [key, fallback] = keys[status] || keys.idle;
+    return tr(key, {}, fallback);
+  }
 
   const state = {
     ready: false,
@@ -694,7 +723,7 @@
         resolve(request.result);
       };
       request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error("Timer storage is open in another outdated tab."));
+      request.onblocked = () => reject(new Error(tr("storage.outdatedTab", {}, "Timer storage is open in another outdated tab.")));
     });
   }
 
@@ -708,7 +737,7 @@
   function transactionDone(transaction) {
     return new Promise((resolve, reject) => {
       transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
+      transaction.onabort = () => reject(transaction.error || new Error(tr("storage.transactionAborted", {}, "Storage transaction aborted.")));
       transaction.onerror = () => reject(transaction.error);
     });
   }
@@ -943,7 +972,7 @@
       : activeTimer.plannedDurationMs;
     const observedElapsedMs = starting ? 0 : Math.round(elapsedFor(activeTimer, now));
 
-    if (!timerId) throw new Error("No timer is available for this action.");
+    if (!timerId) throw new Error(tr("timer.noTimer", {}, "No timer is available for this action."));
 
     const command = await syncStorage.allocateMutation(db, {
       storeName: PENDING_STORE,
@@ -1170,7 +1199,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Duration change could not be saved.");
+      showNotice(error.message || tr("notice.durationSaveFailed", {}, "Duration change could not be saved."));
       return false;
     } finally {
       actionLocked = false;
@@ -1196,7 +1225,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Auto-start preference could not be saved.");
+      showNotice(error.message || tr("notice.autoStartSaveFailed", {}, "Auto-start preference could not be saved."));
       renderDurations();
       return false;
     } finally {
@@ -1223,7 +1252,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Task choice could not be saved.");
+      showNotice(error.message || tr("notice.taskChoiceSaveFailed", {}, "Task choice could not be saved."));
       renderTaskSelector();
       return false;
     } finally {
@@ -1242,7 +1271,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Task change could not be saved.");
+      showNotice(error.message || tr("notice.taskSaveFailed", {}, "Task change could not be saved."));
       return false;
     } finally {
       actionLocked = false;
@@ -1251,15 +1280,15 @@
 
   async function addTask(title) {
     const normalized = normalizeTaskTitle(title);
-    if (!normalized) throw new Error("Enter a printable task name.");
+    if (!normalized) throw new Error(tr("notice.taskPrintable", {}, "Enter a printable task name."));
     if (new TextEncoder().encode(normalized).length > 512) {
-      throw new Error("Task name is too long.");
+      throw new Error(tr("notice.taskTooLong", {}, "Task name is too long."));
     }
     const id = await deterministicTaskId(normalized);
     const existing = state.tasks.find((task) => task.id === id);
     if (existing) {
       const selected = await issueSelectedTaskOperation(existing.id);
-      if (selected) showNotice("Task already exists and is now selected.");
+      if (selected) showNotice(tr("notice.taskExists", {}, "Task already exists and is now selected."));
       return true;
     }
     const saved = await issueTaskOperation("upsert", { id, title: normalized });
@@ -1283,7 +1312,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Timer action could not be saved.");
+      showNotice(error.message || tr("notice.timerSaveFailed", {}, "Timer action could not be saved."));
       return false;
     } finally {
       actionLocked = false;
@@ -1315,7 +1344,7 @@
       scheduleSync(0);
       return true;
     } catch (error) {
-      showNotice(error.message || "Timer action could not be saved.");
+      showNotice(error.message || tr("notice.timerSaveFailed", {}, "Timer action could not be saved."));
       return false;
     } finally {
       actionLocked = false;
@@ -1358,6 +1387,32 @@
           completedAt: referenceDate.toISOString()
         });
     return nextBreakPhase(projectedHistory, referenceDate);
+  }
+
+  function selectedPhaseAfterRejectedFinish(selectedPhase, finishCommand, history = state.history) {
+    if (finishCommand?.type !== "finish" || !PHASES[finishCommand.phase]) return selectedPhase;
+    const occurredAt = new Date(finishCommand.occurredAt);
+    const referenceDate = Number.isNaN(occurredAt.getTime()) ? new Date() : occurredAt;
+    const automaticallySelected = nextPhaseAfterCompletion({
+      id: finishCommand.timerId,
+      phase: finishCommand.phase
+    }, history, referenceDate);
+    return selectedPhase === automaticallySelected ? finishCommand.phase : selectedPhase;
+  }
+
+  function selectedPhaseAfterCommandAcknowledgements(selectedPhase, commands, acknowledgements, history = state.history) {
+    const rejectedIDs = new Set(
+      acknowledgements
+        .filter((acknowledgement) => String(acknowledgement.outcome || "").toLowerCase() === "rejected")
+        .map((acknowledgement) => acknowledgement.commandId)
+    );
+    const rejectedFinishes = commands
+      .filter((command) => command.type === "finish" && rejectedIDs.has(command.id))
+      .sort((left, right) => Number(right.deviceSequence || 0) - Number(left.deviceSequence || 0));
+    return rejectedFinishes.reduce(
+      (phase, command) => selectedPhaseAfterRejectedFinish(phase, command, history),
+      selectedPhase
+    );
   }
 
   async function finishTimer(automatic = false) {
@@ -1411,7 +1466,7 @@
       return true;
     } catch (error) {
       state.selectedPhase = previousPhase;
-      showNotice(error.message || "Timer action could not be saved.");
+      showNotice(error.message || tr("notice.timerSaveFailed", {}, "Timer action could not be saved."));
       return false;
     } finally {
       actionLocked = false;
@@ -1427,8 +1482,8 @@
   }
 
   function completionAlertTitle(timer) {
-    const phase = PHASES[timer?.phase] || PHASES.focus;
-    return `${phase.label} complete`;
+    const phase = PHASES[timer?.phase] ? timer.phase : "focus";
+    return tr("timer.complete", { phase: phaseLabel(phase) }, `${phaseLabel(phase)} complete`);
   }
 
   function showCompletionNotification() {
@@ -1562,7 +1617,7 @@
 
   async function reloadPersistedState(persisted = null) {
     const syncState = persisted || await syncStorage.readSyncState(db);
-    if (!syncState.snapshot) throw new Error("Canonical timer snapshot is unavailable.");
+    if (!syncState.snapshot) throw new Error(tr("sync.snapshotUnavailable", {}, "Canonical timer snapshot is unavailable."));
     const snapshot = syncState.snapshot;
     state.revision = Number(snapshot.revision) || 0;
     state.baseDurationsMs = normalizeDurationsMs(snapshot.durationsMs);
@@ -1637,6 +1692,12 @@
         autoStartAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected"),
         selectedTaskAcknowledgements.filter((acknowledgement) => acknowledgement.outcome === "rejected")
       );
+      const selectedPhaseAfterResponse = selectedPhaseAfterCommandAcknowledgements(
+        state.selectedPhase,
+        state.pending,
+        acknowledgements,
+        state.history
+      );
 
       const nextSnapshot = snapshotValue({
         revision,
@@ -1668,9 +1729,13 @@
           nowMs: Date.now(),
           leaseMs: TIMER_OWNER_LEASE_MS
         },
+        ...(selectedPhaseAfterResponse !== state.selectedPhase
+          ? { settings: settingsValue({ selectedPhase: selectedPhaseAfterResponse }) }
+          : {}),
         ...generatedBreaks
       });
       await reloadPersistedState();
+      if (outcome.applied) state.selectedPhase = selectedPhaseAfterResponse;
 
       if (outcome.applied && conflicts.length) {
         const conflict = conflicts[0];
@@ -1764,7 +1829,7 @@
           redirectToLogin();
           return;
         }
-        if (!response.ok) throw new Error(`Sync failed (${response.status}).`);
+        if (!response.ok) throw new Error(tr("sync.failed", { status: response.status }, `Sync failed (${response.status}).`));
 
         const payload = await response.json();
         await acceptSyncResponse(payload, sent, expectedUserId, timing);
@@ -1833,10 +1898,11 @@
     });
 
     if (response.status === 401) {
+      if (pendingLocalLogout()) clearPendingLogout();
       redirectToLogin();
       return null;
     }
-    if (!response.ok) throw new Error(`Session check failed (${response.status}).`);
+    if (!response.ok) throw new Error(tr("session.checkFailed", { status: response.status }, `Session check failed (${response.status}).`));
     return response.json();
   }
 
@@ -1853,6 +1919,16 @@
   async function loadSession() {
     const payload = await fetchSessionPayload();
     if (!payload) return false;
+    if (pendingLocalLogout()) {
+      if (!await requestSessionRevocation(payload.csrfToken || null)) {
+        throw new Error(tr("account.logout.revocationPending", {}, "Pending sign-out could not be revoked yet."));
+      }
+      clearPendingLogout();
+      closeRevisionStreamForIdentityChange();
+      await clearLocalData();
+      redirectToLogin();
+      return false;
+    }
     const previousOwnerId = state.user?.id || state.localOwnerId;
     if (previousOwnerId && payload.user?.id !== previousOwnerId) {
       closeRevisionStreamForIdentityChange(payload.user?.id);
@@ -1870,7 +1946,7 @@
 
   async function refreshMutationCsrf(expectedUserId) {
     const payload = await fetchSessionPayload();
-    if (!payload) throw new Error("Session refresh requires sign-in.");
+    if (!payload) throw new Error(tr("session.refreshRequiresSignIn", {}, "Session refresh requires sign-in."));
     if (!payload.user?.id || payload.user.id !== expectedUserId) {
       closeRevisionStreamForIdentityChange(payload.user?.id);
       quarantineOwnerState();
@@ -1879,7 +1955,7 @@
       applySessionPayload(payload);
       await restartBootstrapForCurrentAccount();
       render();
-      throw new Error("Signed-in account changed during mutation retry.");
+      throw new Error(tr("session.accountChanged", {}, "Signed-in account changed during mutation retry."));
     }
     applySessionPayload(payload);
     return state.csrfToken;
@@ -1951,7 +2027,7 @@
       redirectToLogin();
       return;
     }
-    if (!response.ok) throw new Error(`Bootstrap failed (${response.status}).`);
+    if (!response.ok) throw new Error(tr("bootstrap.failed", { status: response.status }, `Bootstrap failed (${response.status}).`));
     const payload = await response.json();
     syncCore.validateCanonicalResponse(payload, {
       commands: [],
@@ -2082,7 +2158,7 @@
         ? normalizeTimer(applied.baseTimer)
         : emptyTimer(state.selectedPhase, durationsMs[state.selectedPhase]);
       const revision = Number(applied.revision);
-      if (!Number.isFinite(revision) || revision < 0) throw new Error("Bootstrap response omitted revision.");
+      if (!Number.isFinite(revision) || revision < 0) throw new Error(tr("bootstrap.missingRevision", {}, "Bootstrap response omitted revision."));
       const clockOffset = responseClockOffset(payload, timing, true);
       const serverHlc = { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) };
       const hlc = mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter, clockOffset);
@@ -2208,7 +2284,7 @@
         state.bootstrapFocusTarget = elements.bootstrapRetry;
         return;
       }
-      if (!response.ok) throw new Error(`History resolution failed (${response.status}).`);
+      if (!response.ok) throw new Error(tr("bootstrap.resolutionFailed", { status: response.status }, `History resolution failed (${response.status}).`));
       await acceptBootstrapResponse(await response.json(), pending, timing);
     } catch (error) {
       if (!syncCore.pendingMatchesUser(state.bootstrapPending, state.user?.id)) {
@@ -2266,7 +2342,7 @@
       await persistBootstrapResolution(strategy);
     } catch (error) {
       if (handleResolutionLimit(error)) return;
-      showNotice(error.message || "History choice could not be saved.");
+      showNotice(error.message || tr("notice.historyChoiceFailed", {}, "History choice could not be saved."));
       state.bootstrapFocusTarget = elements.bootstrapConfirm;
       state.bootstrapSubmitting = false;
       renderBootstrapDialog();
@@ -2465,7 +2541,7 @@
   }
 
   function closeRevisionStreamForIdentityChange(nextUserId) {
-    if (state.user?.id && nextUserId && state.user.id !== nextUserId) closeRevisionStream();
+    if (!nextUserId || (state.user?.id && state.user.id !== nextUserId)) closeRevisionStream();
   }
 
   function closeRevisionStream() {
@@ -2528,6 +2604,90 @@
     renderSyncStatus();
   }
 
+  function accountDeletionConfirmationIsValid(value) {
+    return value === "DELETE";
+  }
+
+  function pendingLocalLogout() {
+    try {
+      return localStorage.getItem(PENDING_LOGOUT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function markPendingLogout() {
+    try {
+      localStorage.setItem(PENDING_LOGOUT_KEY, "1");
+    } catch {
+      // IndexedDB is still cleared below when durable marker storage is unavailable.
+    }
+  }
+
+  function clearPendingLogout() {
+    try {
+      localStorage.removeItem(PENDING_LOGOUT_KEY);
+    } catch {
+      // A successful server revocation makes a stale inaccessible marker harmless.
+    }
+  }
+
+  async function requestSessionRevocation(csrfToken) {
+    if (!csrfToken) return false;
+    const response = await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": csrfToken }
+    });
+    if (!response.ok && response.status !== 401) {
+      throw new Error(tr("account.logout.failed", { status: response.status }, `Sign out failed (${response.status}).`));
+    }
+    return true;
+  }
+
+  async function deleteAccount() {
+    const confirmation = window.prompt(
+      tr("account.delete.prompt", {}, "Delete your Pomodorough account, timer history, tasks, settings, sessions, and server device records permanently? Type DELETE to confirm.")
+    );
+    if (confirmation === null) return;
+    if (!accountDeletionConfirmationIsValid(confirmation)) {
+      showNotice(tr("account.delete.invalid", {}, "Account was not deleted. Type DELETE exactly to confirm."));
+      return;
+    }
+    if (!state.csrfToken) {
+      showNotice(tr("account.delete.offline", {}, "Connect to the account server before deleting your account."));
+      return;
+    }
+
+    elements.deleteAccountButton.disabled = true;
+    try {
+      const response = await fetch("/api/v1/account", {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": state.csrfToken
+        },
+        body: JSON.stringify({ confirmation })
+      });
+      if (!response.ok) throw new Error(tr("account.delete.httpFailed", { status: response.status }, `Account deletion failed (${response.status}).`));
+    } catch (error) {
+      elements.deleteAccountButton.disabled = false;
+      showNotice(error.message || tr("account.delete.failed", {}, "Account deletion failed. Your local data was kept."));
+      return;
+    }
+
+    markPendingLogout();
+    closeRevisionStreamForIdentityChange();
+    try {
+      await clearLocalData();
+      clearPendingLogout();
+    } catch (error) {
+      console.warn("Deleted account local-data cleanup will retry on next launch:", error);
+    }
+    redirectToLogin();
+  }
+
   async function logout() {
     try {
       await refreshAllPendingOperations();
@@ -2539,34 +2699,30 @@
       + state.pendingSelectedTaskOperations.length;
     if (pendingCount > 0) {
       const confirmed = window.confirm(
-        `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Signing out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
+        tr("account.logout.pending", { count: pendingCount }, `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Signing out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`)
       );
       if (!confirmed) return;
     }
 
-    if (!state.csrfToken) {
-      showNotice("Connect to the network before logging out.");
-      return;
-    }
-
     elements.logoutButton.disabled = true;
+    markPendingLogout();
+    let serverRevoked = false;
     try {
-      const response = await fetch("/api/v1/auth/logout", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "X-CSRF-Token": state.csrfToken }
-      });
-      if (!response.ok && response.status !== 401) {
-        throw new Error(`Sign out failed (${response.status}).`);
-      }
-
-      closeRevisionStream();
-      await clearLocalData();
-      redirectToLogin();
+      serverRevoked = await requestSessionRevocation(state.csrfToken);
     } catch (error) {
-      elements.logoutButton.disabled = false;
-      showNotice(error.message || "Sign out failed. Local timer data was kept.");
+      console.warn("Pomodorough server revocation deferred until reconnect:", error);
     }
+
+    closeRevisionStream();
+    let localDataCleared = false;
+    try {
+      await clearLocalData();
+      localDataCleared = true;
+    } catch (error) {
+      console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
+    }
+    if (serverRevoked && localDataCleared) clearPendingLogout();
+    redirectToLogin();
   }
 
   async function clearLocalData() {
@@ -2590,17 +2746,8 @@
       const request = indexedDB.deleteDatabase(DB_NAME);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
-      request.onblocked = () => resolve();
+      request.onblocked = () => reject(new Error(tr("storage.accountDataInUse", {}, "Another Pomodorough tab is still using local account data.")));
     });
-
-    if ("caches" in window) {
-      const cacheNames = await caches.keys();
-      await Promise.all(
-        cacheNames
-          .filter((cacheName) => cacheName.startsWith(CACHE_PREFIX))
-          .map((cacheName) => caches.delete(cacheName))
-      );
-    }
   }
 
   function render() {
@@ -2652,12 +2799,12 @@
     elements.taskSelector.replaceChildren();
     const noTask = document.createElement("option");
     noTask.value = "";
-    noTask.textContent = "No task";
+    noTask.textContent = tr("pattern.noTask", {}, "No task");
     elements.taskSelector.append(noTask);
     if (selectedTaskId && !selectedTaskAvailable) {
       const unavailable = document.createElement("option");
       unavailable.value = selectedTaskId;
-      unavailable.textContent = "Selected task unavailable";
+      unavailable.textContent = tr("pattern.taskUnavailable", {}, "Selected task unavailable");
       unavailable.disabled = true;
       elements.taskSelector.append(unavailable);
     }
@@ -2668,8 +2815,7 @@
       elements.taskSelector.append(option);
     }
     elements.taskSelector.value = selectedTaskId;
-    const active = ["running", "paused"].includes(state.timer.status);
-    elements.taskSelector.disabled = controlsBlocked() || active || state.selectedPhase !== "focus";
+    elements.taskSelector.disabled = controlsBlocked() || state.selectedPhase !== "focus";
   }
 
   function displayTimer() {
@@ -2695,35 +2841,39 @@
     elements.timerDisplay.dateTime = `PT${Math.floor(totalSeconds / 60)}M${seconds}S`;
     elements.timerDisplay.setAttribute(
       "aria-label",
-      `${minutes} minutes ${seconds} seconds remaining, ${phase.label}, ${status}`
+      tr("timer.remainingLabel", { minutes, seconds, phase: phaseLabel(timer.phase), status: timerStatusLabel(status) }, `${minutes} minutes ${seconds} seconds remaining, ${phaseLabel(timer.phase)}, ${timerStatusLabel(status)}`)
     );
-    elements.phaseLabel.textContent = phase.label.toUpperCase();
-    elements.timerDetail.textContent = `${status.toUpperCase()} / ${Math.round(timer.plannedDurationMs / 60000)} MIN`;
+    elements.phaseLabel.textContent = phaseLabel(timer.phase).toUpperCase();
+    elements.timerDetail.textContent = tr(
+      "timer.detail",
+      { status: timerStatusLabel(status).toUpperCase(), minutes: Math.round(timer.plannedDurationMs / 60000) },
+      `${timerStatusLabel(status).toUpperCase()} / ${Math.round(timer.plannedDurationMs / 60000)} MIN`
+    );
     const completedFocusCount = completedFocusCountForDay(state.history);
     const breakProgress = longBreakProgress(completedFocusCount);
     elements.longBreakProgress.textContent = `${"●".repeat(breakProgress)}${"○".repeat(4 - breakProgress)}`;
     elements.longBreakProgress.setAttribute(
       "aria-label",
-      `Pomodoro progress: ${breakProgress} of 4 today`
+      tr("timer.pomodoroProgress", { count: breakProgress, total: 4 }, `Pomodoro progress: ${breakProgress} of 4 today`)
     );
     elements.dial.dataset.status = status;
     elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE * (1 - progress));
 
     if (status === "running") {
-      elements.timerToggle.textContent = "Pause";
-      elements.timerInstruction.textContent = "Service underway. Continue here or on another device.";
+      elements.timerToggle.textContent = tr("timer.pause", {}, "Pause");
+      elements.timerInstruction.textContent = tr("timer.instruction.running", {}, "Service underway. Continue here or on another device.");
     } else if (status === "paused") {
-      elements.timerToggle.textContent = "Resume";
-      elements.timerInstruction.textContent = "Held at this stop. Resume when ready.";
+      elements.timerToggle.textContent = tr("timer.resume", {}, "Resume");
+      elements.timerInstruction.textContent = tr("timer.instruction.paused", {}, "Held at this stop. Resume when ready.");
     } else {
-      elements.timerToggle.textContent = `Start ${phase.label.toLowerCase()}`;
+      elements.timerToggle.textContent = tr("timer.start", { phase: phaseLabel(timer.phase).toLowerCase() }, `Start ${phaseLabel(timer.phase).toLowerCase()}`);
       elements.timerInstruction.textContent = status === "completed"
-        ? "Run complete. Stop the sound or start another."
+        ? tr("timer.instruction.completed", {}, "Run complete. Stop the sound or start another.")
         : status === "cancelled"
-          ? "Run cancelled. Clear it or start again."
+          ? tr("timer.instruction.cancelled", {}, "Run cancelled. Clear it or start again.")
           : status === "superseded"
-            ? "Another device is carrying this timer."
-            : "Choose a pattern, then start the clock.";
+            ? tr("timer.instruction.superseded", {}, "Another device is carrying this timer.")
+            : tr("timer.instruction.idle", {}, "Choose a pattern, then start the clock.");
     }
 
     const blocked = controlsBlocked();
@@ -2747,23 +2897,23 @@
   }
 
   function renderHistory() {
-    const completed = state.history.filter((item) => !item.status || item.status === "completed");
-    elements.historyCount.textContent = String(completed.length).padStart(3, "0");
+    const arrivals = arrivalHistoryItems(state.history);
+    elements.historyCount.textContent = String(arrivals.length).padStart(3, "0");
     elements.historyList.replaceChildren();
 
-    if (completed.length === 0) {
+    if (arrivals.length === 0) {
       const empty = document.createElement("li");
       empty.className = "history-empty";
       const title = document.createElement("strong");
-      title.textContent = "No arrivals yet";
+      title.textContent = tr("history.empty", {}, "No arrivals yet");
       const detail = document.createElement("span");
-      detail.textContent = "Your first run appears here.";
+      detail.textContent = tr("history.empty.detail", {}, "Your first run appears here.");
       empty.append(title, detail);
       elements.historyList.append(empty);
       return;
     }
 
-    const sorted = [...completed].sort((a, b) => historyDateMs(b) - historyDateMs(a));
+    const sorted = [...arrivals].sort((a, b) => historyDateMs(b) - historyDateMs(a));
     for (const item of sorted) {
       const phaseKey = PHASES[item.phase] ? item.phase : "focus";
       const phase = PHASES[phaseKey];
@@ -2777,23 +2927,24 @@
 
       const stamp = document.createElement("span");
       stamp.className = "history-stamp";
-      stamp.textContent = phase.short;
+      stamp.textContent = phaseShortLabel(phaseKey);
       stamp.setAttribute("aria-hidden", "true");
 
       const phaseName = document.createElement("span");
       phaseName.className = "history-phase";
-      phaseName.textContent = phase.label;
-      const task = state.tasks.find((candidate) => candidate.id === item.taskId);
-      if (task) {
-        const taskName = document.createElement("small");
-        taskName.className = "history-task";
-        taskName.textContent = task.title;
-        phaseName.append(taskName);
-      }
+      phaseName.textContent = phaseLabel(phaseKey);
+      const taskName = document.createElement("small");
+      taskName.className = "history-task";
+      taskName.textContent = historyTaskContext(item, state.tasks);
+      phaseName.append(taskName);
+      const statusName = document.createElement("small");
+      statusName.className = "history-status";
+      statusName.textContent = tr("history.statusSeparator", { status: historyStatusLabel(item) }, ` / ${historyStatusLabel(item)}`);
+      phaseName.append(statusName);
       if (item.pending) {
         const pending = document.createElement("small");
         pending.className = "history-pending";
-        pending.textContent = " / queued";
+        pending.textContent = tr("history.queued", {}, " / queued");
         phaseName.append(pending);
       }
 
@@ -2804,11 +2955,27 @@
 
       const duration = document.createElement("span");
       duration.className = "history-duration";
-      duration.textContent = `${Math.max(1, Math.round(durationMs / 60000))} min`;
+      duration.textContent = tr("history.minutes", { count: Math.max(1, Math.round(durationMs / 60000)) }, `${Math.max(1, Math.round(durationMs / 60000))} min`);
 
       listItem.append(stamp, phaseName, date, duration);
       elements.historyList.append(listItem);
     }
+  }
+
+  function arrivalHistoryItems(history) {
+    const terminalStatuses = new Set(["completed", "cancelled", "superseded"]);
+    return history.filter((item) => !item.status || terminalStatuses.has(item.status));
+  }
+
+  function historyTaskContext(item, tasks) {
+    if (!item.taskId) return tr("history.unassigned", {}, "Unassigned");
+    return tasks.find((candidate) => candidate.id === item.taskId)?.title || tr("history.deletedTask", {}, "Deleted task");
+  }
+
+  function historyStatusLabel(item) {
+    if (!item.status || item.status === "completed") return tr("history.completed", {}, "Completed");
+    if (item.status === "cancelled") return tr("history.cancelled", {}, "Cancelled");
+    return tr("history.superseded", {}, "Superseded");
   }
 
   function renderTasks() {
@@ -2822,9 +2989,9 @@
       const empty = document.createElement("p");
       empty.className = "task-empty";
       const title = document.createElement("strong");
-      title.textContent = "No tasks yet";
+      title.textContent = tr("tasks.empty", {}, "No tasks yet");
       const detail = document.createElement("span");
-      detail.textContent = "Add a task, then assign it before starting focus.";
+      detail.textContent = tr("tasks.empty.detail", {}, "Add a task, then assign it before starting focus.");
       empty.append(title, detail);
       elements.taskList.append(empty);
       return;
@@ -2843,18 +3010,18 @@
       const count = document.createElement("span");
       count.className = "task-stat";
       count.textContent = String(summary.count);
-      count.setAttribute("aria-label", `${summary.count} finished pomodoros today`);
+      count.setAttribute("aria-label", tr("tasks.finishedToday", { count: summary.count }, `${summary.count} finished pomodoros today`));
 
       const duration = document.createElement("span");
       duration.className = "task-stat";
       duration.textContent = formatTaskDuration(summary.durationMs);
-      duration.setAttribute("aria-label", `${formatTaskDuration(summary.durationMs)} spent today`);
+      duration.setAttribute("aria-label", tr("tasks.spentToday", { duration: formatTaskDuration(summary.durationMs) }, `${formatTaskDuration(summary.durationMs)} spent today`));
 
       const remove = document.createElement("button");
       remove.className = "task-delete";
       remove.type = "button";
-      remove.textContent = "Delete";
-      remove.setAttribute("aria-label", `Delete ${task.title}`);
+      remove.textContent = tr("action.delete", {}, "Delete");
+      remove.setAttribute("aria-label", tr("tasks.deleteNamed", { title: task.title }, `Delete ${task.title}`));
       remove.disabled = blocked;
       remove.addEventListener("click", () => deleteTask(task));
 
@@ -2888,9 +3055,9 @@
     const totalMinutes = Math.round(Math.max(0, durationMs) / 60000);
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
-    if (!hours) return `${minutes} min`;
-    if (!minutes) return `${hours} hr`;
-    return `${hours} hr ${minutes} min`;
+    if (!hours) return tr("duration.minutesShort", { count: minutes }, `${minutes} min`);
+    if (!minutes) return tr("duration.hoursShort", { count: hours }, `${hours} hr`);
+    return tr("duration.hoursMinutesShort", { hours, minutes }, `${hours} hr ${minutes} min`);
   }
 
   function historyDateMs(item) {
@@ -2901,7 +3068,7 @@
 
   function formatHistoryDate(value) {
     const date = new Date(value);
-    if (!value || Number.isNaN(date.getTime())) return "Time not recorded";
+    if (!value || Number.isNaN(date.getTime())) return tr("history.timeNotRecorded", {}, "Time not recorded");
     return new Intl.DateTimeFormat(undefined, {
       month: "short",
       day: "numeric",
@@ -2919,7 +3086,7 @@
     elements.profile.hidden = false;
     if (state.user.avatarUrl) {
       elements.profileAvatar.src = state.user.avatarUrl;
-      elements.profileAvatar.alt = "Account profile photo";
+      elements.profileAvatar.alt = tr("account.profilePhoto", {}, "Account profile photo");
       elements.profileAvatar.hidden = false;
     } else {
       elements.profileAvatar.removeAttribute("src");
@@ -2932,35 +3099,37 @@
       + state.pendingDurationOperations.length + state.pendingAutoStartOperations.length
       + state.pendingSelectedTaskOperations.length;
     let syncState = "synced";
-    let label = "In sync";
+    let label = tr("sync.inSync", {}, "In sync");
 
     if (!navigator.onLine) {
       syncState = "offline";
-      label = count ? `Offline / ${count} queued` : "Offline / local";
+      label = count ? tr("sync.offlineQueued", { count }, `Offline / ${count} queued`) : tr("sync.offlineLocal", {}, "Offline / local");
     } else if (state.bootstrapSubmitting) {
       syncState = "syncing";
-      label = "Resolving history";
+      label = tr("sync.resolvingHistory", {}, "Resolving history");
     } else if (state.bootstrapError || state.bootstrapLimitError) {
       syncState = "error";
-      label = "History choice needed";
+      label = tr("sync.historyChoiceNeeded", {}, "History choice needed");
     } else if (state.bootstrapBlocked) {
       syncState = "loading";
-      label = state.bootstrapPlan?.mode === "choose" ? "Choose history" : "Checking history";
+      label = state.bootstrapPlan?.mode === "choose"
+        ? tr("sync.chooseHistory", {}, "Choose history")
+        : tr("sync.checkingHistory", {}, "Checking history");
     } else if (state.conflict) {
       syncState = "conflict";
-      label = count ? `Conflict / ${count} queued` : "Conflict";
+      label = count ? tr("sync.conflictQueued", { count }, `Conflict / ${count} queued`) : tr("sync.conflict", {}, "Conflict");
     } else if (state.syncing) {
       syncState = "syncing";
-      label = "Syncing";
+      label = tr("sync.syncing", {}, "Syncing");
     } else if (state.retrying) {
       syncState = "error";
-      label = count ? `Retrying / ${count} queued` : "Retrying sync";
+      label = count ? tr("sync.retryingQueued", { count }, `Retrying / ${count} queued`) : tr("sync.retrying", {}, "Retrying sync");
     } else if (count) {
       syncState = "loading";
-      label = `${count} waiting to sync`;
+      label = tr("sync.waiting", { count }, `${count} waiting to sync`);
     } else if (!state.ready) {
       syncState = "loading";
-      label = "Checking line";
+      label = tr("sync.checking", {}, "Checking line");
     }
 
     elements.syncStatus.dataset.state = syncState;
@@ -3080,7 +3249,7 @@
         renderDurations();
         renderTaskSelector();
         renderTimer();
-        persistSettings().catch(() => showNotice("Phase choice could not be saved."));
+        persistSettings().catch(() => showNotice(tr("notice.phaseSaveFailed", {}, "Phase choice could not be saved.")));
       });
     }
 
@@ -3119,7 +3288,7 @@
       try {
         if (await addTask(value)) elements.taskInput.value = "";
       } catch (error) {
-        showNotice(error.message || "Task could not be added.");
+        showNotice(error.message || tr("notice.taskAddFailed", {}, "Task could not be added."));
       }
     });
 
@@ -3138,6 +3307,14 @@
       else renderTimer();
     });
     elements.logoutButton.addEventListener("click", logout);
+    elements.deleteAccountButton.addEventListener("click", deleteAccount);
+    window.addEventListener("storage", (event) => {
+      if (event.key !== PENDING_LOGOUT_KEY || event.newValue !== "1") return;
+      closeRevisionStreamForIdentityChange();
+      clearLocalData()
+        .catch((error) => console.warn("Cross-tab sign-out cleanup was incomplete:", error))
+        .finally(redirectToLogin);
+    });
     elements.conflictDismiss.addEventListener("click", () => {
       state.conflict = null;
       renderConflict();
@@ -3219,10 +3396,27 @@
   }
 
   async function initialize() {
+    if (translations?.loadBrowserI18n) {
+      try {
+        i18n = await translations.loadBrowserI18n();
+      } catch (error) {
+        console.warn("Pomodorough localization unavailable; using embedded English:", error);
+      }
+    }
     createDialTicks();
     setupEvents();
     render();
     registerServiceWorker();
+
+    if (pendingLocalLogout()) {
+      try {
+        await clearLocalData();
+      } catch (error) {
+        showNotice(tr("account.logout.cleanupFailed", { error: error.message }, `Signed-out local data could not be cleared: ${error.message}`));
+        renderSyncStatus();
+        return;
+      }
+    }
 
     try {
       await loadLocalState();
@@ -3230,7 +3424,7 @@
       elements.deviceMark.textContent = state.deviceId.slice(-4).toUpperCase();
       render();
     } catch (error) {
-      showNotice(`Durable timer storage unavailable: ${error.message}`);
+      showNotice(tr("storage.unavailable", { error: error.message }, `Durable timer storage unavailable: ${error.message}`));
       renderSyncStatus();
       return;
     }

@@ -15,6 +15,11 @@ function loadTaskProjection() {
     "  initialize();",
     `  globalThis.PomodoroughAppTest = {
     state,
+    phaseLabel,
+    timerStatusLabel,
+    formatTaskDuration,
+    formatHistoryDate,
+    setI18nForTest(value) { i18n = value; },
     emptyTimer,
     displayTimer,
     elapsedFor,
@@ -38,6 +43,11 @@ function loadTaskProjection() {
     longBreakProgress,
     nextBreakPhase,
     nextPhaseAfterCompletion,
+    selectedPhaseAfterRejectedFinish,
+    selectedPhaseAfterCommandAcknowledgements,
+    arrivalHistoryItems,
+    historyTaskContext,
+    historyStatusLabel,
     releaseCompletionRetry,
     scheduleCompletionRetry,
     setCompletionQueuedForTest(value) { completionQueuedFor = value; },
@@ -52,6 +62,14 @@ function loadTaskProjection() {
     completionSoundIntervalMs: COMPLETION_SOUND_INTERVAL_MS,
     completionAlertTimerIDTest() { return completionAlertTimerID; },
     completionAlertDismissedTimerIDTest() { return completionAlertDismissedTimerID; },
+    accountDeletionConfirmationIsValid,
+    pendingLocalLogout,
+    markPendingLogout,
+    clearPendingLogout,
+    requestSessionRevocation,
+    fetchSessionPayload,
+    loadSession,
+    setFetchForTest(value) { globalThis.fetch = value; },
     setRevisionStreamForTest(value) { eventSource = value; },
     hasRevisionStreamForTest() { return Boolean(eventSource); }
   };`
@@ -93,8 +111,15 @@ function loadTaskProjection() {
       }
     },
     console,
+    fetch: async () => ({ ok: true, status: 204 }),
     crypto: { randomUUID: () => "test-tab-id" },
     sessionStorage: { getItem: () => null, setItem: () => {} },
+    localStorage: {
+      values: new Map(),
+      getItem(key) { return this.values.has(key) ? this.values.get(key) : null; },
+      setItem(key, value) { this.values.set(key, String(value)); },
+      removeItem(key) { this.values.delete(key); }
+    },
     document: {
       querySelector: (selector) => testElements[selector] || null,
       querySelectorAll: () => [],
@@ -144,6 +169,7 @@ function loadTaskProjection() {
       }
     },
     window: {
+      location: { href: "", assign(value) { this.href = value; } },
       clearInterval(id) {
         clearedIntervals.push(id);
       },
@@ -188,6 +214,9 @@ function loadTaskProjection() {
     },
     taskSelectorOptions() {
       return taskSelector.options.map(({ value, textContent, disabled }) => ({ value, textContent, disabled: disabled === true }));
+    },
+    taskSelectorDisabled() {
+      return taskSelector.disabled;
     }
   };
 }
@@ -310,6 +339,28 @@ test("task deletion hides independent selection and task reappearance restores i
   assert.equal(state.selectedTaskId, "selected-task");
 });
 
+test("paused focus keeps active assignment while next-task selector remains editable", () => {
+  const app = loadTaskProjection();
+  app.state.ready = true;
+  app.state.bootstrapBlocked = false;
+  app.state.selectedPhase = "focus";
+  app.state.tasks = [{ id: "next-task", title: "Next task" }];
+  app.state.selectedTaskId = "next-task";
+  app.state.timer = {
+    id: "active-timer",
+    status: "paused",
+    phase: "focus",
+    taskId: "active-task",
+    plannedDurationMs: 1_500_000,
+    elapsedAtAnchorMs: 60_000
+  };
+
+  app.renderTaskSelector();
+
+  assert.equal(app.taskSelectorDisabled(), false);
+  assert.equal(app.state.timer.taskId, "active-task");
+});
+
 test("No task selection persists nullable operation and schedules sync without changing timer", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
@@ -401,6 +452,16 @@ test("changed session identity closes old revision stream before replacement", (
   app.closeRevisionStreamForIdentityChange("user-new");
 
   assert.equal(closeCount, 1);
+  assert.equal(app.hasRevisionStreamForTest(), false);
+});
+
+test("explicit identity teardown closes the current revision stream", () => {
+  const app = loadTaskProjection();
+  let closed = false;
+  app.state.user = { id: "account-a" };
+  app.setRevisionStreamForTest({ close() { closed = true; } });
+  app.closeRevisionStreamForIdentityChange();
+  assert.equal(closed, true);
   assert.equal(app.hasRevisionStreamForTest(), false);
 });
 
@@ -566,6 +627,44 @@ test("completed timers display the selected next phase at its full duration", ()
   assert.equal(displayed.phase, "focus");
   assert.equal(displayed.status, "idle");
   assert.equal(displayed.plannedDurationMs, 25 * 60_000);
+});
+
+test("rejected Finish rolls back only its own automatic phase selection", () => {
+  const app = loadTaskProjection();
+  const focusFinish = {
+    id: "finish-focus",
+    timerId: "focus-1",
+    type: "finish",
+    phase: "focus",
+    occurredAt: "2026-07-22T04:00:00Z"
+  };
+  assert.equal(app.selectedPhaseAfterRejectedFinish("short_break", focusFinish, []), "focus");
+  assert.equal(app.selectedPhaseAfterRejectedFinish("long_break", focusFinish, []), "long_break");
+  const fourthFocusHistory = Array.from({ length: 4 }, (_, index) => ({
+    timerId: index === 3 ? "focus-1" : `earlier-${index}`,
+    phase: "focus",
+    status: "completed",
+    completedAt: `2026-07-22T0${index + 1}:00:00Z`
+  }));
+  assert.equal(
+    app.selectedPhaseAfterRejectedFinish("long_break", focusFinish, fourthFocusHistory),
+    "focus"
+  );
+
+  const breakFinish = { id: "finish-break", timerId: "break-1", type: "finish", phase: "short_break" };
+  assert.equal(app.selectedPhaseAfterRejectedFinish("focus", breakFinish, []), "short_break");
+  assert.equal(
+    app.selectedPhaseAfterCommandAcknowledgements("short_break", [focusFinish], [
+      { commandId: focusFinish.id, outcome: "rejected" }
+    ], []),
+    "focus"
+  );
+  assert.equal(
+    app.selectedPhaseAfterCommandAcknowledgements("short_break", [focusFinish], [
+      { commandId: focusFinish.id, outcome: "accepted" }
+    ], []),
+    "short_break"
+  );
 });
 
 test("automatic not-owner completion retries at lease expiry without render-loop polling", () => {
@@ -910,6 +1009,94 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
     );
     assert.equal(app.state.autoStartBreaks, scenario.expected.autoStartBreaks, scenario.name);
   }
+});
+
+test("account deletion does not broadcast local sign-out before server confirmation", () => {
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const body = source.slice(source.indexOf("  async function deleteAccount()"), source.indexOf("  async function logout()"));
+  assert.ok(body.indexOf("if (!response.ok)") < body.indexOf("markPendingLogout()"));
+});
+
+test("account deletion requires the exact destructive phrase", () => {
+  const app = loadTaskProjection();
+  assert.equal(app.accountDeletionConfirmationIsValid("DELETE"), true);
+  for (const value of ["", "delete", "DELETE ", " DELETE", null, undefined]) {
+    assert.equal(app.accountDeletionConfirmationIsValid(value), false, String(value));
+  }
+});
+
+test("offline logout marker is durable and explicitly cleared after revocation", () => {
+  const app = loadTaskProjection();
+  assert.equal(app.pendingLocalLogout(), false);
+  app.markPendingLogout();
+  assert.equal(app.pendingLocalLogout(), true);
+  app.clearPendingLogout();
+  assert.equal(app.pendingLocalLogout(), false);
+});
+
+test("session revocation defers without CSRF and accepts a successful server revoke", async () => {
+  const app = loadTaskProjection();
+  assert.equal(await app.requestSessionRevocation(null), false);
+  assert.equal(await app.requestSessionRevocation("csrf"), true);
+});
+
+test("unauthorized session check retires a pending local logout marker", async () => {
+  const app = loadTaskProjection();
+  app.markPendingLogout();
+  app.setFetchForTest(async () => ({ status: 401, ok: false }));
+  assert.equal(await app.fetchSessionPayload(), null);
+  assert.equal(app.pendingLocalLogout(), false);
+});
+
+test("deferred offline logout never reactivates the old session while revocation retries", async () => {
+  const app = loadTaskProjection();
+  app.markPendingLogout();
+  app.setFetchForTest(async (url) => {
+    if (url === "/api/v1/me") {
+      return {
+        status: 200,
+        ok: true,
+        async json() { return { user: { id: "old-account" }, csrfToken: "csrf" }; }
+      };
+    }
+    return { status: 503, ok: false };
+  });
+
+  await assert.rejects(app.loadSession(), /Sign out failed/);
+  assert.equal(app.state.authenticated, false);
+  assert.equal(app.state.user, null);
+  assert.equal(app.state.csrfToken, null);
+  assert.equal(app.pendingLocalLogout(), true);
+});
+
+test("dynamic timer, duration, and missing-time presentation routes through localization", () => {
+  const app = loadTaskProjection();
+  app.setI18nForTest({
+    t(key, values = {}) { return `${key}:${JSON.stringify(values)}`; }
+  });
+  assert.match(app.timerStatusLabel("cancelled"), /^timer\.status\.cancelled:/);
+  assert.match(app.formatTaskDuration(90 * 60 * 1000), /^duration\.hoursMinutesShort:/);
+  assert.match(app.formatHistoryDate(null), /^history\.timeNotRecorded:/);
+});
+
+test("arrivals retain terminal states and announce task context honestly", () => {
+  const app = loadTaskProjection();
+  const arrivals = app.arrivalHistoryItems([
+    { id: "legacy" },
+    { id: "completed", status: "completed" },
+    { id: "cancelled", status: "cancelled" },
+    { id: "superseded", status: "superseded" },
+    { id: "running", status: "running" }
+  ]);
+  assert.deepEqual(arrivals.map((item) => item.id), ["legacy", "completed", "cancelled", "superseded"]);
+
+  const tasks = [{ id: "task-1", title: "Ship release" }];
+  assert.equal(app.historyTaskContext({ taskId: "task-1" }, tasks), "Ship release");
+  assert.equal(app.historyTaskContext({ taskId: "deleted" }, tasks), "Deleted task");
+  assert.equal(app.historyTaskContext({}, tasks), "Unassigned");
+  assert.equal(app.historyStatusLabel({}), "Completed");
+  assert.equal(app.historyStatusLabel({ status: "cancelled" }), "Cancelled");
+  assert.equal(app.historyStatusLabel({ status: "superseded" }), "Superseded");
 });
 
 function permutations(values) {

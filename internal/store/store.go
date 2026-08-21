@@ -101,6 +101,28 @@ func (s *Store) OpenExistingUser(ctx context.Context, userID string) (*sql.DB, e
 	return openDatabase(ctx, path)
 }
 
+// DeleteUser permanently removes an account database and its SQLite sidecars.
+// The per-user lock prevents concurrent mutation handlers from reopening the
+// account between path validation and deletion. Callers must close their own
+// database handle before invoking this method.
+func (s *Store) DeleteUser(ctx context.Context, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := s.userPath(userID)
+	if err != nil {
+		return err
+	}
+	unlock := s.LockUser(userID)
+	defer unlock()
+	for _, candidate := range []string{path + "-wal", path + "-shm", path} {
+		if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("delete user data %s: %w", filepath.Base(candidate), err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) LockUser(userID string) func() {
 	s.locksMu.Lock()
 	lock := s.locks[userID]

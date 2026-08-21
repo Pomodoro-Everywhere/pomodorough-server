@@ -55,3 +55,13 @@ func (h *revisionHub) publish(userID string, revision int64) {
 		}
 	}
 }
+
+func (h *revisionHub) disconnect(userID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, channel := range h.subscribers[userID] {
+		close(channel)
+	}
+	delete(h.subscribers, userID)
+	delete(h.latest, userID)
+}

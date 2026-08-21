@@ -1,0 +1,32 @@
+name: Scheduled restore drill
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-restore-drill
+  cancel-in-progress: false
+
+jobs:
+  restore-drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Exercise SQLite backup and restore
+        run: |
+          set -euo pipefail
+          source_db="$(mktemp)"
+          restore_dir="$(mktemp -d)"
+          restored_db="$restore_dir/restored.sqlite3"
+          python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE probe(value TEXT NOT NULL)"); db.execute("INSERT INTO probe VALUES (?)", ("restore-ready",)); db.commit(); db.close()' "$source_db"
+          python3 scripts/restore_drill.py "$source_db" "$restored_db"
+          test "$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM probe").fetchone()[0])' "$restored_db")" = "restore-ready"

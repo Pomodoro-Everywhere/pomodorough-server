@@ -83,7 +83,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	base := filepath.Base(relative)
 	switch {
-	case relative == "index.html" || relative == "app.html":
+	case relative == "index.html" || relative == "app.html" || relative == "privacy.html":
 		w.Header().Set("Cache-Control", "no-store")
 	case base == "sw.js" || base == "manifest.webmanifest":
 		w.Header().Set("Cache-Control", "no-cache")
@@ -107,6 +107,8 @@ func publicWebFile(requestPath string) (string, bool) {
 		return "landing.js", true
 	case "/icon.svg":
 		return "icon.svg", true
+	case "/privacy", "/privacy.html":
+		return "privacy.html", true
 	default:
 		return "", false
 	}

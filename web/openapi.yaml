@@ -70,6 +70,24 @@ paths:
               example:
                 status: ok
 
+  /metrics:
+    get:
+      tags: [System]
+      operationId: getMetrics
+      summary: Export bounded service request metrics
+      description: |
+        Prometheus text exposition with route-template, method, status, request
+        count, and latency aggregates. Labels never contain account identifiers,
+        task content, query strings, or arbitrary URL paths.
+      security: []
+      responses:
+        "200":
+          description: Current process-local request metrics.
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /auth/google/start:
     get:
       tags: [Web authentication]
@@ -99,6 +117,8 @@ paths:
               schema:
                 type: string
                 format: uri
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/PlainInternalServerError"
         "503":
@@ -137,6 +157,8 @@ paths:
           $ref: "#/components/responses/PlainInvalidAuthState"
         "401":
           $ref: "#/components/responses/PlainAuthenticationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/PlainInternalServerError"
         "502":
@@ -161,6 +183,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NativeChallengeResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -193,6 +217,8 @@ paths:
           $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -230,6 +256,8 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error: invalid refresh token
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -254,6 +282,8 @@ paths:
                 $ref: "#/components/schemas/MeResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -278,6 +308,46 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/account:
+    delete:
+      tags: [Account]
+      operationId: deleteAccount
+      summary: Permanently delete the authenticated account
+      description: |
+        Permanently removes the account database, including profile, sessions,
+        tokens, timers, history, tasks, and preferences. The
+        literal confirmation `DELETE` is required. Web clients must also supply
+        the conditional CSRF headers. Deletion is immediate in live storage;
+        encrypted infrastructure backups may retain deleted data until their
+        documented rotation period expires.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAccountRequest"
+      responses:
+        "204":
+          description: Account and all active session data were deleted.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -310,6 +380,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -343,6 +415,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -428,6 +502,8 @@ paths:
                 requestIDConflict:
                   value:
                     error: request ID conflict
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -515,6 +591,8 @@ paths:
                 deviceMismatch:
                   value:
                     error: device mismatch
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -544,6 +622,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -584,6 +664,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -624,6 +706,20 @@ components:
         type: string
 
   responses:
+    RateLimited:
+      description: Request rate or concurrent stream limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds until the client should retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: rate limit exceeded
     InvalidRequest:
       description: Request body is malformed or violates its schema.
       content:
@@ -813,6 +909,16 @@ components:
         csrfToken:
           type: string
           description: Web CSRF token, or an empty string for bearer authentication.
+
+    DeleteAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          enum: [DELETE]
+          description: Exact destructive confirmation phrase.
 
     RevokeDeviceRequest:
       type: object

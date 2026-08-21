@@ -1,18 +1,69 @@
 # Production Readiness and Cross-Client Backlog
 
 Audit date: 2026-08-20
+Implementation status reconciled: 2026-08-21
 
 Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synchronization service. Priorities reflect release/user-data risk rather than implementation size.
 
 ## Readiness snapshot
 
-| Component | Current assessment | Main release blockers |
+| Component | Current assessment | Remaining release qualification |
 | --- | --- | --- |
-| Apple iOS/macOS | Feature-complete beta | GitHub artifacts are deliberately unsigned/non-notarized; no App Store/TestFlight delivery, privacy policy, or account deletion flow |
-| Android | Feature-complete beta, not Play-update-ready after 2026-08-31 | `targetSdk` 34, incomplete selected-task sync, completed-timer display/phase mismatch, device tests are not enforced by hosted release CI |
-| Desktop | Strong beta | Windows artifact is unsigned; completion alerts require the process to remain alive; accessibility/install smoke coverage is uneven by platform |
-| Web/PWA | Strong beta | Timer completion cannot alert after the browser/PWA is terminated; no account deletion flow; browser production/E2E coverage is limited |
-| Go service | Near-production | No account-erasure API, no visible abuse/rate limiting, and backup/restore plus observability are documented or minimal rather than continuously verified |
+| Apple iOS/macOS | Practical unsigned `0.3.0` release candidate | Developer signing, TestFlight, Developer ID signing, and notarization are excluded by request; tagged CI and downloaded-artifact verification remain |
+| Android | API-36-targeting unsigned `0.3.0` release candidate | Production-keystore signing is excluded; the hosted API 35/36 instrumentation matrix and published unsigned artifacts require a real tagged run |
+| Desktop | Practical unsigned `0.3.0` release candidate | Windows signing is excluded; tagged multi-platform builds, fresh downloads, and installed-entry-point smoke remain |
+| Web/PWA | Release candidate with account deletion, localization, offline reconciliation, and conservative alert disclosure | Browser/PWA termination cannot guarantee an alert; deployed-server access is externally blocked, while the public Pages policy is staged for publication |
+| Go service | Release candidate with erasure, bounded abuse controls, metrics, alerts, and scheduled restore drills | Production SSH deployment is externally blocked; tagged archives/SBOMs/attestations and the published Pages policy require release verification |
+
+## Resolution matrix
+
+`Complete` means the practical repository work and local verification are complete. `Release validation` means implementation exists but can only be proven by the tagged hosted workflow. Signing-related exclusions are deliberate and are not represented as completed.
+
+| Item | Status | Resolution |
+| --- | --- | --- |
+| P0.1 | Complete, signing excluded | API 36 compile/target, behavior audit, tests, docs, and API 35/36 CI matrix are implemented; production signing is excluded. |
+| P0.2 | Complete | Canonical versus projected timer state and every completion route are covered. |
+| P0.3 | Complete | Android REST/Room/Iroh selected-task convergence and schema 12 migration are covered. |
+| P0.4 | Excluded by request | Apple distribution signing, TestFlight, Developer ID signing, and notarization require unavailable credentials. |
+| P0.5 | Release validation | Deletion flows and conservative policy copies are implemented; Pages publication/fetch follows the branch push. |
+| P0.6 | Complete | Apple account switching is explicit, generation-safe, and non-destructive by default. |
+| P0.7 | Complete | Destructive sign-out warnings include exact pending counts and safe cancellation. |
+| P0.8 | Complete | Apple Iroh leave requires confirmation and preserves/restores the documented state. |
+| P1.1 | Hosted-CI validation | Release depends on API 35/36 and 1.0×/2.0× instrumentation jobs with retained reports. |
+| P1.2 | Complete | Desktop information architecture and terminology are documented and aligned while retaining native conventions. |
+| P1.3 | Complete | Mobile Account → Network discovery and primary-route UI contracts are aligned and tested. |
+| P1.4 | Complete | Android notification rationale, denial recovery, settings route, and exact-alarm fallback disclosure are implemented. |
+| P1.5 | Complete with platform limitation | Overdue restoration and honest in-product guarantees are covered; Desktop/Web cannot promise alerts after process/browser termination. |
+| P1.6 | Complete | Versioned byte-identical canonical fixtures and shipping-codec tests cover REST/Iroh domains and omission/null compatibility. |
+| P1.7 | Complete with deployment limitation | Bounded per-IP/per-account limits, SSE caps, trusted-proxy handling, `Retry-After`, and privacy-safe audit events are tested; the limiter is process-local. |
+| P1.8 | Complete except signing | SBOMs, checksums, immutable action pins, exact asset sets, and provenance attestations are implemented; Authenticode/checksum signing is excluded. |
+| P1.9 | Release validation | Workflows perform clean builds, fresh downloads, exact-set/checksum/attestation checks, and supported install smoke; a real `0.3.0` run remains. |
+| P1.10 | Complete | Arrivals filtering, totals, resolved/deleted/unassigned task context, and accessible summaries are aligned. |
+| P1.11 | Complete | Desktop timer ownership prevents observer auto-finish/auto-start mutations. |
+| P1.12 | Complete | Desktop Iroh completion advances phase independently of auto-start with ordering protection. |
+| P1.13 | Complete | Local sign-out is offline-capable, retires active sync ownership, and is account-generation-safe. |
+| P1.14 | Complete | Android validates drafts without clearing rejected input and reports inline localized errors. |
+| P1.15 | Complete | Adaptive layouts, target sizes, font-scale matrix, and semantics are covered. |
+| P1.16 | Complete | Desktop requires canonical selected-task fields and valid SSE status/media type with bounded reconnect. |
+| P2.1 | Complete | Shared state/control terminology distinguishes Clear, Dismiss, and Stop sound. |
+| P2.2 | Complete | VoiceOver/TalkBack, keyboard, focus order, RTL/pseudo, and large-text gates are present where locally practical. |
+| P2.3 | Complete | Apple, Android, Desktop, and Web use validated English plus RTL pseudolocalization resources with plural/placeholder checks. |
+| P2.4 | Partial; authentic drill externally blocked | Bounded request/error/latency metrics, alerts, backup-success monitoring guidance, and a scheduled synthetic restore regression are present. A periodic drill against an authentic encrypted production backup requires backup access unavailable to this environment. |
+| P2.5 | Complete | Documentation links, versions, public policy URL, protocol fixtures, and workflow pins are CI-validated. |
+| P2.6 | Complete | Finish phase provenance reconciles rejected/ignored completion without overwriting later selection. |
+| P2.7 | Complete | Completion-affecting edits use documented next-timer semantics while active timer snapshots remain immutable. |
+| P2.8 | Complete | Paused focus retains its captured task while next-focus selection remains explicitly editable. |
+| P2.9 | Complete | Android exposes accessible completed-focus and per-task/unassigned summaries. |
+| P2.10 | Complete | First-room Iroh activation is disabled or guided into Create/Join consistently. |
+
+### Explicit remaining exclusions and external blockers
+
+- Apple signing/TestFlight/Developer ID/notarization, Windows Authenticode, Android production-keystore signing, and signed checksum manifests are excluded by the user's current constraint.
+- Production service deployment cannot be performed because both configured SSH targets reject the available credentials.
+- A real restore drill cannot select/decrypt an authentic production backup because this environment has no backup-store access; the scheduled synthetic drill only protects restore tooling/schema mechanics.
+- Android instrumentation cannot run locally because no device/emulator was connected; the hosted matrix is the required proof.
+- Local SBOM/reproducible GNU-tar checks are unavailable because `syft`, Docker, and `gtar` are absent; pinned hosted workflows perform these gates.
+- Account erasure removes the live per-user store and active sessions; it does not claim immediate deletion from backups, retained peer/Iroh logs, or external infrastructure.
 
 ## P0 — release and correctness blockers
 

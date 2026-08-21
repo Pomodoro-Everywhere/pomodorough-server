@@ -1,18 +1,22 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v32";
+const CACHE_NAME = "pomodorough-shell-v39";
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
   "/index.html",
+  "/privacy",
   "/landing.css?v=2",
   "/platform-selector.js?v=1",
   "/landing.js?v=1",
   "/app",
-  "/app.css?v=18",
+  "/app.css?v=20",
   "/sync-core.js?v=25",
-  "/sync-storage.js?v=25",
-  "/app.js?v=26",
+  "/sync-storage.js?v=26",
+  "/i18n.js?v=2",
+  "/locales/en.json?v=2",
+  "/locales/ar-XB.json?v=2",
+  "/app.js?v=31",
   "/manifest.webmanifest",
   "/icon.svg"
 ];
