@@ -212,6 +212,7 @@ func TestServerCIRebuildsPinnedCoreArtifact(t *testing.T) {
 	for _, required := range []string{
 		"repository: Pomodoro-Everywhere/pomodorough-core",
 		"ref: " + commit,
+		"cd shared-core",
 		"cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked",
 		"cmp internal/sharedcore/pomodorough_core.wasm",
 		"cmp web/pomodorough_core.wasm",

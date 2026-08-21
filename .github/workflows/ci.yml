@@ -32,7 +32,10 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add wasm32-unknown-unknown --toolchain 1.97.1
-          cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked --manifest-path shared-core/Cargo.toml
+          (
+            cd shared-core
+            cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked
+          )
           cmp internal/sharedcore/pomodorough_core.wasm shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
           cmp web/pomodorough_core.wasm shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
           test "$(cat internal/sharedcore/CORE_COMMIT)" = "a78a312314dd9466557c3dbdd12184b698c3d156"
