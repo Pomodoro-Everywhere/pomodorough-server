@@ -9,17 +9,22 @@ const { SharedCore } = require("./shared-core.js");
 function fakeCore(envelope, options = {}) {
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
   let nextPointer = 1024;
+  let allocationCalls = 0;
   let freeCalls = 0;
   const exports = {
     memory,
     pomodorough_alloc(length) {
-      if (options.badAllocation) return memory.buffer.byteLength + 1;
+      allocationCalls += 1;
+      if (options.badAllocation || options.badAllocationAt === allocationCalls) {
+        return memory.buffer.byteLength + 1;
+      }
       const pointer = nextPointer;
       nextPointer += length + 8;
       return pointer;
     },
-    pomodorough_free() {
+    pomodorough_free(pointer) {
       freeCalls += 1;
+      if (options.freeError) throw new Error(options.freeError(pointer));
       if (options.freeThrows) throw new Error("synthetic free trap");
     },
     pomodorough_dispatch() {
@@ -48,6 +53,15 @@ test("browser host rejects malformed envelopes and task identities", () => {
     value: { id: "not-a-uuid", title: "Café", utf8Bytes: 4 }
   });
   assert.throws(() => core.call("task.identity.v1", { title: "Café" }), /task identity/i);
+
+  const { core: wrongVersionCore } = fakeCore({
+    ok: true,
+    value: { id: "00000000-0000-0000-0000-000000000000", title: "Café", utf8Bytes: 5 }
+  });
+  assert.throws(
+    () => wrongVersionCore.call("task.identity.v1", { title: "Café" }),
+    /task identity/i
+  );
 });
 
 test("browser host invalidates an instance after cleanup failure", () => {
@@ -78,6 +92,29 @@ test("browser host preserves malformed envelope error when cleanup also fails", 
     (error) => /malformed/i.test(error.message) && error.cleanupErrors?.length === 3
   );
   assert.throws(() => core.call("core.version", {}), /unusable/i);
+});
+
+test("browser host preserves allocation and earlier-buffer cleanup failures", () => {
+  const { core } = fakeCore(
+    { ok: true, value: {} },
+    {
+      badAllocationAt: 2,
+      freeError(pointer) {
+        return pointer > 65536 ? "failed-allocation free trap" : "operation free trap";
+      }
+    }
+  );
+  assert.throws(
+    () => core.call("core.version", {}),
+    (error) => {
+      assert.match(error.message, /outside/);
+      assert.deepEqual(
+        error.cleanupErrors.map((cleanup) => cleanup.message),
+        ["failed-allocation free trap", "operation free trap"]
+      );
+      return true;
+    }
+  );
 });
 
 async function loadCore() {

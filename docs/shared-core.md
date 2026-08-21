@@ -41,7 +41,7 @@ internal/sharedcore/CORE_COMMIT
 internal/sharedcore/pomodorough_core.wasm.sha256
 ```
 
-CI checks out the commit from `CORE_COMMIT`, builds the module with the pinned Rust toolchain, checks its SHA-256 digest, and compares both the embedded and browser artifacts byte for byte with the clean build. The browser loader and service-worker shell use the artifact digest in the URL so ordinary HTTP caches cannot retain an older module.
+CI checks out the commit from `CORE_COMMIT`, builds the module with the pinned Rust toolchain, and validates the rebuilt module's portable contract: bounded 32-bit memory and the required ABI exports. It separately verifies the committed release artifact's SHA-256 digest and requires the embedded and browser copies to be byte-identical. A rebuild is not compared byte-for-byte across runner operating systems because Rust's host-side compilation can produce different but contract-equivalent `wasm32-unknown-unknown` code ordering. The browser loader and service-worker shell use the committed artifact digest in the URL so ordinary HTTP caches cannot retain an older module.
 
 ## Verification
 

@@ -214,8 +214,8 @@ func TestServerCIRebuildsPinnedCoreArtifact(t *testing.T) {
 		"ref: " + commit,
 		"cd shared-core",
 		"cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked",
-		"cmp internal/sharedcore/pomodorough_core.wasm",
-		"cmp web/pomodorough_core.wasm",
+		"shared-core/scripts/verify_wasm_artifact.py",
+		"cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("server CI does not verify embedded shared core: missing %q", required)
@@ -228,7 +228,7 @@ func TestEmbeddedCoreArtifactHasPinnedProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(commit)); got != "a78a312314dd9466557c3dbdd12184b698c3d156" {
+	if got := strings.TrimSpace(string(commit)); got != "9a01dc8da0f1612e7a301c19cf42f3b522e61684" {
 		t.Fatalf("embedded core commit = %q", got)
 	}
 	checksum, err := os.ReadFile("pomodorough_core.wasm.sha256")

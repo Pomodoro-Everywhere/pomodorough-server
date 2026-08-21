@@ -98,7 +98,10 @@
       if (cleanupErrors.length) {
         this.unusableCause = cleanupErrors[0];
         if (primary) {
-          primary.cleanupErrors = cleanupErrors;
+          const earlierCleanupErrors = Array.isArray(primary.cleanupErrors)
+            ? primary.cleanupErrors
+            : [];
+          primary.cleanupErrors = [...earlierCleanupErrors, ...cleanupErrors];
           throw primary;
         }
         const cleanupFailure = new Error("Shared core cleanup failed", {
@@ -132,10 +135,10 @@
     }
 
     #validateTaskIdentity(value) {
-      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+      const uuidV8 = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
       if (!value || typeof value !== "object" || Array.isArray(value) ||
           Object.keys(value).sort().join(",") !== "id,title,utf8Bytes" ||
-          typeof value.id !== "string" || !uuid.test(value.id) ||
+          typeof value.id !== "string" || !uuidV8.test(value.id) ||
           typeof value.title !== "string" || !value.title ||
           !Number.isSafeInteger(value.utf8Bytes) || value.utf8Bytes < 1 ||
           value.utf8Bytes !== encoder.encode(value.title).length) {
