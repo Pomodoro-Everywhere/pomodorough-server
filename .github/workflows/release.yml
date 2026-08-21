@@ -157,7 +157,8 @@ jobs:
           test -x "$extract/$package/pomodorough"
           test -f "$extract/$package/web/index.html"
           test -f "$extract/$package/web/privacy.html"
-          test -f "$extract/$package/deploy/Caddyfile"
+          test -f "$extract/$package/deploy/pomodorough.service"
+          test -f "$extract/$package/deploy/pomodorough.env.example"
           test -x "$extract/$package/scripts/restore_drill.py"
           binary_kind="$(file -b "$extract/$package/pomodorough")"
           case "$GOOS/$GOARCH" in
