@@ -23,7 +23,7 @@ The existing Go reducers remain as differential oracles. The Rust output is auth
 The host enforces these limits:
 
 - 256-byte operation names;
-- 64 MiB JSON inputs and outputs;
+- 16 MiB JSON inputs and outputs;
 - 256 MiB linear memory per instance, enforced both by the module's declared maximum and the wazero host;
 - four concurrent module instances.
 

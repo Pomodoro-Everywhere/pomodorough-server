@@ -9,10 +9,121 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestABICleanupCoversMalformedResultsAndPreservesFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    uint64
+		readOK    bool
+		freeFails bool
+		wantError []string
+		wantFreed []ownedBuffer
+	}{
+		{
+			name:      "oversized result",
+			result:    uint64(maxOutputBytes+1)<<32 | 300,
+			readOK:    true,
+			wantError: []string{"output is too large"},
+			wantFreed: []ownedBuffer{{300, maxOutputBytes + 1}, {200, 2}, {100, 1}},
+		},
+		{
+			name:      "out of range result and cleanup failure",
+			result:    uint64(5)<<32 | 300,
+			readOK:    false,
+			freeFails: true,
+			wantError: []string{"outside linear memory", "free shared-core buffer"},
+			wantFreed: []ownedBuffer{{300, 5}, {200, 2}, {100, 1}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			allocated := []uint64{100, 200}
+			var freed []ownedBuffer
+			abi := abiCalls{
+				allocate: func(context.Context, uint64) ([]uint64, error) {
+					pointer := allocated[0]
+					allocated = allocated[1:]
+					return []uint64{pointer}, nil
+				},
+				free: func(_ context.Context, pointer, length uint64) ([]uint64, error) {
+					freed = append(freed, ownedBuffer{uint32(pointer), uint32(length)})
+					if test.freeFails {
+						return nil, errors.New("free trap")
+					}
+					return nil, nil
+				},
+				dispatch: func(context.Context, uint64, uint64, uint64, uint64) ([]uint64, error) {
+					return []uint64{test.result}, nil
+				},
+				read:  func(uint32, uint32) ([]byte, bool) { return []byte(`{}`), test.readOK },
+				write: func(uint32, []byte) bool { return true },
+			}
+			_, err := callABI(context.Background(), abi, "v", []byte(`{}`))
+			if err == nil {
+				t.Fatal("malformed ABI result was accepted")
+			}
+			for _, fragment := range test.wantError {
+				if !strings.Contains(err.Error(), fragment) {
+					t.Fatalf("error %q does not contain %q", err, fragment)
+				}
+			}
+			if !slices.Equal(freed, test.wantFreed) {
+				t.Fatalf("freed = %#v, want %#v", freed, test.wantFreed)
+			}
+		})
+	}
+}
+
+func TestDispatchTrapReleasesInputsAndPreservesCleanupFailures(t *testing.T) {
+	allocated := []uint64{100, 200}
+	var freed []ownedBuffer
+	abi := abiCalls{
+		allocate: func(context.Context, uint64) ([]uint64, error) {
+			pointer := allocated[0]
+			allocated = allocated[1:]
+			return []uint64{pointer}, nil
+		},
+		free: func(_ context.Context, pointer, length uint64) ([]uint64, error) {
+			freed = append(freed, ownedBuffer{uint32(pointer), uint32(length)})
+			return nil, errors.New("free trap")
+		},
+		dispatch: func(context.Context, uint64, uint64, uint64, uint64) ([]uint64, error) {
+			return nil, errors.New("dispatch trap")
+		},
+		write: func(uint32, []byte) bool { return true },
+	}
+	_, err := callABI(context.Background(), abi, "v", []byte(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "dispatch trap") || !strings.Contains(err.Error(), "free shared-core buffer") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Equal(freed, []ownedBuffer{{200, 2}, {100, 1}}) {
+		t.Fatalf("freed = %#v", freed)
+	}
+}
+
+func TestAllocationWriteFailureReleasesAllocationAndPreservesCleanupFailure(t *testing.T) {
+	var freed []ownedBuffer
+	abi := abiCalls{
+		allocate: func(context.Context, uint64) ([]uint64, error) { return []uint64{77}, nil },
+		free: func(_ context.Context, pointer, length uint64) ([]uint64, error) {
+			freed = append(freed, ownedBuffer{uint32(pointer), uint32(length)})
+			return nil, errors.New("free trap")
+		},
+		write: func(uint32, []byte) bool { return false },
+	}
+	_, err := allocateAndWrite(context.Background(), abi, []byte("abc"))
+	if err == nil || !strings.Contains(err.Error(), "outside linear memory") || !strings.Contains(err.Error(), "free failed allocation") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Equal(freed, []ownedBuffer{{77, 3}}) {
+		t.Fatalf("freed = %#v", freed)
+	}
+}
 
 func TestDefaultCoreIsProcessSingleton(t *testing.T) {
 	first, err := Default(context.Background())

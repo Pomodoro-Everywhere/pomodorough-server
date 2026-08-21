@@ -17,8 +17,8 @@ var wasm []byte
 
 const (
 	maxOperationBytes      = 256
-	maxInputBytes          = 64 << 20
-	maxOutputBytes         = 64 << 20
+	maxInputBytes          = 16 << 20
+	maxOutputBytes         = 16 << 20
 	maxMemoryPages         = 4096 // 256 MiB per isolated invocation.
 	maxConcurrentInstances = 4
 )
@@ -138,7 +138,7 @@ func (c *Core) Call(ctx context.Context, operation string, input []byte) ([]byte
 	return results[0], nil
 }
 
-func (c *Core) CallBatch(ctx context.Context, calls []Call) ([][]byte, error) {
+func (c *Core) CallBatch(ctx context.Context, calls []Call) (results [][]byte, err error) {
 	if len(calls) == 0 {
 		return nil, errors.New("shared core call batch must not be empty")
 	}
@@ -169,8 +169,13 @@ func (c *Core) CallBatch(ctx context.Context, calls []Call) ([][]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("instantiate shared core: %w", err)
 	}
-	defer module.Close(context.Background())
-	results := make([][]byte, 0, len(calls))
+	defer func() {
+		if closeErr := module.Close(context.Background()); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close shared-core module: %w", closeErr))
+			results = nil
+		}
+	}()
+	results = make([][]byte, 0, len(calls))
 	for _, call := range calls {
 		result, err := callModule(ctx, module, call.Operation, call.Input)
 		if err != nil {
@@ -181,68 +186,120 @@ func (c *Core) CallBatch(ctx context.Context, calls []Call) ([][]byte, error) {
 	return results, nil
 }
 
+type abiCalls struct {
+	allocate func(context.Context, uint64) ([]uint64, error)
+	free     func(context.Context, uint64, uint64) ([]uint64, error)
+	dispatch func(context.Context, uint64, uint64, uint64, uint64) ([]uint64, error)
+	read     func(uint32, uint32) ([]byte, bool)
+	write    func(uint32, []byte) bool
+}
+
+type ownedBuffer struct {
+	pointer uint32
+	length  uint32
+}
+
 func callModule(ctx context.Context, module api.Module, operation string, input []byte) ([]byte, error) {
 	alloc := module.ExportedFunction("pomodorough_alloc")
 	free := module.ExportedFunction("pomodorough_free")
 	dispatch := module.ExportedFunction("pomodorough_dispatch")
-	if alloc == nil || free == nil || dispatch == nil {
+	memory := module.Memory()
+	if alloc == nil || free == nil || dispatch == nil || memory == nil {
 		return nil, errors.New("shared core ABI exports are incomplete")
 	}
+	return callABI(ctx, abiCalls{
+		allocate: func(ctx context.Context, length uint64) ([]uint64, error) {
+			return alloc.Call(ctx, length)
+		},
+		free: func(ctx context.Context, pointer, length uint64) ([]uint64, error) {
+			return free.Call(ctx, pointer, length)
+		},
+		dispatch: func(ctx context.Context, operationPointer, operationLength, inputPointer, inputLength uint64) ([]uint64, error) {
+			return dispatch.Call(ctx, operationPointer, operationLength, inputPointer, inputLength)
+		},
+		read:  memory.Read,
+		write: memory.Write,
+	}, operation, input)
+}
 
-	operationPointer, err := allocateAndWrite(ctx, module, alloc, []byte(operation))
-	if err != nil {
-		return nil, err
-	}
-	defer free.Call(context.Background(), uint64(operationPointer), uint64(len(operation)))
-	inputPointer, err := allocateAndWrite(ctx, module, alloc, input)
-	if err != nil {
-		return nil, err
-	}
-	defer free.Call(context.Background(), uint64(inputPointer), uint64(len(input)))
+func callABI(ctx context.Context, abi abiCalls, operation string, input []byte) (result []byte, err error) {
+	owned := make([]ownedBuffer, 0, 3)
+	defer func() {
+		var cleanupErr error
+		for index := len(owned) - 1; index >= 0; index-- {
+			buffer := owned[index]
+			if buffer.pointer == 0 || buffer.length == 0 {
+				continue
+			}
+			if _, freeErr := abi.free(context.Background(), uint64(buffer.pointer), uint64(buffer.length)); freeErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("free shared-core buffer %d/%d: %w", buffer.pointer, buffer.length, freeErr))
+			}
+		}
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			result = nil
+		}
+	}()
 
-	values, err := dispatch.Call(
+	operationPointer, allocateErr := allocateAndWrite(ctx, abi, []byte(operation))
+	if allocateErr != nil {
+		return nil, allocateErr
+	}
+	owned = append(owned, ownedBuffer{operationPointer, uint32(len(operation))})
+	inputPointer, allocateErr := allocateAndWrite(ctx, abi, input)
+	if allocateErr != nil {
+		return nil, allocateErr
+	}
+	owned = append(owned, ownedBuffer{inputPointer, uint32(len(input))})
+
+	values, dispatchErr := abi.dispatch(
 		ctx,
 		uint64(operationPointer), uint64(len(operation)),
 		uint64(inputPointer), uint64(len(input)),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("dispatch shared core operation %q: %w", operation, err)
+	if dispatchErr != nil {
+		return nil, fmt.Errorf("dispatch shared core operation %q: %w", operation, dispatchErr)
 	}
 	if len(values) != 1 {
 		return nil, fmt.Errorf("shared core returned %d values, want 1", len(values))
 	}
 	resultPointer := uint32(values[0])
 	resultLength := uint32(values[0] >> 32)
+	if resultPointer != 0 && resultLength != 0 {
+		owned = append(owned, ownedBuffer{resultPointer, resultLength})
+	}
+	if resultPointer == 0 || resultLength == 0 {
+		return nil, errors.New("shared core returned an empty result buffer")
+	}
 	if resultLength > maxOutputBytes {
 		return nil, errors.New("shared core output is too large")
 	}
-	result, ok := module.Memory().Read(resultPointer, resultLength)
+	view, ok := abi.read(resultPointer, resultLength)
 	if !ok {
 		return nil, errors.New("shared core result is outside linear memory")
 	}
-	copyOfResult := append([]byte(nil), result...)
-	if _, err := free.Call(context.Background(), uint64(resultPointer), uint64(resultLength)); err != nil {
-		return nil, fmt.Errorf("free shared core result: %w", err)
-	}
-	return copyOfResult, nil
+	return append([]byte(nil), view...), nil
 }
 
-func allocateAndWrite(
-	ctx context.Context,
-	module api.Module,
-	alloc api.Function,
-	value []byte,
-) (uint32, error) {
-	values, err := alloc.Call(ctx, uint64(len(value)))
+func allocateAndWrite(ctx context.Context, abi abiCalls, value []byte) (pointer uint32, err error) {
+	values, err := abi.allocate(ctx, uint64(len(value)))
 	if err != nil {
 		return 0, fmt.Errorf("allocate shared core buffer: %w", err)
 	}
 	if len(values) != 1 {
 		return 0, fmt.Errorf("shared core allocator returned %d values, want 1", len(values))
 	}
-	pointer := uint32(values[0])
-	if len(value) > 0 && !module.Memory().Write(pointer, value) {
-		return 0, errors.New("shared core input is outside linear memory")
+	pointer = uint32(values[0])
+	if len(value) > 0 && pointer == 0 {
+		return 0, errors.New("shared core allocator returned a null pointer")
+	}
+	if len(value) > 0 && !abi.write(pointer, value) {
+		_, cleanupErr := abi.free(context.Background(), uint64(pointer), uint64(len(value)))
+		writeErr := errors.New("shared core input is outside linear memory")
+		if cleanupErr != nil {
+			return 0, errors.Join(writeErr, fmt.Errorf("free failed allocation %d/%d: %w", pointer, len(value), cleanupErr))
+		}
+		return 0, writeErr
 	}
 	return pointer, nil
 }

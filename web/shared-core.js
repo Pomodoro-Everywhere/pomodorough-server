@@ -10,13 +10,14 @@
   const CORE_SHA256 = "89fb6300324042b61d62070242cccad10e30f125885bb1b7a05af67b077bac83";
   const CORE_URL = `/pomodorough_core.wasm?sha256=${CORE_SHA256}`;
   const MAX_OPERATION_BYTES = 256;
-  const MAX_INPUT_BYTES = 64 * 1024 * 1024;
+  const MAX_INPUT_BYTES = 16 * 1024 * 1024;
   const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
   const MAX_MEMORY_BYTES = 256 * 1024 * 1024;
 
   class SharedCore {
     constructor(instance) {
       this.instance = instance;
+      this.unusableCause = null;
       const exports = instance.exports;
       for (const name of [
         "memory",
@@ -43,6 +44,11 @@
     }
 
     call(operation, input) {
+      if (this.unusableCause) {
+        throw new Error("Shared core instance is unusable after cleanup failure", {
+          cause: this.unusableCause
+        });
+      }
       if (typeof operation !== "string" || !operation) {
         throw new TypeError("Shared core operation must be a non-empty string");
       }
@@ -57,14 +63,15 @@
         throw new RangeError("Shared core input is empty or too large");
       }
 
-      let operationPointer = 0;
-      let inputPointer = 0;
-      let resultPointer = 0;
-      let resultLength = 0;
+      const ownedBuffers = [];
+      let value;
+      let primary = null;
       try {
         this.#checkMemory();
-        operationPointer = this.#allocateAndWrite(operationBytes);
-        inputPointer = this.#allocateAndWrite(inputBytes);
+        const operationPointer = this.#allocateAndWrite(operationBytes);
+        ownedBuffers.push([operationPointer, operationBytes.length]);
+        const inputPointer = this.#allocateAndWrite(inputBytes);
+        ownedBuffers.push([inputPointer, inputBytes.length]);
         const packed = this.instance.exports.pomodorough_dispatch(
           operationPointer,
           operationBytes.length,
@@ -72,37 +79,67 @@
           inputBytes.length
         );
         const packedResult = BigInt.asUintN(64, packed);
-        resultPointer = Number(packedResult & 0xffff_ffffn);
-        resultLength = Number(packedResult >> 32n);
+        const resultPointer = Number(packedResult & 0xffff_ffffn);
+        const resultLength = Number(packedResult >> 32n);
+        if (resultPointer && resultLength) ownedBuffers.push([resultPointer, resultLength]);
         if (!resultPointer || !resultLength) throw new Error("Shared core returned an empty result buffer");
         if (resultLength > MAX_OUTPUT_BYTES) throw new Error("Shared core result is too large");
         this.#requireRange(resultPointer, resultLength, "dispatch result");
         const resultBytes = new Uint8Array(
           new Uint8Array(this.instance.exports.memory.buffer, resultPointer, resultLength)
         );
-        const ownedBuffers = [
-          [resultPointer, resultLength],
-          [inputPointer, inputBytes.length],
-          [operationPointer, operationBytes.length]
-        ];
-        resultPointer = inputPointer = operationPointer = 0;
-        this.#releaseAll(ownedBuffers);
         const envelope = JSON.parse(decoder.decode(resultBytes));
-        if (!envelope || envelope.ok !== true || !("value" in envelope)) {
-          throw new Error(envelope?.error || "Shared core returned an invalid envelope");
+        value = this.#parseEnvelope(operation, envelope);
+      } catch (error) {
+        primary = error instanceof Error ? error : new Error(String(error));
+      }
+
+      const cleanupErrors = this.#releaseAll(ownedBuffers.reverse());
+      if (cleanupErrors.length) {
+        this.unusableCause = cleanupErrors[0];
+        if (primary) {
+          primary.cleanupErrors = cleanupErrors;
+          throw primary;
         }
+        const cleanupFailure = new Error("Shared core cleanup failed", {
+          cause: cleanupErrors[0]
+        });
+        cleanupFailure.cleanupErrors = cleanupErrors;
+        throw cleanupFailure;
+      }
+      if (primary) throw primary;
+      return value;
+    }
+
+    #parseEnvelope(operation, envelope) {
+      if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) ||
+          typeof envelope.ok !== "boolean") {
+        throw new Error("Shared core returned an invalid envelope");
+      }
+      const keys = Object.keys(envelope).sort();
+      if (envelope.ok) {
+        if (keys.length !== 2 || keys[0] !== "ok" || keys[1] !== "value") {
+          throw new Error("Shared core returned a malformed success envelope");
+        }
+        if (operation === "task.identity.v1") this.#validateTaskIdentity(envelope.value);
         return envelope.value;
-      } catch (primary) {
-        try {
-          this.#releaseAll([
-            [resultPointer, resultLength],
-            [inputPointer, inputBytes.length],
-            [operationPointer, operationBytes.length]
-          ]);
-        } catch (cleanup) {
-          primary.cleanupError = cleanup;
-        }
-        throw primary;
+      }
+      if (keys.length !== 2 || keys[0] !== "error" || keys[1] !== "ok" ||
+          typeof envelope.error !== "string" || !envelope.error) {
+        throw new Error("Shared core returned a malformed failure envelope");
+      }
+      throw new Error(envelope.error);
+    }
+
+    #validateTaskIdentity(value) {
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+      if (!value || typeof value !== "object" || Array.isArray(value) ||
+          Object.keys(value).sort().join(",") !== "id,title,utf8Bytes" ||
+          typeof value.id !== "string" || !uuid.test(value.id) ||
+          typeof value.title !== "string" || !value.title ||
+          !Number.isSafeInteger(value.utf8Bytes) || value.utf8Bytes < 1 ||
+          value.utf8Bytes !== encoder.encode(value.title).length) {
+        throw new Error("Shared core returned an invalid task identity");
       }
     }
 
@@ -113,23 +150,28 @@
         this.#requireRange(pointer, bytes.length, "allocated input");
         new Uint8Array(this.instance.exports.memory.buffer, pointer, bytes.length).set(bytes);
         return pointer;
-      } catch (error) {
-        this.instance.exports.pomodorough_free(pointer, bytes.length);
-        throw error;
+      } catch (primary) {
+        try {
+          this.instance.exports.pomodorough_free(pointer, bytes.length);
+        } catch (cleanup) {
+          this.unusableCause = cleanup;
+          primary.cleanupErrors = [cleanup];
+        }
+        throw primary;
       }
     }
 
     #releaseAll(buffers) {
-      let failure = null;
+      const failures = [];
       for (const [pointer, length] of buffers) {
         if (!pointer || !length) continue;
         try {
           this.instance.exports.pomodorough_free(pointer, length);
         } catch (error) {
-          if (!failure) failure = error;
+          failures.push(error);
         }
       }
-      if (failure) throw failure;
+      return failures;
     }
 
     #checkMemory() {
