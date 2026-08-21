@@ -21,6 +21,22 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Check out pinned shared core
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Pomodoro-Everywhere/pomodorough-core
+          ref: a78a312314dd9466557c3dbdd12184b698c3d156
+          path: shared-core
+          persist-credentials: false
+      - name: Rebuild and verify embedded shared core
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.97.1
+          cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked --manifest-path shared-core/Cargo.toml
+          cmp internal/sharedcore/pomodorough_core.wasm shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
+          cmp web/pomodorough_core.wasm shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
+          test "$(cat internal/sharedcore/CORE_COMMIT)" = "a78a312314dd9466557c3dbdd12184b698c3d156"
+          (cd internal/sharedcore && sha256sum --check pomodorough_core.wasm.sha256)
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:

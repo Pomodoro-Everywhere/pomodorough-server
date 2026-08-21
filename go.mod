@@ -4,6 +4,7 @@ go 1.25.13
 
 require (
 	github.com/coreos/go-oidc/v3 v3.14.1
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/text v0.39.0
 	gopkg.in/yaml.v3 v3.0.1

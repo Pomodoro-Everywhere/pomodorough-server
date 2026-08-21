@@ -5,7 +5,9 @@
   const DB_VERSION = 5;
   const syncCore = globalThis.PomodoroughSync;
   const syncStorage = globalThis.PomodoroughStorage;
+  const sharedCoreHost = globalThis.PomodoroughSharedCore;
   const translations = globalThis.PomodoroughI18n;
+  let sharedCorePromise = null;
   const META_STORE = "meta";
   const PENDING_STORE = "pending";
   const TASK_PENDING_STORE = "pendingTasks";
@@ -255,25 +257,14 @@
     };
   }
 
-  function normalizeTaskTitle(value) {
-    const characters = [...String(value || "").normalize("NFC")];
-    const printable = (character) => character === " " || !/[\p{C}\p{Z}]/u.test(character);
-    let start = 0;
-    let end = characters.length;
-    while (start < end && !printable(characters[start])) start += 1;
-    while (end > start && !printable(characters[end - 1])) end -= 1;
-    return characters.slice(start, end).join("");
-  }
-
-  async function deterministicTaskId(title) {
-    const normalized = normalizeTaskTitle(title);
-    const bytes = new TextEncoder().encode(`pomodorough.task.v1\u0000${normalized}`);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-    const uuid = digest.slice(0, 16);
-    uuid[6] = (uuid[6] & 0x0f) | 0x80;
-    uuid[8] = (uuid[8] & 0x3f) | 0x80;
-    const hex = [...uuid].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  async function sharedTaskIdentity(title) {
+    if (!sharedCoreHost?.SharedCore) throw new Error("Shared core is unavailable.");
+    sharedCorePromise ||= sharedCoreHost.SharedCore.load();
+    const identity = (await sharedCorePromise).call("task.identity.v1", { title });
+    if (!identity || typeof identity.id !== "string" || typeof identity.title !== "string") {
+      throw new Error("Shared core returned an invalid task identity.");
+    }
+    return identity;
   }
 
   function positiveNumber(value, fallback) {
@@ -1279,12 +1270,20 @@
   }
 
   async function addTask(title) {
-    const normalized = normalizeTaskTitle(title);
-    if (!normalized) throw new Error(tr("notice.taskPrintable", {}, "Enter a printable task name."));
-    if (new TextEncoder().encode(normalized).length > 512) {
-      throw new Error(tr("notice.taskTooLong", {}, "Task name is too long."));
+    let identity;
+    try {
+      identity = await sharedTaskIdentity(String(title || ""));
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (message.includes("printable") || message.includes("must not be empty")) {
+        throw new Error(tr("notice.taskPrintable", {}, "Enter a printable task name."));
+      }
+      if (message.includes("512") || message.includes("too long")) {
+        throw new Error(tr("notice.taskTooLong", {}, "Task name is too long."));
+      }
+      throw error;
     }
-    const id = await deterministicTaskId(normalized);
+    const { id, title: normalized } = identity;
     const existing = state.tasks.find((task) => task.id === id);
     if (existing) {
       const selected = await issueSelectedTaskOperation(existing.id);

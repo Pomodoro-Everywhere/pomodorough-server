@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,6 +209,10 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, iden
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity principal) {
 	request, err := parseSyncRequest(w, r, time.Now())
 	if err != nil {
+		if isRequestRuntimeError(err) {
+			s.internalAPIError(w, "validate sync request with shared core", err)
+			return
+		}
 		writeAPIError(w, http.StatusBadRequest, "invalid sync request")
 		return
 	}
@@ -271,6 +276,10 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 	now := time.Now()
 	request, err := parseBootstrapResolutionRequest(w, r, now)
 	if err != nil {
+		if isRequestRuntimeError(err) {
+			s.internalAPIError(w, "validate bootstrap resolution with shared core", err)
+			return
+		}
 		writeAPIError(w, http.StatusBadRequest, "invalid bootstrap resolution request")
 		return
 	}
@@ -401,6 +410,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 	}
 }
 
+type requestRuntimeError struct {
+	cause error
+}
+
+func (e *requestRuntimeError) Error() string { return e.cause.Error() }
+func (e *requestRuntimeError) Unwrap() error { return e.cause }
+
+func isRequestRuntimeError(err error) bool {
+	var target *requestRuntimeError
+	return errors.As(err, &target)
+}
+
 func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (store.SyncRequest, error) {
 	var payload syncRequestJSON
 	if err := decodeJSON(w, r, maxSyncBody, &payload); err != nil {
@@ -409,7 +430,7 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || *payload.LastRevision > store.MaxSafeRevision || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 || len(payload.SelectedTaskOperations) > 256 {
 		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
 	}
-	request, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, payload.SelectedTaskOperations, 256, now)
+	request, err := parseOperations(r.Context(), payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, payload.SelectedTaskOperations, 256, now)
 	if err != nil {
 		return store.SyncRequest{}, err
 	}
@@ -439,7 +460,7 @@ func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now
 	if payload.Strategy == store.BootstrapKeepRemote && (len(payload.Commands) != 0 || len(payload.TaskOperations) != 0 || len(payload.DurationOperations) != 0 || len(autoStartOperations) != 0 || len(selectedTaskOperations) != 0) {
 		return store.BootstrapResolutionRequest{}, fmt.Errorf("keep_remote requires empty operation arrays")
 	}
-	operations, err := parseOperations(payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, autoStartOperations, selectedTaskOperations, 4096, now)
+	operations, err := parseOperations(r.Context(), payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, autoStartOperations, selectedTaskOperations, 4096, now)
 	if err != nil {
 		return store.BootstrapResolutionRequest{}, err
 	}
@@ -483,7 +504,7 @@ func parseOptionalAutoStartOperations(raw json.RawMessage) ([]syncAutoStartOpera
 	return operations, true, nil
 }
 
-func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, autoStartOperations []syncAutoStartOperationJSON, selectedTaskOperations []syncSelectedTaskOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
+func parseOperations(ctx context.Context, deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, autoStartOperations []syncAutoStartOperationJSON, selectedTaskOperations []syncSelectedTaskOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
 	if len(commands) > maximum || len(taskOperations) > maximum || len(durationOperations) > maximum || len(autoStartOperations) > maximum || len(selectedTaskOperations) > maximum {
 		return store.SyncRequest{}, fmt.Errorf("too many operations")
 	}
@@ -534,6 +555,7 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter, ObservedElapsedMs: *input.ObservedElapsedMs,
 		})
 	}
+	taskTitles := make([]string, 0, len(taskOperations))
 	for _, input := range taskOperations {
 		if !validID(input.ID) || !validID(input.TaskID) {
 			return store.SyncRequest{}, fmt.Errorf("invalid task operation identity")
@@ -545,14 +567,29 @@ func parseOperations(deviceID string, commands []syncCommandJSON, taskOperations
 		if _, valid := validTaskOperationTypes[input.Type]; !valid {
 			return store.SyncRequest{}, fmt.Errorf("invalid task operation type")
 		}
-		title := ""
 		if input.Type == "upsert" {
-			title = task.NormalizeTitle(input.Title)
-			if title == "" || len([]byte(title)) > 512 || task.ID(title) != input.TaskID {
-				return store.SyncRequest{}, fmt.Errorf("invalid task title")
-			}
+			taskTitles = append(taskTitles, input.Title)
 		} else if input.Title != "" {
 			return store.SyncRequest{}, fmt.Errorf("delete task operation has title")
+		}
+	}
+	identities, err := task.SharedIdentities(ctx, taskTitles)
+	if task.IsSharedIdentityRuntimeError(err) {
+		return store.SyncRequest{}, &requestRuntimeError{cause: err}
+	}
+	if err != nil {
+		return store.SyncRequest{}, fmt.Errorf("invalid task title")
+	}
+	identityIndex := 0
+	for _, input := range taskOperations {
+		title := ""
+		if input.Type == "upsert" {
+			identity := identities[identityIndex]
+			identityIndex++
+			if identity.ID != input.TaskID {
+				return store.SyncRequest{}, fmt.Errorf("invalid task title")
+			}
+			title = identity.Title
 		}
 		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
 		if err != nil {

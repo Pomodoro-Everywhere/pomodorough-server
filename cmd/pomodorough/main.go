@@ -13,6 +13,7 @@ import (
 
 	"pomodorough/internal/config"
 	"pomodorough/internal/server"
+	"pomodorough/internal/sharedcore"
 	"pomodorough/internal/store"
 )
 
@@ -23,6 +24,12 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	core, err := sharedcore.Default(context.Background())
+	if err != nil {
+		logger.Error("initialize shared core", "error", err)
+		os.Exit(1)
+	}
+	defer core.Close(context.Background())
 	dataDirLock, err := store.AcquireDataDirLock(cfg.DataDir)
 	if err != nil {
 		logger.Error("lock storage", "error", err)

@@ -2,7 +2,7 @@
   "private": true,
   "scripts": {
     "test:web": "node --test web/*.test.js",
-    "check:web": "node --check web/sync-core.js && node --check web/sync-storage.js && node --check web/i18n.js && node --check web/app.js && node --check web/sw.js && node --check web/platform-selector.js && node --check web/landing.js"
+    "check:web": "node --check web/shared-core.js && node --check web/sync-core.js && node --check web/sync-storage.js && node --check web/i18n.js && node --check web/app.js && node --check web/sw.js && node --check web/platform-selector.js && node --check web/landing.js"
   },
   "devDependencies": {
     "fake-indexeddb": "6.2.5"

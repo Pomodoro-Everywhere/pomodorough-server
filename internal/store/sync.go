@@ -438,27 +438,42 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 	if err != nil {
 		return accountReduction{}, err
 	}
-	reduction.timer = timer.Reduce(reduction.commands, now)
+	reduction.timer, err = reduceTimerWithSharedCore(ctx, reduction.commands, now)
+	if err != nil {
+		return accountReduction{}, fmt.Errorf("reduce timer with shared core: %w", err)
+	}
 	reduction.taskOperations, err = loadTaskOperations(ctx, source)
 	if err != nil {
 		return accountReduction{}, err
 	}
-	reduction.tasks, reduction.winningTaskOperations = reduceTasks(reduction.taskOperations)
+	reduction.tasks, reduction.winningTaskOperations, err = reduceTasksWithSharedCore(ctx, reduction.taskOperations)
+	if err != nil {
+		return accountReduction{}, fmt.Errorf("reduce tasks with shared core: %w", err)
+	}
 	reduction.durationOperations, err = loadDurationOperations(ctx, source)
 	if err != nil {
 		return accountReduction{}, err
 	}
-	reduction.durations, reduction.winningDurationOperations = reduceDurations(reduction.durationOperations)
+	reduction.durations, reduction.winningDurationOperations, err = reduceDurationsWithSharedCore(ctx, reduction.durationOperations)
+	if err != nil {
+		return accountReduction{}, fmt.Errorf("reduce durations with shared core: %w", err)
+	}
 	reduction.autoStartOperations, err = loadAutoStartOperations(ctx, source)
 	if err != nil {
 		return accountReduction{}, err
 	}
-	reduction.autoStartBreaks, reduction.winningAutoStartOperation = reduceAutoStart(reduction.autoStartOperations)
+	reduction.autoStartBreaks, reduction.winningAutoStartOperation, err = reduceAutoStartWithSharedCore(ctx, reduction.autoStartOperations)
+	if err != nil {
+		return accountReduction{}, fmt.Errorf("reduce auto-start with shared core: %w", err)
+	}
 	reduction.selectedTaskOperations, err = loadSelectedTaskOperations(ctx, source)
 	if err != nil {
 		return accountReduction{}, err
 	}
-	reduction.selectedTaskID, reduction.winningSelectedTaskOperation = reduceSelectedTask(reduction.selectedTaskOperations, reduction.tasks)
+	reduction.selectedTaskID, reduction.winningSelectedTaskOperation, err = reduceSelectedTaskWithSharedCore(ctx, reduction.selectedTaskOperations, reduction.tasks)
+	if err != nil {
+		return accountReduction{}, fmt.Errorf("reduce selected task with shared core: %w", err)
+	}
 	return reduction, nil
 }
 
