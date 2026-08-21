@@ -60,7 +60,7 @@ device is offline remains local until that device reconnects.
 
 ## Requirements
 
-- Go 1.25 or newer
+- Go 1.25.13 or newer (older 1.25 patch releases contain reachable standard-library vulnerabilities)
 - A Google OAuth web client for browser sign-in
 - Optional native OAuth client IDs for Apple, Android, and Linux clients
 - A writable data directory for per-user SQLite databases
