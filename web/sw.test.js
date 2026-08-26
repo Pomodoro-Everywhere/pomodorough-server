@@ -14,6 +14,7 @@ const appScriptSource = fs.readFileSync(path.join(webDirectory, "app.js"), "utf8
 const appStyleSource = fs.readFileSync(path.join(webDirectory, "app.css"), "utf8");
 const landingScriptSource = fs.readFileSync(path.join(webDirectory, "landing.js"), "utf8");
 const manifest = JSON.parse(fs.readFileSync(path.join(webDirectory, "manifest.webmanifest"), "utf8"));
+const sharedCoreMetadata = require("./shared-core-metadata.js");
 
 function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null, cachedAssets = {}) {
   const listeners = {};
@@ -30,6 +31,10 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
     URL,
     Promise,
     fetch: () => Promise.reject(new Error("Unexpected fetch.")),
+    importScripts(url) {
+      assert.equal(url, "/shared-core-metadata.js?v=1");
+      context.self.PomodoroughSharedCoreMetadata = sharedCoreMetadata;
+    },
     caches: {
       async keys() {
         return [...cacheNames];
@@ -94,9 +99,11 @@ test("shell entry assets use cache-busting version URLs", () => {
   }
   assert.match(appSource, /\/app\.js\?v=32/);
   assert.match(workerSource, /\/app\.js\?v=32/);
-  assert.match(appSource, /\/shared-core\.js\?v=4/);
-  assert.match(workerSource, /\/shared-core\.js\?v=4/);
-  assert.match(workerSource, /"\/pomodorough_core\.wasm\?sha256=89fb6300324042b61d62070242cccad10e30f125885bb1b7a05af67b077bac83"/);
+  assert.match(appSource, /\/shared-core-metadata\.js\?v=1/);
+  assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
+  assert.match(appSource, /\/shared-core\.js\?v=6/);
+  assert.match(workerSource, /\/shared-core\.js\?v=6/);
+  assert.match(workerSource, /CORE_METADATA\.wasmURL/);
   assert.match(appScriptSource, /sharedCoreHost\.SharedCore\.load/);
   assert.match(appScriptSource, /task\.identity\.v1/);
   assert.match(appSource, /\/sync-core\.js\?v=25/);
@@ -107,7 +114,7 @@ test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["/i18n.js?v=2", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v44/);
+  assert.match(workerSource, /pomodorough-shell-v45-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

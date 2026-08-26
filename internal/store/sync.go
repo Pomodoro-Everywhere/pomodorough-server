@@ -159,7 +159,6 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 		return SyncResult{}, fmt.Errorf("begin sync: %w", err)
 	}
 	defer tx.Rollback()
-
 	if _, err := tx.ExecContext(ctx, `INSERT INTO devices(id, platform, created_at_ms, last_seen_at_ms, revoked_at_ms)
 		VALUES (?, 'web', ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms`, request.DeviceID, now.UnixMilli(), now.UnixMilli()); err != nil {
@@ -188,13 +187,15 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 	if err := persistReduction(ctx, tx, reduction, revision); err != nil {
 		return SyncResult{}, err
 	}
+	result, err := resultFromReduction(ctx, reduction, revision, now, &request)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	addAcknowledgements(&result, request, applied, reduction)
+	result.Changed = applied.changed || projectionChanged
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit sync: %w", err)
 	}
-
-	result := resultFromReduction(reduction, revision, now, &request)
-	addAcknowledgements(&result, request, applied, reduction)
-	result.Changed = applied.changed || projectionChanged
 	return result, nil
 }
 
@@ -224,11 +225,14 @@ func (s *Store) materializeProjection(ctx context.Context, db *sql.DB, userID st
 			return SyncResult{}, err
 		}
 	}
+	result, err := resultFromReduction(ctx, reduction, revision, now, nil)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	result.Changed = changed
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit projection materialization: %w", err)
 	}
-	result := resultFromReduction(reduction, revision, now, nil)
-	result.Changed = changed
 	return result, nil
 }
 
@@ -580,45 +584,55 @@ func sameProjectedTime(left, right time.Time) bool {
 	return left.UnixMilli() == right.UnixMilli()
 }
 
-func resultFromReduction(reduction accountReduction, revision int64, now time.Time, request *SyncRequest) SyncResult {
-	serverHLCWallMs, serverHLCCounter := now.UnixMilli(), int64(0)
-	observeHLC := func(wallMs, counter int64) {
-		if wallMs > serverHLCWallMs || wallMs == serverHLCWallMs && counter > serverHLCCounter {
-			serverHLCWallMs = wallMs
-			serverHLCCounter = counter
-		}
-	}
+func hlcObservations(reduction accountReduction, request *SyncRequest) []coreHLC {
+	observed := make([]coreHLC, 0)
 	for _, command := range reduction.commands {
-		observeHLC(command.HLCWallMs, command.HLCCounter)
+		observed = append(observed, coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter})
 	}
 	for _, operation := range reduction.taskOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 	}
 	for _, operation := range reduction.durationOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 	}
 	for _, operation := range reduction.autoStartOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 	}
 	for _, operation := range reduction.selectedTaskOperations {
-		observeHLC(operation.HLCWallMs, operation.HLCCounter)
+		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 	}
 	if request != nil {
 		for _, command := range request.Commands {
-			observeHLC(command.HLCWallMs, command.HLCCounter)
+			observed = append(observed, coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter})
 		}
 		for _, operation := range request.TaskOperations {
-			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 		}
 		for _, operation := range request.DurationOperations {
-			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 		}
 		for _, operation := range request.AutoStartOperations {
-			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 		}
 		for _, operation := range request.SelectedTaskOperations {
-			observeHLC(operation.HLCWallMs, operation.HLCCounter)
+			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
 		}
+	}
+	return observed
+}
+
+func serverHLCFromReductionWithCore(ctx context.Context, call coreJSONCall, reduction accountReduction, now time.Time, request *SyncRequest) (coreHLC, error) {
+	return hlcHeadWithCore(ctx, call, now.UnixMilli(), hlcObservations(reduction, request))
+}
+
+func resultFromReduction(ctx context.Context, reduction accountReduction, revision int64, now time.Time, request *SyncRequest) (SyncResult, error) {
+	return resultFromReductionWithCore(ctx, callAccountSharedCore, reduction, revision, now, request)
+}
+
+func resultFromReductionWithCore(ctx context.Context, call coreJSONCall, reduction accountReduction, revision int64, now time.Time, request *SyncRequest) (SyncResult, error) {
+	serverHLC, err := serverHLCFromReductionWithCore(ctx, call, reduction, now, request)
+	if err != nil {
+		return SyncResult{}, err
 	}
 	return normalizeSyncResult(SyncResult{
 		Acknowledgements:             []Acknowledgement{},
@@ -634,9 +648,9 @@ func resultFromReduction(reduction accountReduction, revision int64, now time.Ti
 		AutoStartBreaks:              reduction.autoStartBreaks,
 		SelectedTaskID:               reduction.selectedTaskID,
 		ServerTime:                   now.UTC().Format(time.RFC3339Nano),
-		ServerHLCWallMs:              serverHLCWallMs,
-		ServerHLCCounter:             serverHLCCounter,
-	})
+		ServerHLCWallMs:              serverHLC.WallMs,
+		ServerHLCCounter:             serverHLC.Counter,
+	}), nil
 }
 
 func addAcknowledgements(result *SyncResult, request SyncRequest, application operationApplication, reduction accountReduction) {

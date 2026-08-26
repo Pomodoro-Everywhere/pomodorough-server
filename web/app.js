@@ -352,7 +352,7 @@
 
   function terminalHistoryItem(timer, command, status) {
     return {
-      id: timer.id,
+      id: timer._historyId || timer.id,
       timerId: timer.id,
       commandId: command.id,
       phase: timer.phase,
@@ -399,129 +399,162 @@
     return { timer: completed, history };
   }
 
-  function reduceCommand(timer, history, command) {
+  function reduceCommand(timer, history, command, sessions = new Map()) {
     const projected = autoCompleteTimer(clone(timer), clone(history || []), command.occurredAt);
     let nextTimer = projected.timer;
     let nextHistory = projected.history;
     const intent = { type: command.type, commandId: command.id, occurredAt: command.occurredAt };
 
+    function sortTerminalHistory(items) {
+      return [...items].sort((left, right) => {
+        const leftEndedAt = Date.parse(left.endedAt || left.completedAt || "");
+        const rightEndedAt = Date.parse(right.endedAt || right.completedAt || "");
+        if (leftEndedAt !== rightEndedAt) return rightEndedAt - leftEndedAt;
+        if (left.timerId < right.timerId) return -1;
+        if (left.timerId > right.timerId) return 1;
+        return 0;
+      });
+    }
+
     function addTerminalHistory(source, status) {
-      if (nextHistory.some((item) => item.commandId === command.id)) return;
+      if (nextHistory.some((item) => item.commandId === command.id && item.timerId === source.id)) return;
       nextHistory.unshift(terminalHistoryItem(source, command, status));
+    }
+
+    function targetTimer() {
+      if (commandMatches(nextTimer, command)) {
+        return clone(sessions.get(command.timerId) || nextTimer);
+      }
+      const item = nextHistory.find((candidate) => candidate.timerId === command.timerId);
+      if (!item) return clone(sessions.get(command.timerId) || null);
+      const planned = Number(item.plannedDurationMs || 0);
+      return {
+        id: item.timerId,
+        _historyId: item.id,
+        phase: item.phase,
+        status: item.status,
+        plannedDurationMs: planned,
+        elapsedAtAnchorMs: item.status === "completed" ? planned : 0,
+        anchorAt: item.endedAt || command.occurredAt,
+        lastIntent: null,
+        taskId: item.taskId || null,
+        dependsOnCommandId: null
+      };
+    }
+
+    function preserveDisplaced(replacementId) {
+      if (!nextTimer || nextTimer.id === replacementId) return;
+      if (["running", "paused"].includes(nextTimer.status)) {
+        addTerminalHistory(nextTimer, "superseded");
+        return;
+      }
+      if (!["completed", "cancelled", "superseded"].includes(nextTimer.status)
+        || nextHistory.some((item) => item.timerId === nextTimer.id)) return;
+      nextHistory.unshift({
+        id: nextTimer.id,
+        timerId: nextTimer.id,
+        commandId: nextTimer.lastIntent?.commandId || null,
+        phase: nextTimer.phase,
+        status: nextTimer.status,
+        plannedDurationMs: nextTimer.plannedDurationMs,
+        completedAt: nextTimer.status === "completed" ? nextTimer.anchorAt : null,
+        endedAt: nextTimer.anchorAt,
+        taskId: nextTimer.taskId || null
+      });
+    }
+
+    function activateTarget(target) {
+      preserveDisplaced(target.id);
+      nextHistory = nextHistory.filter((item) => item.timerId !== target.id);
+      nextTimer = clone(target);
     }
 
     switch (command.type) {
       case "start":
-        if (nextTimer?.id === command.timerId || nextHistory.some((item) => item.timerId === command.timerId)) break;
-        if (["running", "paused"].includes(nextTimer?.status)) addTerminalHistory(nextTimer, "superseded");
-        return {
-          timer: {
-            id: command.timerId,
-            phase: command.phase,
-            status: "running",
-            plannedDurationMs: command.plannedDurationMs,
-            elapsedAtAnchorMs: 0,
-            anchorAt: command.occurredAt,
-            lastIntent: intent,
-            taskId: command.taskId || null,
-            dependsOnCommandId: command.dependsOnCommandId || null
-          },
-          history: nextHistory
+        nextHistory = nextHistory.filter((item) => item.timerId !== command.timerId);
+        preserveDisplaced(command.timerId);
+        nextTimer = {
+          id: command.timerId,
+          phase: command.phase,
+          status: "running",
+          plannedDurationMs: command.plannedDurationMs,
+          elapsedAtAnchorMs: 0,
+          anchorAt: command.occurredAt,
+          lastIntent: intent,
+          taskId: command.taskId || null,
+          dependsOnCommandId: command.dependsOnCommandId || null
         };
+        sessions.set(command.timerId, clone(nextTimer));
+        return { timer: nextTimer, history: sortTerminalHistory(nextHistory) };
 
       case "pause":
-        if (!commandMatches(nextTimer, command) || nextTimer.status !== "running") break;
-        nextTimer.status = "paused";
-        nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
-        nextTimer.anchorAt = command.occurredAt;
-        nextTimer.lastIntent = intent;
+        {
+          const target = targetTimer();
+          if (!target) break;
+          activateTarget(target);
+          nextTimer.status = "paused";
+          nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
+          nextTimer.anchorAt = command.occurredAt;
+          nextTimer.lastIntent = intent;
+        }
         break;
 
       case "resume":
-        if (commandMatches(nextTimer, command) && ["paused", "superseded"].includes(nextTimer.status)) {
-          if (nextTimer.status === "superseded") {
-            nextHistory = nextHistory.filter((item) =>
-              item.timerId !== nextTimer.id || item.status !== "superseded"
-            );
-          }
+        {
+          const target = targetTimer();
+          if (!target) break;
+          activateTarget(target);
           nextTimer.status = "running";
           nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
           nextTimer.anchorAt = command.occurredAt;
           nextTimer.lastIntent = intent;
-          break;
         }
-        {
-          const target = nextHistory.find((item) =>
-            item.timerId === command.timerId && item.status === "superseded"
-          );
-          if (!target) break;
-          if (["running", "paused"].includes(nextTimer?.status)) addTerminalHistory(nextTimer, "superseded");
-          nextHistory = nextHistory.filter((item) =>
-            item.timerId !== target.timerId || item.status !== "superseded"
-          );
-          return {
-            timer: {
-              id: target.timerId,
-              phase: target.phase,
-              status: "running",
-              plannedDurationMs: target.plannedDurationMs,
-              elapsedAtAnchorMs: clampNumber(command.observedElapsedMs, 0, target.plannedDurationMs),
-              anchorAt: command.occurredAt,
-              lastIntent: intent,
-              taskId: target.taskId || null,
-              dependsOnCommandId: null
-            },
-            history: nextHistory
-          };
-        }
+        break;
 
       case "finish":
-        if (commandMatches(nextTimer, command) && nextTimer.status === "completed") {
-          const completionIndex = nextHistory.findIndex((item) =>
-            item.timerId === command.timerId && item.status === "completed" && !item.commandId
-          );
-          if (completionIndex >= 0) {
-            nextHistory[completionIndex] = {
-              ...nextHistory[completionIndex],
-              commandId: command.id,
-              pending: true
-            };
-            nextTimer.lastIntent = intent;
-          }
-          break;
-        }
-        if (!commandMatches(nextTimer, command) || !["running", "paused"].includes(nextTimer.status)) break;
         {
-          const source = clone(nextTimer);
+          const target = targetTimer();
+          if (!target) break;
+          activateTarget(target);
           nextTimer.status = "completed";
           nextTimer.elapsedAtAnchorMs = nextTimer.plannedDurationMs;
           nextTimer.anchorAt = command.occurredAt;
           nextTimer.lastIntent = intent;
-          addTerminalHistory(source, "completed");
+          addTerminalHistory(nextTimer, "completed");
         }
         break;
 
       case "cancel":
-        if (!commandMatches(nextTimer, command) || !["running", "paused"].includes(nextTimer.status)) break;
         {
-          const source = clone(nextTimer);
+          const target = targetTimer();
+          if (!target) break;
+          activateTarget(target);
           nextTimer.status = "cancelled";
           nextTimer.elapsedAtAnchorMs = clampNumber(command.observedElapsedMs, 0, nextTimer.plannedDurationMs);
           nextTimer.anchorAt = command.occurredAt;
           nextTimer.lastIntent = intent;
-          addTerminalHistory(source, "cancelled");
+          addTerminalHistory(nextTimer, "cancelled");
         }
         break;
 
       case "clear":
-        if (!commandMatches(nextTimer, command) || !["completed", "cancelled"].includes(nextTimer.status)) break;
-        return {
-          timer: emptyTimer(command.phase, command.plannedDurationMs),
-          history: nextHistory
-        };
+        {
+          const target = targetTimer();
+          if (!target) break;
+          sessions.set(command.timerId, clone(target));
+          if (!commandMatches(nextTimer, command)) break;
+          return {
+            timer: emptyTimer(command.phase, command.plannedDurationMs),
+            history: sortTerminalHistory(nextHistory)
+          };
+        }
     }
 
-    return { timer: nextTimer, history: nextHistory };
+    if (nextTimer) {
+      if (nextTimer.id) sessions.set(nextTimer.id, clone(nextTimer));
+      delete nextTimer._historyId;
+    }
+    return { timer: nextTimer, history: sortTerminalHistory(nextHistory) };
   }
 
   function rebuildOptimisticState() {
@@ -530,9 +563,10 @@
     rebuildOptimisticSelectedTask();
     let timer = normalizeTimer(state.baseTimer);
     let history = clone(state.baseHistory || []);
+    const sessions = new Map();
 
     for (const command of [...state.pending].sort(compareTimerCommands)) {
-      const reduced = reduceCommand(timer, history, command);
+      const reduced = reduceCommand(timer, history, command, sessions);
       timer = reduced.timer;
       history = reduced.history;
     }

@@ -52,6 +52,54 @@ func callAccountSharedCore(ctx context.Context, operation string, input, output 
 	return decodeCoreEnvelope(operation, result, output)
 }
 
+type coreJSONCall func(context.Context, string, any, any) error
+
+type coreHLC struct {
+	WallMs  int64 `json:"wallMs"`
+	Counter int64 `json:"counter"`
+}
+
+type coreHLCHeadInput struct {
+	PhysicalNowMs int64     `json:"physicalNowMs"`
+	Observed      []coreHLC `json:"observed"`
+}
+
+type coreHLCHeadOutput struct {
+	WallMs  *int64 `json:"wallMs"`
+	Counter *int64 `json:"counter"`
+}
+
+func hlcHeadWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed []coreHLC) (coreHLC, error) {
+	input := coreHLCHeadInput{PhysicalNowMs: physicalNowMs, Observed: observed}
+	var output coreHLCHeadOutput
+	if err := call(ctx, "hlc.head.v1", input, &output); err != nil {
+		return coreHLC{}, err
+	}
+	if output.WallMs == nil || output.Counter == nil {
+		return coreHLC{}, errors.New("shared HLC head is missing required fields")
+	}
+	head := coreHLC{WallMs: *output.WallMs, Counter: *output.Counter}
+	if err := validateCoreHLCHead(head, input); err != nil {
+		return coreHLC{}, err
+	}
+	return head, nil
+}
+
+func validateCoreHLCHead(head coreHLC, input coreHLCHeadInput) error {
+	if head.WallMs < 0 || head.WallMs > MaxSafeRevision || head.Counter < 0 || head.Counter > MaxSafeRevision {
+		return errors.New("shared HLC head is outside JavaScript-safe bounds")
+	}
+	if head == (coreHLC{WallMs: input.PhysicalNowMs}) {
+		return nil
+	}
+	for _, observed := range input.Observed {
+		if head == observed {
+			return nil
+		}
+	}
+	return errors.New("shared HLC head does not reference an input clock")
+}
+
 func decodeCoreEnvelope(operation string, result []byte, output any) error {
 	decoder := json.NewDecoder(bytes.NewReader(result))
 	decoder.DisallowUnknownFields()
@@ -74,8 +122,20 @@ func decodeCoreEnvelope(operation string, result []byte, output any) error {
 	if envelope.Error != nil || len(envelope.Value) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Value), []byte("null")) {
 		return fmt.Errorf("decode %s envelope: malformed success", operation)
 	}
-	if err := json.Unmarshal(envelope.Value, output); err != nil {
+	if err := decodeCoreValue(envelope.Value, output); err != nil {
 		return fmt.Errorf("decode %s output: %w", operation, err)
+	}
+	return nil
+}
+
+func decodeCoreValue(value []byte, output any) error {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(output); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("trailing JSON")
 	}
 	return nil
 }

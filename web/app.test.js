@@ -276,22 +276,29 @@ function matrixCommand(type, target) {
 }
 
 function expectedMatrixTimer(status, type, target) {
-  if (type === "start" && (target === "foreign" || status === "absent")) {
+  if (type === "start") {
     return { id: target === "foreign" ? "timer-foreign" : "timer-state", status: "running" };
   }
   if (status === "absent") return { id: null, status: "idle" };
-  if (status === "superseded") {
-    return type === "resume" && target === "same"
-      ? { id: "timer-state", status: "running" }
-      : { id: "timer-current", status: "running" };
+  if (target === "foreign") {
+    return status === "superseded"
+      ? { id: "timer-current", status: "running" }
+      : { id: "timer-state", status };
   }
-  if (target === "foreign") return { id: "timer-state", status };
-  if (type === "pause" && status === "running") return { id: "timer-state", status: "paused" };
-  if (type === "resume" && status === "paused") return { id: "timer-state", status: "running" };
-  if (type === "finish" && ["running", "paused"].includes(status)) return { id: "timer-state", status: "completed" };
-  if (type === "cancel" && ["running", "paused"].includes(status)) return { id: "timer-state", status: "cancelled" };
-  if (type === "clear" && ["completed", "cancelled"].includes(status)) return { id: null, status: "idle" };
-  return { id: "timer-state", status };
+  if (type === "clear") {
+    return status === "superseded"
+      ? { id: "timer-current", status: "running" }
+      : { id: null, status: "idle" };
+  }
+  return {
+    id: "timer-state",
+    status: {
+      pause: "paused",
+      resume: "running",
+      finish: "completed",
+      cancel: "cancelled"
+    }[type]
+  };
 }
 
 test("task deletion hides independent selection and task reappearance restores it", () => {
@@ -709,28 +716,116 @@ test("optimistic timer reducer covers complete state command target matrix", () 
   assert.equal(cases, 72);
 });
 
-test("optimistic reducer auto-completes before late commands and lets finish claim deadline", () => {
+test("optimistic reducer lets later actions override deadline completion", () => {
   const app = loadTaskProjection();
   const running = timer("running");
   running.plannedDurationMs = 5_000;
   const latePause = matrixCommand("pause", "same");
   latePause.occurredAt = new Date(baseTime + 8_000).toISOString();
 
-  const completed = app.reduceCommand(running, [], latePause);
-  assert.equal(completed.timer.status, "completed");
-  assert.equal(completed.timer.anchorAt, new Date(baseTime + 5_000).toISOString());
-  assert.equal(completed.history.length, 1);
-  assert.equal(completed.history[0].commandId, null);
-  assert.equal(completed.history[0].taskId, "task-source");
+  const paused = app.reduceCommand(running, [], latePause);
+  assert.equal(paused.timer.status, "paused");
+  assert.equal(paused.timer.anchorAt, latePause.occurredAt);
+  assert.equal(paused.timer.lastIntent.commandId, latePause.id);
+  assert.equal(paused.history.length, 0);
 
   const finish = matrixCommand("finish", "same");
   finish.id = "claim-finish";
   finish.occurredAt = new Date(baseTime + 9_000).toISOString();
-  const claimed = app.reduceCommand(completed.timer, completed.history, finish);
-  assert.equal(claimed.timer.anchorAt, new Date(baseTime + 5_000).toISOString());
+  const claimed = app.reduceCommand(paused.timer, paused.history, finish);
+  assert.equal(claimed.timer.anchorAt, finish.occurredAt);
   assert.equal(claimed.timer.lastIntent.commandId, "claim-finish");
   assert.equal(claimed.history[0].commandId, "claim-finish");
-  assert.equal(claimed.history[0].completedAt, new Date(baseTime + 5_000).toISOString());
+  assert.equal(claimed.history[0].completedAt, finish.occurredAt);
+});
+
+test("optimistic reducer preserves both histories when latest action revives another timer", () => {
+  const app = loadTaskProjection();
+  const source = timer("running");
+  source.id = "timer-a";
+  const historical = {
+    id: "history-z",
+    timerId: "timer-z",
+    commandId: "old-finish",
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 25 * 60_000,
+    completedAt: new Date(baseTime).toISOString(),
+    endedAt: new Date(baseTime).toISOString()
+  };
+  const finish = matrixCommand("finish", "same");
+  finish.timerId = "timer-z";
+
+  const result = app.reduceCommand(source, [historical], finish);
+
+  assert.deepEqual(
+    Array.from(result.history, (item) => `${item.timerId}:${item.status}:${item.id}`),
+    ["timer-a:superseded:timer-a", "timer-z:completed:history-z"]
+  );
+  assert.deepEqual(Array.from(result.history, (item) => item.commandId), [finish.id, finish.id]);
+});
+
+test("optimistic reducer preserves historical identity through reactivation clear and finish", () => {
+  const app = loadTaskProjection();
+  const sessions = new Map();
+  const source = timer("running");
+  source.id = "timer-a";
+  const historical = {
+    id: "history-z",
+    timerId: "timer-z",
+    commandId: "old-finish",
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 25 * 60_000,
+    completedAt: new Date(baseTime).toISOString(),
+    endedAt: new Date(baseTime).toISOString()
+  };
+  const resume = {
+    ...matrixCommand("resume", "same"),
+    id: "resume-z",
+    timerId: "timer-z",
+    occurredAt: new Date(baseTime + 1).toISOString()
+  };
+  const clear = {
+    ...matrixCommand("clear", "same"),
+    id: "clear-z",
+    timerId: "timer-z",
+    occurredAt: new Date(baseTime + 2).toISOString()
+  };
+  const finish = {
+    ...matrixCommand("finish", "same"),
+    id: "finish-z",
+    timerId: "timer-z",
+    occurredAt: new Date(baseTime + 3).toISOString()
+  };
+
+  let result = app.reduceCommand(source, [historical], resume, sessions);
+  result = app.reduceCommand(result.timer, result.history, clear, sessions);
+  result = app.reduceCommand(result.timer, result.history, finish, sessions);
+
+  assert.equal(result.history.find((item) => item.timerId === "timer-z").id, "history-z");
+});
+
+test("optimistic reducer restores a timer after an earlier clear in one replay", () => {
+  const app = loadTaskProjection();
+  const sessions = new Map();
+  const start = matrixCommand("start", "same");
+  const clear = { ...matrixCommand("clear", "same"), id: "clear", occurredAt: new Date(baseTime + 1).toISOString() };
+  const pause = {
+    ...matrixCommand("pause", "same"),
+    id: "pause-latest",
+    occurredAt: new Date(baseTime + 2).toISOString(),
+    observedElapsedMs: 123_000
+  };
+
+  let result = app.reduceCommand(null, [], start, sessions);
+  result = app.reduceCommand(result.timer, result.history, clear, sessions);
+  result = app.reduceCommand(result.timer, result.history, pause, sessions);
+
+  assert.equal(result.timer.status, "paused");
+  assert.equal(result.timer.elapsedAtAnchorMs, 123_000);
+  assert.equal(result.timer.lastIntent.commandId, pause.id);
+  assert.equal(result.history.length, 0);
 });
 
 test("optimistic reducer preserves source metadata through supersede cancel and resume", () => {
@@ -833,7 +928,7 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
   const data = fs.readFileSync(fixturePath);
   assert.equal(
     crypto.createHash("sha256").update(data).digest("hex"),
-    "a293a679179f7f441a89b04f0260ee77fc0d810abc61e99501f9260a6ea9012e"
+    "51c357d8fd63e7200c1316ef36fc45821bea9ac2fbe11f255832fa21110ea104"
   );
   const fixture = JSON.parse(data);
   assert.equal(fixture.version, 2);

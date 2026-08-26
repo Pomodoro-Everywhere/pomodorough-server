@@ -6,6 +6,41 @@ import (
 	"time"
 )
 
+func TestReduceLatestActionWinsForExistingTimer(t *testing.T) {
+	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		earlier string
+		latest  string
+		status  string
+	}{
+		{"finish", "pause", "paused"},
+		{"finish", "resume", "running"},
+		{"finish", "cancel", "cancelled"},
+		{"cancel", "finish", "completed"},
+		{"finish", "start", "running"},
+	} {
+		result := Reduce([]Command{
+			command("start", "device-a", "timer-a", "start", 1, 100, base, 0),
+			command("earlier", "device-a", "timer-a", test.earlier, 2, 200, base.Add(time.Second), 1_000),
+			command("latest", "device-b", "timer-a", test.latest, 1, 300, base.Add(2*time.Second), 2_000),
+		}, base.Add(3*time.Second))
+		if got := result.Outcomes["latest"]; got != (Outcome{Outcome: "applied"}) {
+			t.Fatalf("%s after %s outcome = %#v", test.latest, test.earlier, got)
+		}
+		if result.Canonical == nil || result.Canonical.Status != test.status || result.Canonical.LastIntent == nil || result.Canonical.LastIntent.CommandID != "latest" {
+			t.Fatalf("%s after %s canonical = %#v", test.latest, test.earlier, result.Canonical)
+		}
+	}
+
+	cleared := Reduce([]Command{
+		command("start", "device-a", "timer-a", "start", 1, 100, base, 0),
+		command("clear", "device-b", "timer-a", "clear", 1, 200, base.Add(time.Second), 1_000),
+	}, base.Add(2*time.Second))
+	if got := cleared.Outcomes["clear"]; got != (Outcome{Outcome: "applied"}) || cleared.Canonical != nil {
+		t.Fatalf("latest clear = %#v, canonical %#v", got, cleared.Canonical)
+	}
+}
+
 func TestReduceDeterministicAcrossEveryArrivalPermutation(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -97,7 +132,7 @@ func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
 				command("wall-high", "device-a", "shared-timer", "start", 1, 101, base, 0),
 				command("wall-low", "device-z", "shared-timer", "start", 1, 100, base.Add(time.Second), 0),
 			},
-			winner: "wall-low",
+			winner: "wall-high",
 		},
 		{
 			name: "counter",
@@ -105,7 +140,7 @@ func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
 				withCounter(command("counter-high", "device-a", "shared-timer", "start", 1, 100, base, 0), 1),
 				withCounter(command("counter-low", "device-a", "shared-timer", "start", 2, 100, base, 0), 0),
 			},
-			winner: "counter-low",
+			winner: "counter-high",
 		},
 		{
 			name: "device ID",
@@ -113,7 +148,7 @@ func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
 				command("command-a", "device-b", "shared-timer", "start", 1, 100, base, 0),
 				command("command-z", "device-a", "shared-timer", "start", 1, 100, base, 0),
 			},
-			winner: "command-z",
+			winner: "command-a",
 		},
 		{
 			name: "command ID",
@@ -121,19 +156,15 @@ func TestReduceUsesCompleteHybridClockOrdering(t *testing.T) {
 				command("command-b", "device-a", "shared-timer", "start", 1, 100, base, 0),
 				command("command-a", "device-a", "shared-timer", "start", 2, 100, base, 0),
 			},
-			winner: "command-a",
+			winner: "command-b",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result := Reduce(test.commands, base)
 			for _, input := range test.commands {
-				want := "ignored"
-				if input.ID == test.winner {
-					want = "applied"
-				}
-				if got := result.Outcomes[input.ID].Outcome; got != want {
-					t.Fatalf("outcome for %q = %q, want %q", input.ID, got, want)
+				if got := result.Outcomes[input.ID].Outcome; got != "applied" {
+					t.Fatalf("outcome for %q = %q, want applied", input.ID, got)
 				}
 			}
 			if result.Canonical == nil || result.Canonical.LastIntent == nil || result.Canonical.LastIntent.CommandID != test.winner {

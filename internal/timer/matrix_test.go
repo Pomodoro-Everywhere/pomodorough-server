@@ -92,31 +92,17 @@ func matrixSetup(base time.Time, state string) []Command {
 
 func matrixOutcome(state, commandType, target string) Outcome {
 	same := target == "same"
-	switch commandType {
-	case "start":
-		if same && state != "absent" {
-			return Outcome{Outcome: "ignored", Reason: "timer already exists"}
-		}
+	if commandType == "start" || (same && state != "absent") {
 		return Outcome{Outcome: "applied"}
+	}
+	switch commandType {
 	case "pause":
-		if same && state == "running" {
-			return Outcome{Outcome: "applied"}
-		}
 		return Outcome{Outcome: "ignored", Reason: "timer is not the active running timer"}
 	case "resume":
-		if same && (state == "paused" || state == "superseded") {
-			return Outcome{Outcome: "applied"}
-		}
 		return Outcome{Outcome: "ignored", Reason: "timer cannot be resumed"}
 	case "finish", "cancel":
-		if same && (state == "running" || state == "paused") {
-			return Outcome{Outcome: "applied"}
-		}
 		return Outcome{Outcome: "ignored", Reason: "timer is not active"}
 	case "clear":
-		if same && (state == "completed" || state == "cancelled") {
-			return Outcome{Outcome: "applied"}
-		}
 		return Outcome{Outcome: "ignored", Reason: "timer cannot be cleared"}
 	default:
 		panic("unknown matrix command: " + commandType)
@@ -137,44 +123,44 @@ func matrixStateSession(state, commandType, target string) (string, bool) {
 		return state, true
 	}
 	switch commandType {
+	case "start":
+		return "running", true
 	case "pause":
-		if state == "running" {
-			return "paused", true
-		}
+		return "paused", true
 	case "resume":
-		if state == "paused" || state == "superseded" {
-			return "running", true
-		}
+		return "running", true
 	case "finish":
-		if state == "running" || state == "paused" {
-			return "completed", true
-		}
+		return "completed", true
 	case "cancel":
-		if state == "running" || state == "paused" {
-			return "cancelled", true
-		}
+		return "cancelled", true
 	}
 	return state, true
 }
 
 func matrixCanonical(state, commandType, target string) (string, string) {
-	if commandType == "start" && (target == "foreign" || state == "absent") {
-		if target == "foreign" {
+	if target == "foreign" {
+		if commandType == "start" {
 			return "timer-foreign", "running"
 		}
-		return "timer-state", "running"
+		if state == "superseded" {
+			return "timer-current", "running"
+		}
+		if state == "absent" {
+			return "", ""
+		}
+		return "timer-state", state
 	}
 	if state == "absent" {
-		return "", ""
-	}
-	if state == "superseded" {
-		if commandType == "resume" && target == "same" {
+		if commandType == "start" {
 			return "timer-state", "running"
 		}
-		return "timer-current", "running"
-	}
-	if commandType == "clear" && target == "same" && (state == "completed" || state == "cancelled") {
 		return "", ""
+	}
+	if commandType == "clear" {
+		if state != "superseded" {
+			return "", ""
+		}
+		return "timer-current", "running"
 	}
 	status, _ := matrixStateSession(state, commandType, target)
 	return "timer-state", status

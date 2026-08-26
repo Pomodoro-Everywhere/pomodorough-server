@@ -22,6 +22,32 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Check out pinned shared core
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Pomodoro-Everywhere/pomodorough-core
+          ref: 8dc24486b38d87eb2c717e80b4315b31dd6a671d
+          path: shared-core
+          persist-credentials: false
+      - name: Rebuild and verify embedded shared core
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.97.1
+          (
+            cd shared-core
+            cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked
+          )
+          rebuilt=shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
+          python3 shared-core/scripts/canonicalize_wasm_artifact.py "$rebuilt"
+          python3 shared-core/scripts/verify_wasm_artifact.py "$rebuilt"
+          python3 shared-core/scripts/verify_wasm_artifact.py \
+            internal/sharedcore/pomodorough_core.wasm \
+            --sha256 1e67043a8a652c5f9c6d36b28fe280b4bb5677e0c0279faaccdceb407181face
+          python3 scripts/verify_shared_core_provenance.py \
+            --sha256 1e67043a8a652c5f9c6d36b28fe280b4bb5677e0c0279faaccdceb407181face \
+            "$rebuilt" \
+            internal/sharedcore/pomodorough_core.wasm \
+            web/pomodorough_core.wasm
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -34,6 +60,8 @@ jobs:
           cache: npm
       - name: Test server
         run: go test ./...
+      - name: Test shared-core provenance verifier
+        run: python3 -m unittest scripts/test_shared_core_provenance.py -v
       - name: Test server with race detector
         run: go test -race ./...
       - name: Vet server
@@ -48,6 +76,8 @@ jobs:
         run: python3 scripts/check_protocol_fixture.py
       - name: Check workflow action pins
         run: python3 scripts/check_workflow_pins.py
+      - name: Check generated shared-core metadata
+        run: python3 scripts/generate_shared_core_metadata.py --check
       - name: Exercise SQLite restore drill
         run: |
           set -euo pipefail

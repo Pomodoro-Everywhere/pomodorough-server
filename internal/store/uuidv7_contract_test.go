@@ -71,8 +71,12 @@ func TestSharedUUIDv7FixtureMixedIDsAndImmutableCollisionContract(t *testing.T) 
 
 			mixed, err := userStore.Sync(ctx, db, userID, loser, now.Add(4*time.Second))
 			mixedAck := domainAck(mixed, domain)
+			wantOutcome := "ignored"
+			if domain == "timer" {
+				wantOutcome = "applied"
+			}
 			if err != nil || !mixed.Changed || mixed.Revision != 2 ||
-				mixedAck.ID != domainRequestID(loser, domain) || mixedAck.Outcome != "ignored" {
+				mixedAck.ID != domainRequestID(loser, domain) || mixedAck.Outcome != wantOutcome {
 				t.Fatalf("mixed UUIDv4 mutation = %#v, ack=%#v, err=%v", mixed, mixedAck, err)
 			}
 			if count := operationCount(t, db, domain); count != 2 {

@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { SharedCore } = require("./shared-core.js");
 
 function fakeCore(envelope, options = {}) {
@@ -122,11 +123,58 @@ async function loadCore() {
   return SharedCore.fromBytes(bytes);
 }
 
+test("generated browser metadata matches the exact served WASM and source pin", () => {
+  const metadata = require("./shared-core-metadata.js");
+  const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  const pinnedDigest = fs.readFileSync(
+    path.join(__dirname, "../internal/sharedcore/pomodorough_core.wasm.sha256"),
+    "utf8"
+  ).trim().split(/\s+/)[0];
+  const pinnedCommit = fs.readFileSync(
+    path.join(__dirname, "../internal/sharedcore/CORE_COMMIT"),
+    "utf8"
+  ).trim();
+
+  assert.deepEqual(metadata, {
+    coreCommit: pinnedCommit,
+    sha256: pinnedDigest,
+    wasmURL: `/pomodorough_core.wasm?sha256=${pinnedDigest}`,
+    cacheVersion: `core-${pinnedDigest.slice(0, 16)}`
+  });
+  assert.equal(digest, metadata.sha256);
+});
+
+test("browser host fails closed when Web Crypto is unavailable", async () => {
+  const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
+  const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+  try {
+    await assert.rejects(() => SharedCore.fromBytes(bytes), /Web Crypto is unavailable/);
+  } finally {
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+    else delete globalThis.crypto;
+  }
+});
+
+test("browser host rejects valid WASM bytes with a modified digest", async () => {
+  const bytes = new Uint8Array(fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm")));
+  bytes[bytes.length - 1] ^= 1;
+
+  await assert.rejects(() => SharedCore.fromBytes(bytes), /digest/i);
+});
+
+test("browser host rejects wrong digest metadata before instantiation", async () => {
+  const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
+
+  await assert.rejects(() => SharedCore.fromBytes(bytes, "0".repeat(64)), /digest/i);
+});
+
 test("shared WASM core exposes its pinned version", async () => {
   const core = await loadCore();
   assert.deepEqual(core.call("core.version", {}), {
     schemaVersion: 1,
-    coreVersion: "0.1.0"
+    coreVersion: "0.1.5"
   });
 });
 

@@ -1,14 +1,21 @@
 "use strict";
 
 (function (root, factory) {
-  const exported = factory();
+  const metadata = typeof module === "object" && module.exports
+    ? require("./shared-core-metadata.js")
+    : root?.PomodoroughSharedCoreMetadata;
+  const exported = factory(metadata);
   if (typeof module === "object" && module.exports) module.exports = exported;
   if (root) root.PomodoroughSharedCore = exported;
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (metadata) {
+  if (!metadata || !/^[0-9a-f]{64}$/.test(metadata.sha256)
+      || typeof metadata.wasmURL !== "string") {
+    throw new Error("Shared core metadata is missing or invalid");
+  }
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  const CORE_SHA256 = "89fb6300324042b61d62070242cccad10e30f125885bb1b7a05af67b077bac83";
-  const CORE_URL = `/pomodorough_core.wasm?sha256=${CORE_SHA256}`;
+  const CORE_SHA256 = metadata.sha256;
+  const CORE_URL = metadata.wasmURL;
   const MAX_OPERATION_BYTES = 256;
   const MAX_INPUT_BYTES = 16 * 1024 * 1024;
   const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -30,9 +37,17 @@
       this.#checkMemory();
     }
 
-    static async fromBytes(bytes) {
+    static async fromBytes(bytes, expectedDigest = CORE_SHA256) {
       const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       if (source.byteLength > MAX_INPUT_BYTES) throw new Error("Shared core module is too large");
+      if (!/^[0-9a-f]{64}$/.test(expectedDigest)) {
+        throw new Error("Shared core expected digest is invalid");
+      }
+      const subtle = globalThis.crypto?.subtle;
+      if (!subtle) throw new Error("Web Crypto is unavailable for shared-core verification");
+      const digestBytes = new Uint8Array(await subtle.digest("SHA-256", source));
+      const actualDigest = Array.from(digestBytes, (value) => value.toString(16).padStart(2, "0")).join("");
+      if (actualDigest !== expectedDigest) throw new Error("Shared core digest mismatch");
       const { instance } = await WebAssembly.instantiate(source, {});
       return new SharedCore(instance);
     }

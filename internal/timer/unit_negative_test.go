@@ -7,33 +7,23 @@ import (
 
 func TestReduceRejectsInvalidTransitions(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
-	start := command("start", "device-a", "timer-a", "start", 1, 100, base, 0)
 	tests := []struct {
 		name     string
 		commands []Command
 		target   string
 		outcome  Outcome
 	}{
-		{
-			name: "duplicate start", commands: []Command{start, command("duplicate", "device-a", "timer-a", "start", 2, 200, base.Add(time.Second), 0)},
-			target: "duplicate", outcome: Outcome{Outcome: "ignored", Reason: "timer already exists"},
-		},
+
 		{
 			name: "pause missing timer", commands: []Command{command("pause", "device-a", "timer-a", "pause", 1, 100, base, 0)},
 			target: "pause", outcome: Outcome{Outcome: "ignored", Reason: "timer is not the active running timer"},
 		},
-		{
-			name: "resume running timer", commands: []Command{start, command("resume", "device-a", "timer-a", "resume", 2, 200, base.Add(time.Second), 0)},
-			target: "resume", outcome: Outcome{Outcome: "ignored", Reason: "timer cannot be resumed"},
-		},
+
 		{
 			name: "finish missing timer", commands: []Command{command("finish", "device-a", "timer-a", "finish", 1, 100, base, 0)},
 			target: "finish", outcome: Outcome{Outcome: "ignored", Reason: "timer is not active"},
 		},
-		{
-			name: "clear active timer", commands: []Command{start, command("clear", "device-a", "timer-a", "clear", 2, 200, base.Add(time.Second), 0)},
-			target: "clear", outcome: Outcome{Outcome: "ignored", Reason: "timer cannot be cleared"},
-		},
+
 		{
 			name: "unsupported command", commands: []Command{command("unsupported", "device-a", "timer-a", "skip", 1, 100, base, 0)},
 			target: "unsupported", outcome: Outcome{Outcome: "rejected", Reason: "unsupported command type"},

@@ -915,7 +915,7 @@ func TestLogicalProtocolConcurrentStartsAndFinishCancelConvergeDeterministically
 		}
 	}
 	states = fixture.converge(t, 4)
-	if states[0].CanonicalTimer == nil || states[0].CanonicalTimer.Status != "completed" || states[0].History[0].TimerID != linuxTimer || states[0].History[0].Status != "completed" {
+	if states[0].CanonicalTimer == nil || states[0].CanonicalTimer.Status != "cancelled" || states[0].History[0].TimerID != linuxTimer || states[0].History[0].Status != "cancelled" {
 		t.Fatalf("finish-vs-cancel state = %#v", states[0])
 	}
 }

@@ -106,11 +106,7 @@ func Reduce(input []Command, now time.Time) Result {
 		intent := &Intent{Type: command.Type, CommandID: command.ID, OccurredAt: formatTime(command.OccurredAt)}
 		switch command.Type {
 		case "start":
-			if _, exists := sessions[command.TimerID]; exists {
-				outcomes[command.ID] = Outcome{Outcome: "ignored", Reason: "timer already exists"}
-				continue
-			}
-			if current := sessions[currentID]; isActive(current) {
+			if current := sessions[currentID]; current != nil && current.TimerID != command.TimerID && isActive(current) {
 				supersede(current, command.OccurredAt, command.TimerID, command.ID)
 			}
 			sessions[command.TimerID] = &Session{
@@ -131,20 +127,27 @@ func Reduce(input []Command, now time.Time) Result {
 
 		case "pause":
 			target := sessions[command.TimerID]
-			if target == nil || currentID != command.TimerID || target.Status != "running" {
+			if target == nil {
 				outcomes[command.ID] = Outcome{Outcome: "ignored", Reason: "timer is not the active running timer"}
 				continue
+			}
+			if current := sessions[currentID]; current != nil && current.TimerID != command.TimerID && isActive(current) {
+				supersede(current, command.OccurredAt, command.TimerID, command.ID)
 			}
 			target.Status = "paused"
 			target.ElapsedAtAnchorMs = clamp(command.ObservedElapsedMs, 0, target.PlannedDurationMs)
 			target.AnchorAt = command.OccurredAt
+			target.EndedAt = time.Time{}
+			target.TerminalCommandID = ""
+			target.SupersededByTimerID = ""
 			target.LastCommandID = command.ID
 			target.LastIntent = intent
+			currentID = target.TimerID
 			outcomes[command.ID] = Outcome{Outcome: "applied"}
 
 		case "resume":
 			target := sessions[command.TimerID]
-			if target == nil || (target.Status != "paused" && target.Status != "superseded") {
+			if target == nil {
 				outcomes[command.ID] = Outcome{Outcome: "ignored", Reason: "timer cannot be resumed"}
 				continue
 			}
@@ -164,16 +167,12 @@ func Reduce(input []Command, now time.Time) Result {
 
 		case "finish", "cancel":
 			target := sessions[command.TimerID]
-			if command.Type == "finish" && target != nil && currentID == command.TimerID && target.Status == "completed" && target.TerminalCommandID == "" {
-				target.LastCommandID = command.ID
-				target.TerminalCommandID = command.ID
-				target.LastIntent = intent
-				outcomes[command.ID] = Outcome{Outcome: "applied"}
-				continue
-			}
-			if target == nil || currentID != command.TimerID || !isActive(target) {
+			if target == nil {
 				outcomes[command.ID] = Outcome{Outcome: "ignored", Reason: "timer is not active"}
 				continue
+			}
+			if current := sessions[currentID]; current != nil && current.TimerID != command.TimerID && isActive(current) {
+				supersede(current, command.OccurredAt, command.TimerID, command.ID)
 			}
 			if command.Type == "finish" {
 				target.Status = "completed"
@@ -186,18 +185,22 @@ func Reduce(input []Command, now time.Time) Result {
 			target.EndedAt = command.OccurredAt
 			target.LastCommandID = command.ID
 			target.TerminalCommandID = command.ID
+			target.SupersededByTimerID = ""
 			target.LastIntent = intent
+			currentID = target.TimerID
 			outcomes[command.ID] = Outcome{Outcome: "applied"}
 
 		case "clear":
 			target := sessions[command.TimerID]
-			if target == nil || currentID != command.TimerID || isActive(target) {
+			if target == nil {
 				outcomes[command.ID] = Outcome{Outcome: "ignored", Reason: "timer cannot be cleared"}
 				continue
 			}
 			target.LastCommandID = command.ID
 			target.LastIntent = intent
-			currentID = ""
+			if currentID == command.TimerID {
+				currentID = ""
+			}
 			outcomes[command.ID] = Outcome{Outcome: "applied"}
 
 		default:

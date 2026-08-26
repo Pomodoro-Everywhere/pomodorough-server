@@ -1,6 +1,10 @@
 "use strict";
 
-const CACHE_NAME = "pomodorough-shell-v44";
+importScripts("/shared-core-metadata.js?v=1");
+
+const CORE_METADATA = self.PomodoroughSharedCoreMetadata;
+if (!CORE_METADATA) throw new Error("Shared core metadata is unavailable");
+const CACHE_NAME = `pomodorough-shell-v45-${CORE_METADATA.cacheVersion}`;
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
@@ -11,8 +15,9 @@ const SHELL = [
   "/landing.js?v=1",
   "/app",
   "/app.css?v=20",
-  "/shared-core.js?v=4",
-  "/pomodorough_core.wasm?sha256=89fb6300324042b61d62070242cccad10e30f125885bb1b7a05af67b077bac83",
+  "/shared-core-metadata.js?v=1",
+  "/shared-core.js?v=6",
+  CORE_METADATA.wasmURL,
   "/sync-core.js?v=25",
   "/sync-storage.js?v=26",
   "/i18n.js?v=2",

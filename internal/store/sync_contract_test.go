@@ -276,7 +276,11 @@ func TestSyncExactLostResponseRetriesAndIgnoredStoredBatchesByDomain(t *testing.
 
 			ignored, err := userStore.Sync(ctx, db, userID, loser, now.Add(2*time.Second))
 			ignoredAck := domainAck(ignored, domain)
-			if err != nil || !ignored.Changed || ignored.Revision != 2 || ignoredAck.Count != 1 || ignoredAck.ID != domainRequestID(loser, domain) || ignoredAck.Outcome != "ignored" || ignoredAck.Reason == "" {
+			wantOutcome := "ignored"
+			if domain == "timer" {
+				wantOutcome = "applied"
+			}
+			if err != nil || !ignored.Changed || ignored.Revision != 2 || ignoredAck.Count != 1 || ignoredAck.ID != domainRequestID(loser, domain) || ignoredAck.Outcome != wantOutcome || (wantOutcome == "ignored") != (ignoredAck.Reason != "") {
 				t.Fatalf("newly stored loser = %#v, %v", ignored, err)
 			}
 			ignoredRetry, err := userStore.Sync(ctx, db, userID, loser, now.Add(3*time.Second))
@@ -306,7 +310,11 @@ func TestSyncAcknowledgesEveryTerminalOutcomeInEveryDomain(t *testing.T) {
 			}
 			ignored, err := userStore.Sync(ctx, db, userID, loser, now.Add(time.Second))
 			ignoredAck := domainAck(ignored, domain)
-			if err != nil || ignoredAck.Count != 1 || ignoredAck.ID != domainRequestID(loser, domain) || ignoredAck.Outcome != "ignored" || ignoredAck.Reason == "" {
+			wantOutcome := "ignored"
+			if domain == "timer" {
+				wantOutcome = "applied"
+			}
+			if err != nil || ignoredAck.Count != 1 || ignoredAck.ID != domainRequestID(loser, domain) || ignoredAck.Outcome != wantOutcome || (wantOutcome == "ignored") != (ignoredAck.Reason != "") {
 				t.Fatalf("ignored acknowledgement = %#v, %v", ignoredAck, err)
 			}
 			conflicting := winner

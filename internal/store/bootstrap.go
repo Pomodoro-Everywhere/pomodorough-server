@@ -168,7 +168,10 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 		}
 	}
 
-	result := resultFromReduction(reduction, revision, now, &syncRequest)
+	result, err := resultFromReduction(ctx, reduction, revision, now, &syncRequest)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	if request.Strategy != BootstrapKeepRemote {
 		addAcknowledgements(&result, syncRequest, application, reduction)
 	}

@@ -215,10 +215,31 @@ func TestServerCIRebuildsPinnedCoreArtifact(t *testing.T) {
 		"cd shared-core",
 		"cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked",
 		"shared-core/scripts/verify_wasm_artifact.py",
+		"scripts/verify_shared_core_provenance.py",
+		`"$rebuilt"`,
 		"cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("server CI does not verify embedded shared core: missing %q", required)
+		}
+	}
+}
+
+func TestServerReleaseRebuildsPinnedCoreArtifact(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"repository: Pomodoro-Everywhere/pomodorough-core",
+		"Rebuild and verify embedded shared core",
+		"scripts/verify_shared_core_provenance.py",
+		"internal/sharedcore/pomodorough_core.wasm",
+		"web/pomodorough_core.wasm",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("server release does not verify embedded shared core: missing %q", required)
 		}
 	}
 }
@@ -228,7 +249,7 @@ func TestEmbeddedCoreArtifactHasPinnedProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(commit)); got != "9a01dc8da0f1612e7a301c19cf42f3b522e61684" {
+	if got := strings.TrimSpace(string(commit)); got != "8dc24486b38d87eb2c717e80b4315b31dd6a671d" {
 		t.Fatalf("embedded core commit = %q", got)
 	}
 	checksum, err := os.ReadFile("pomodorough_core.wasm.sha256")
@@ -271,7 +292,7 @@ func TestEmbeddedCoreVersion(t *testing.T) {
 	if err := json.Unmarshal(result, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.1.0" {
+	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.1.5" {
 		t.Fatalf("unexpected core version envelope: %s", result)
 	}
 }
