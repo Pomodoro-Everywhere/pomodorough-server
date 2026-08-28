@@ -58,6 +58,86 @@ test("authority rejects structurally valid but contradictory completion plans", 
   assert.throws(() => policy.completionPlan({ kind: "generatedBreak" }), /completion plan/i);
 });
 
+test("authority rejects eligible generated break without a phase", () => {
+  const policy = authority.create({
+    tickHlc: () => ({ wallMs: 1, counter: 0 }),
+    planTimerCompletion: () => validCompletion({ generatedBreakEligible: true })
+  });
+
+  assert.throws(() => policy.completionPlan({ kind: "generatedBreak" }), /completion plan/i);
+});
+
+test("authority accepts phase-bearing expiry output", () => {
+  const output = validCompletion({
+    expired: true,
+    selectedPhase: "short_break",
+    generatedBreakPhase: "short_break"
+  });
+  const policy = authority.create({
+    tickHlc: () => ({ wallMs: 1, counter: 0 }),
+    planTimerCompletion: () => output
+  });
+
+  assert.deepEqual(policy.completionPlan({ kind: "expiry" }), output);
+});
+
+test("authority rejects accepted source without generated-break eligibility", () => {
+  const policy = authority.create({
+    tickHlc: () => ({ wallMs: 1, counter: 0 }),
+    planTimerCompletion: () => validCompletion({ sourceAlreadyAccepted: true })
+  });
+
+  assert.throws(() => policy.completionPlan({ kind: "generatedBreak" }), /completion plan/i);
+});
+
+test("authority binds generated eligibility to exact source evidence", () => {
+  const policy = authority.create({
+    tickHlc: () => ({ wallMs: 1, counter: 0 }),
+    planTimerCompletion: () => validCompletion({
+      generatedBreakEligible: true,
+      generatedBreakPhase: "short_break"
+    })
+  });
+  const input = {
+    kind: "generatedBreak",
+    source: { commandId: "finish", timerId: "timer" },
+    canonical: { canonicalTimer: null, history: [] },
+    optimistic: { canonicalTimer: null, history: [] },
+    sourceFinishPending: true,
+    requireCanonical: false
+  };
+
+  assert.throws(() => policy.completionPlan(input), /completion plan/i);
+});
+
+test("authority accepts exact generated-break evidence", () => {
+  const output = validCompletion({
+    generatedBreakEligible: true,
+    generatedBreakPhase: "short_break",
+    sourceAlreadyAccepted: true
+  });
+  const policy = authority.create({
+    tickHlc: () => ({ wallMs: 1, counter: 0 }),
+    planTimerCompletion: () => output
+  });
+  const completed = { id: "timer", phase: "focus", status: "completed" };
+  const history = [{
+    id: "history", timerId: "timer", commandId: "finish",
+    phase: "focus", status: "completed"
+  }];
+  const projection = { canonicalTimer: completed, history };
+  const input = {
+    kind: "generatedBreak",
+    source: { commandId: "finish", timerId: "timer" },
+    canonical: projection,
+    optimistic: projection,
+    sourceFinishPending: false,
+    requireCanonical: true
+  };
+
+  assert.deepEqual(policy.completionPlan(input), output);
+});
+
 test("completion day bounds preserve the browser local calendar day", () => {
   const received = [];
   const policy = authority.create({

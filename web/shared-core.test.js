@@ -115,6 +115,69 @@ test("typed completion and HLC seams reject malformed successful core values", (
   assert.throws(() => malformedClock.tickHlc({}), /HLC tick/i);
 });
 
+test("typed completion seam rejects eligible generated break without a phase", () => {
+  const contradictory = fakeCore({ ok: true, value: {
+    expired: false, commandEligible: false, reserveGeneratedBreak: false,
+    selectedPhase: null, queueAutoBreak: false, generatedBreakEligible: true,
+    generatedBreakPhase: null, sourceAlreadyAccepted: false
+  } }).core;
+
+  assert.throws(
+    () => contradictory.planTimerCompletion({ kind: "generatedBreak" }),
+    /completion plan/i
+  );
+});
+
+test("typed completion seam binds generated eligibility to exact source evidence", () => {
+  const contradictory = fakeCore({ ok: true, value: {
+    expired: false, commandEligible: false, reserveGeneratedBreak: false,
+    selectedPhase: null, queueAutoBreak: false, generatedBreakEligible: true,
+    generatedBreakPhase: "short_break", sourceAlreadyAccepted: false
+  } }).core;
+
+  assert.throws(
+    () => contradictory.planTimerCompletion({
+      kind: "generatedBreak",
+      source: { commandId: "finish", timerId: "timer" },
+      canonical: { canonicalTimer: null, history: [] },
+      optimistic: { canonicalTimer: null, history: [] },
+      sourceFinishPending: true,
+      requireCanonical: false
+    }),
+    /completion plan/i
+  );
+});
+
+test("typed completion seam accepts exact generated-break evidence", () => {
+  const output = {
+    expired: false, commandEligible: false, reserveGeneratedBreak: false,
+    selectedPhase: null, queueAutoBreak: false, generatedBreakEligible: true,
+    generatedBreakPhase: "short_break", sourceAlreadyAccepted: true
+  };
+  const core = fakeCore({ ok: true, value: output }).core;
+  const completed = {
+    id: "timer", phase: "focus", status: "completed",
+    plannedDurationMs: 1500000, elapsedAtAnchorMs: 1500000,
+    anchorAt: "2026-08-25T12:00:00Z"
+  };
+  const history = [{
+    id: "history", timerId: "timer", commandId: "finish", phase: "focus",
+    status: "completed", plannedDurationMs: 1500000,
+    completedAt: "2026-08-25T12:00:00Z", endedAt: "2026-08-25T12:00:00Z"
+  }];
+  const projection = { canonicalTimer: completed, history };
+  const input = {
+    kind: "generatedBreak",
+    source: { commandId: "finish", timerId: "timer" },
+    canonical: projection,
+    optimistic: projection,
+    sourceFinishPending: false,
+    requireCanonical: true
+  };
+
+  assert.deepEqual(core.planTimerCompletion(input), output);
+});
+
 test("browser host invalidates an instance after cleanup failure", () => {
   const { core } = fakeCore({ ok: true, value: {} }, { freeThrows: true });
   assert.throws(() => core.call("core.version", {}), /cleanup/i);
@@ -244,7 +307,7 @@ test("shared WASM core exposes its pinned version", async () => {
   const core = await loadCore();
   assert.deepEqual(core.call("core.version", {}), {
     schemaVersion: 1,
-    coreVersion: "0.1.6"
+    coreVersion: "0.1.7"
   });
 });
 

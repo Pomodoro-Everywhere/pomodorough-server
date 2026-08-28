@@ -24,25 +24,50 @@
     return value === null || PHASES.has(value);
   }
 
+  function projectionHasExactSource(projection, source) {
+    const timer = projection?.canonicalTimer;
+    const history = projection?.history;
+    return typeof source?.timerId === "string"
+      && typeof source?.commandId === "string"
+      && timer?.id === source.timerId
+      && timer?.phase === "focus"
+      && timer?.status === "completed"
+      && Array.isArray(history)
+      && history.some((item) => item?.timerId === source.timerId
+        && item?.commandId === source.commandId
+        && item?.phase === "focus"
+        && item?.status === "completed");
+  }
+
   function validCompletionRelationships(value, input) {
     if (value.reserveGeneratedBreak && !value.commandEligible) return false;
     if (value.queueAutoBreak && value.selectedPhase === null) return false;
-    if ((value.generatedBreakPhase !== null) !== value.generatedBreakEligible) return false;
     if (input?.kind === "commandRequest") {
       return !value.expired && value.selectedPhase === null && !value.queueAutoBreak
-        && !value.generatedBreakEligible && !value.sourceAlreadyAccepted;
+        && !value.generatedBreakEligible && value.generatedBreakPhase === null
+        && !value.sourceAlreadyAccepted;
     }
     if (input?.kind === "finishApplied") {
       return !value.expired && !value.commandEligible && !value.reserveGeneratedBreak
-        && value.selectedPhase !== null && !value.generatedBreakEligible && !value.sourceAlreadyAccepted;
+        && value.selectedPhase !== null && !value.generatedBreakEligible
+        && value.generatedBreakPhase === null && !value.sourceAlreadyAccepted;
     }
     if (input?.kind === "generatedBreak") {
+      const canonicalHasSource = projectionHasExactSource(input.canonical, input.source);
+      const sourceAccepted = input.sourceFinishPending === false && canonicalHasSource;
+      const selected = input.requireCanonical === true || sourceAccepted
+        ? input.canonical
+        : input.optimistic;
       return !value.expired && !value.commandEligible && !value.reserveGeneratedBreak
-        && value.selectedPhase === null && !value.queueAutoBreak;
+        && value.selectedPhase === null && !value.queueAutoBreak
+        && value.generatedBreakEligible === (value.generatedBreakPhase !== null)
+        && value.generatedBreakEligible === projectionHasExactSource(selected, input.source)
+        && value.sourceAlreadyAccepted === sourceAccepted;
     }
     if (input?.kind === "expiry") {
       return !value.commandEligible && !value.reserveGeneratedBreak && !value.queueAutoBreak
-        && !value.generatedBreakEligible && !value.sourceAlreadyAccepted;
+        && !value.generatedBreakEligible && !value.sourceAlreadyAccepted
+        && (value.expired || (value.selectedPhase === null && value.generatedBreakPhase === null));
     }
     return true;
   }

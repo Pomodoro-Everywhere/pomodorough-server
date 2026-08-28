@@ -21,6 +21,21 @@
   const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
   const MAX_MEMORY_BYTES = 256 * 1024 * 1024;
 
+  function projectionHasExactSource(projection, source) {
+    const timer = projection?.canonicalTimer;
+    const history = projection?.history;
+    return typeof source?.timerId === "string"
+      && typeof source?.commandId === "string"
+      && timer?.id === source.timerId
+      && timer?.phase === "focus"
+      && timer?.status === "completed"
+      && Array.isArray(history)
+      && history.some((item) => item?.timerId === source.timerId
+        && item?.commandId === source.commandId
+        && item?.phase === "focus"
+        && item?.status === "completed");
+  }
+
   class SharedCore {
     constructor(instance) {
       this.instance = instance;
@@ -76,7 +91,7 @@
 
     planTimerCompletion(input) {
       const value = this.call("timer.completionPlan.v1", input);
-      this.#validateCompletionPlan(value);
+      this.#validateCompletionPlan(value, input);
       return value;
     }
 
@@ -190,20 +205,31 @@
       }
     }
 
-    #validateCompletionPlan(value) {
+    #validateCompletionPlan(value, input) {
       const keys = [
         "commandEligible", "expired", "generatedBreakEligible", "generatedBreakPhase",
         "queueAutoBreak", "reserveGeneratedBreak", "selectedPhase", "sourceAlreadyAccepted"
       ];
       const phase = (candidate) => candidate === null
         || ["focus", "short_break", "long_break"].includes(candidate);
+      const invalidGeneratedBreak = input?.kind === "generatedBreak" && (() => {
+        const canonicalHasSource = projectionHasExactSource(input.canonical, input.source);
+        const sourceAccepted = input.sourceFinishPending === false && canonicalHasSource;
+        const selected = input.requireCanonical === true || sourceAccepted
+          ? input.canonical
+          : input.optimistic;
+        return value?.generatedBreakEligible !== (value?.generatedBreakPhase !== null)
+          || value?.generatedBreakEligible !== projectionHasExactSource(selected, input.source)
+          || value?.sourceAlreadyAccepted !== sourceAccepted;
+      })();
       if (!value || typeof value !== "object" || Array.isArray(value)
           || Object.keys(value).sort().join(",") !== keys.sort().join(",")
           || !["expired", "commandEligible", "reserveGeneratedBreak", "queueAutoBreak",
             "generatedBreakEligible", "sourceAlreadyAccepted"].every(
             (name) => typeof value[name] === "boolean"
           )
-          || !phase(value.selectedPhase) || !phase(value.generatedBreakPhase)) {
+          || !phase(value.selectedPhase) || !phase(value.generatedBreakPhase)
+          || invalidGeneratedBreak) {
         throw new Error("Shared core returned an invalid completion plan");
       }
     }
