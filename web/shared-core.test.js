@@ -12,6 +12,7 @@ function fakeCore(envelope, options = {}) {
   let nextPointer = 1024;
   let allocationCalls = 0;
   let freeCalls = 0;
+  const operations = [];
   const exports = {
     memory,
     pomodorough_alloc(length) {
@@ -28,14 +29,26 @@ function fakeCore(envelope, options = {}) {
       if (options.freeError) throw new Error(options.freeError(pointer));
       if (options.freeThrows) throw new Error("synthetic free trap");
     },
-    pomodorough_dispatch() {
-      const bytes = new TextEncoder().encode(JSON.stringify(envelope));
+    pomodorough_free_v2(pointer) {
+      freeCalls += 1;
+      if (options.freeError) throw new Error(options.freeError(pointer));
+      if (options.freeThrows) throw new Error("synthetic free trap");
+      return options.freeStatus ?? 1;
+    },
+    pomodorough_dispatch(operationPointer, operationLength) {
+      operations.push(new TextDecoder().decode(
+        new Uint8Array(memory.buffer, operationPointer, operationLength)
+      ));
+      const currentEnvelope = typeof options.envelope === "function"
+        ? options.envelope(operations.length - 1)
+        : envelope;
+      const bytes = new TextEncoder().encode(JSON.stringify(currentEnvelope));
       const pointer = 8192;
       new Uint8Array(memory.buffer, pointer, bytes.length).set(bytes);
       return (BigInt(bytes.length) << 32n) | BigInt(pointer);
     }
   };
-  return { core: new SharedCore({ exports }), freeCalls: () => freeCalls };
+  return { core: new SharedCore({ exports }), freeCalls: () => freeCalls, operations: () => operations };
 }
 
 test("browser host rejects malformed envelopes and task identities", () => {
@@ -53,20 +66,63 @@ test("browser host rejects malformed envelopes and task identities", () => {
     ok: true,
     value: { id: "not-a-uuid", title: "Café", utf8Bytes: 4 }
   });
-  assert.throws(() => core.call("task.identity.v1", { title: "Café" }), /task identity/i);
+  assert.throws(() => core.taskIdentity({ title: "Café" }), /task identity/i);
 
   const { core: wrongVersionCore } = fakeCore({
     ok: true,
     value: { id: "00000000-0000-0000-0000-000000000000", title: "Café", utf8Bytes: 5 }
   });
   assert.throws(
-    () => wrongVersionCore.call("task.identity.v1", { title: "Café" }),
+    () => wrongVersionCore.taskIdentity({ title: "Café" }),
     /task identity/i
   );
 });
 
+test("typed shared-core adapter methods dispatch pinned production operations", () => {
+  const completion = {
+    expired: false, commandEligible: false, reserveGeneratedBreak: false,
+    selectedPhase: null, queueAutoBreak: false, generatedBreakEligible: false,
+    generatedBreakPhase: null, sourceAlreadyAccepted: false
+  };
+  const clock = { wallMs: 101, counter: 0 };
+  const envelopes = [
+    {}, {}, {}, completion, clock
+  ];
+  const { core, operations } = fakeCore(null, {
+    envelope: (index) => ({ ok: true, value: envelopes[index] })
+  });
+
+  assert.deepEqual(core.projectSynchronizedState({}), {});
+  assert.deepEqual(core.planBootstrap({}), {});
+  assert.deepEqual(core.reconcileSynchronizedState({}), {});
+  assert.deepEqual(core.planTimerCompletion({}), completion);
+  assert.deepEqual(core.tickHlc({}), clock);
+  assert.deepEqual(operations(), [
+    "projection.apply.v2", "bootstrap.plan.v1", "reconcile.rebase.v1",
+    "timer.completionPlan.v1", "hlc.tick.v1"
+  ]);
+});
+
+test("typed completion and HLC seams reject malformed successful core values", () => {
+  const malformedCompletion = fakeCore({ ok: true, value: {
+    expired: false, commandEligible: false, reserveGeneratedBreak: false,
+    selectedPhase: "nap", queueAutoBreak: false, generatedBreakEligible: false,
+    generatedBreakPhase: null, sourceAlreadyAccepted: false
+  } }).core;
+  const malformedClock = fakeCore({ ok: true, value: { wallMs: 10, counter: -1 } }).core;
+
+  assert.throws(() => malformedCompletion.planTimerCompletion({}), /completion plan/i);
+  assert.throws(() => malformedClock.tickHlc({}), /HLC tick/i);
+});
+
 test("browser host invalidates an instance after cleanup failure", () => {
   const { core } = fakeCore({ ok: true, value: {} }, { freeThrows: true });
+  assert.throws(() => core.call("core.version", {}), /cleanup/i);
+  assert.throws(() => core.call("core.version", {}), /unusable/i);
+});
+
+test("browser host invalidates an instance after rejected free ownership", () => {
+  const { core } = fakeCore({ ok: true, value: {} }, { freeStatus: 0 });
   assert.throws(() => core.call("core.version", {}), /cleanup/i);
   assert.throws(() => core.call("core.version", {}), /unusable/i);
 });
@@ -123,6 +179,20 @@ async function loadCore() {
   return SharedCore.fromBytes(bytes);
 }
 
+test("packaged browser WASM reports stale, wrong-length, and duplicate frees", async () => {
+  const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
+  const { instance } = await WebAssembly.instantiate(bytes);
+  const alloc = instance.exports.pomodorough_alloc;
+  const free = instance.exports.pomodorough_free_v2;
+  assert.equal(typeof free, "function");
+  const pointer = alloc(8);
+  assert.notEqual(pointer, 0);
+  assert.equal(free(pointer, 7), 0);
+  assert.equal(free(pointer, 8), 1);
+  assert.equal(free(pointer, 8), 0);
+  assert.equal(free(0, 8), 0);
+});
+
 test("generated browser metadata matches the exact served WASM and source pin", () => {
   const metadata = require("./shared-core-metadata.js");
   const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
@@ -174,7 +244,7 @@ test("shared WASM core exposes its pinned version", async () => {
   const core = await loadCore();
   assert.deepEqual(core.call("core.version", {}), {
     schemaVersion: 1,
-    coreVersion: "0.1.5"
+    coreVersion: "0.1.6"
   });
 });
 
@@ -192,7 +262,7 @@ test("shared WASM core reports unsupported operations", async () => {
 
 test("shared WASM core owns production task identity", async () => {
   const core = await loadCore();
-  assert.deepEqual(core.call("task.identity.v1", { title: "\u0000Cafe\u0301\u001f" }), {
+  assert.deepEqual(core.taskIdentity({ title: "\u0000Cafe\u0301\u001f" }), {
     id: "aaf83054-24b2-8c0e-901f-a974147bfe82",
     title: "Café",
     utf8Bytes: 5

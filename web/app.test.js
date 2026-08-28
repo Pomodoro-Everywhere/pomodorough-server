@@ -6,79 +6,48 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const crypto = require("node:crypto");
-const sync = require("./sync-core.js");
+const { indexedDB } = require("fake-indexeddb");
+const productionSync = require("./sync-core.js");
+const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
+// VM fixtures stay synchronous; removed decision helpers live only in test compatibility code.
+const sync = Object.freeze({ ...productionSync, ...legacyDecisionCompat });
+const createTimerReducer = require("./test/app-timer-reducer.js");
+
+function completionPlanFixture(input) {
+  if (input.phase !== "focus") return { selectedPhase: "focus" };
+  const reference = new Date(input.referenceMs);
+  const start = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate()).getTime();
+  const end = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + 1).getTime();
+  const completed = input.history.filter((item) => {
+    const at = Date.parse(item.completedAt || item.endedAt);
+    return item.phase === "focus" && item.status === "completed" && at >= start && at < end;
+  }).length;
+  return { selectedPhase: completed > 0 && completed % 4 === 0 ? "long_break" : "short_break" };
+}
+
+test("production bootstrap and reconciliation use shared-core storage adapters", () => {
+  const source = ["app-state.js", "app-storage.js", "app-sync.js", "app-bootstrap.js"]
+    .map((file) => fs.readFileSync(path.join(__dirname, file), "utf8")).join("\n");
+  assert.match(source, /syncStorage\.bootstrapPlan\(/);
+  assert.match(source, /syncStorage\.reconcileState\(/);
+  assert.match(source, /syncStorage\.reconcileResolutionState\(/);
+  assert.match(source, /\.taskIdentity\(/);
+  assert.doesNotMatch(source, /syncCore\.decideBootstrap\(/);
+  assert.doesNotMatch(source, /syncCore\.rebaseSyncState\(/);
+  assert.doesNotMatch(source, /syncCore\.applyResolutionState\(/);
+  assert.doesNotMatch(source, /\.call\("(?:task\.identity|projection\.apply|bootstrap\.plan|reconcile\.rebase)/);
+  assert.doesNotMatch(source, /function reduceCommand\(/);
+});
 
 function loadTaskProjection() {
   const appPath = path.join(__dirname, "app.js");
-  const source = fs.readFileSync(appPath, "utf8");
-  const instrumented = source.replace(
-    "  initialize();",
-    `  globalThis.PomodoroughAppTest = {
-    state,
-    phaseLabel,
-    timerStatusLabel,
-    formatTaskDuration,
-    formatHistoryDate,
-    setI18nForTest(value) { i18n = value; },
-    emptyTimer,
-    displayTimer,
-    elapsedFor,
-    trustedNow,
-    responseClockOffset,
-    reduceCommand,
-    rebuildOptimisticState,
-    rebuildOptimisticTasks,
-    rebuildOptimisticAutoStart,
-    rebuildOptimisticSelectedTask,
-    selectedTaskIdForNextFocus,
-    refreshAllPendingOperations,
-    renderTaskSelector,
-    issueSelectedTaskOperation,
-    ownerStateValue,
-    resetOwnerState,
-    restoreOwnerState,
-    setDatabaseForTest(value) { db = value; },
-    completionRetryDelay,
-    completedFocusCountForDay,
-    longBreakProgress,
-    nextBreakPhase,
-    nextPhaseAfterCompletion,
-    selectedPhaseAfterRejectedFinish,
-    selectedPhaseAfterCommandAcknowledgements,
-    arrivalHistoryItems,
-    historyTaskContext,
-    historyStatusLabel,
-    releaseCompletionRetry,
-    scheduleCompletionRetry,
-    setCompletionQueuedForTest(value) { completionQueuedFor = value; },
-    completionQueuedForTest() { return completionQueuedFor; },
-    closeRevisionStreamForIdentityChange,
-    pollRemoteState,
-    remoteSyncIntervalMs: REMOTE_SYNC_INTERVAL_MS,
-    completionAlertTitle,
-    primeCompletionAlerts,
-    startCompletionAlert,
-    stopCompletionAlert,
-    completionSoundIntervalMs: COMPLETION_SOUND_INTERVAL_MS,
-    completionAlertTimerIDTest() { return completionAlertTimerID; },
-    completionAlertDismissedTimerIDTest() { return completionAlertDismissedTimerID; },
-    accountDeletionConfirmationIsValid,
-    pendingLocalLogout,
-    markPendingLogout,
-    clearPendingLogout,
-    requestSessionRevocation,
-    fetchSessionPayload,
-    loadSession,
-    setFetchForTest(value) { globalThis.fetch = value; },
-    setRevisionStreamForTest(value) { eventSource = value; },
-    hasRevisionStreamForTest() { return Boolean(eventSource); }
-  };`
-  );
-  assert.notEqual(instrumented, source, "app test seam was not installed");
   let scheduledTimeout = null;
+  const scheduledTimeouts = [];
   const scheduledIntervals = [];
   const clearedIntervals = [];
   const notifications = [];
+  const eventSources = [];
+  const warnings = [];
   let toneStarts = 0;
   let allocatedMutationInput = null;
   let queues = {
@@ -95,22 +64,114 @@ function loadTaskProjection() {
     value: "",
     disabled: false
   };
+  let testDocument;
+  function screenButton(screen) {
+    const listeners = new Map();
+    return {
+      dataset: { screenButton: screen },
+      attributes: new Map(),
+      tabIndex: screen === "timer" ? 0 : -1,
+      addEventListener(type, listener) { listeners.set(type, listener); },
+      setAttribute(name, value) { this.attributes.set(name, value); },
+      getAttribute(name) { return this.attributes.get(name) ?? null; },
+      focus() { testDocument.activeElement = this; },
+      dispatch(type, properties = {}) {
+        const event = {
+          currentTarget: this,
+          defaultPrevented: false,
+          preventDefault() { this.defaultPrevented = true; },
+          ...properties
+        };
+        listeners.get(type)?.(event);
+        return event;
+      }
+    };
+  }
+  const timerTab = screenButton("timer");
+  const tasksTab = screenButton("tasks");
+  const screenButtons = [timerTab, tasksTab];
+  const timerScreen = { hidden: false };
+  const tasksScreen = { hidden: true };
+  const deleteAccountButton = { disabled: false };
+  const logoutButton = { disabled: false };
+  const notice = { textContent: "", hidden: true };
   const testElements = {
     "#taskSelector": taskSelector,
     "#syncStatus": { dataset: {} },
-    "#syncStatusText": { textContent: "" }
+    "#syncStatusText": { textContent: "" },
+    "#profile": { hidden: true },
+    "#profileAvatar": {
+      hidden: true,
+      removeAttribute(name) { if (name === "src") delete this.src; }
+    },
+    "#deleteAccountButton": deleteAccountButton,
+    "#logoutButton": logoutButton,
+    "#notice": notice,
+    "#timerScreen": timerScreen,
+    "#tasksScreen": tasksScreen
+  };
+  testDocument = {
+    activeElement: null,
+    querySelector: (selector) => testElements[selector] || null,
+    querySelectorAll: (selector) => selector === "[data-screen-button]" ? screenButtons : [],
+    createElement: () => ({ value: "", textContent: "", disabled: false })
   };
   const context = {
     PomodoroughSync: sync,
+    PomodoroughAppTest: { disableAutoStart: true },
     PomodoroughStorage: {
+      BootstrapGateError: class BootstrapGateError extends Error {},
+      finishAppliedPlan: completionPlanFixture,
       async normalizeLegacyDurationOperations() {},
+      async clearBootstrapGate() {},
+      async readBootstrapState() { return { gate: null, resolution: null }; },
+      async acquireBootstrapGateWithLegacyAutoStart() {
+        return { acquired: true, resolution: null };
+      },
       async readQueues() { return queues; },
+      projectState(input) {
+        const app = context.PomodoroughAppTest;
+        let projectedTimer = input.snapshot?.canonicalTimer
+          ? structuredClone(input.snapshot.canonicalTimer)
+          : null;
+        let history = structuredClone(input.snapshot?.history || []);
+        const sessions = new Map();
+        for (const command of [...(input.queues?.commands || [])].sort(sync.compareTimerCommands)) {
+          const reduced = app.reduceCommand(projectedTimer, history, command, sessions);
+          projectedTimer = reduced.timer?.id ? reduced.timer : null;
+          history = reduced.history;
+        }
+        const tasks = sync.applyTaskOperations(
+          structuredClone(input.snapshot?.tasks || []),
+          input.queues?.taskOperations || []
+        );
+        const selectedTaskId = sync.applySelectedTaskOperations(
+          input.snapshot?.selectedTaskId ?? null,
+          input.queues?.selectedTaskOperations || []
+        );
+        return {
+          canonicalTimer: projectedTimer,
+          history,
+          tasks,
+          durationsMs: sync.applyDurationOperations(
+            structuredClone(input.snapshot?.durationsMs),
+            input.queues?.durationOperations || []
+          ),
+          autoStartBreaks: sync.applyAutoStartOperations(
+            input.snapshot?.autoStartBreaks === true,
+            input.queues?.autoStartOperations || []
+          ),
+          selectedTaskId: selectedTaskId !== null && tasks.some((task) => task.id === selectedTaskId)
+            ? selectedTaskId
+            : null
+        };
+      },
       async allocateMutation(_database, input) {
         allocatedMutationInput = input;
         return input.build({ id: "selected-operation", wallMs: baseTime, counter: 0 });
       }
     },
-    console,
+    console: { ...console, warn(...args) { warnings.push(args); } },
     fetch: async () => ({ ok: true, status: 204 }),
     crypto: { randomUUID: () => "test-tab-id" },
     sessionStorage: { getItem: () => null, setItem: () => {} },
@@ -120,12 +181,33 @@ function loadTaskProjection() {
       setItem(key, value) { this.values.set(key, String(value)); },
       removeItem(key) { this.values.delete(key); }
     },
-    document: {
-      querySelector: (selector) => testElements[selector] || null,
-      querySelectorAll: () => [],
-      createElement: () => ({ value: "", textContent: "", disabled: false })
-    },
+    document: testDocument,
+    indexedDB,
     navigator: { onLine: true },
+    EventSource: class TestEventSource {
+      constructor(url) {
+        this.url = url;
+        this.listeners = new Map();
+        this.closed = false;
+        this.onmessage = null;
+        this.onerror = null;
+        eventSources.push(this);
+      }
+
+      addEventListener(type, listener) {
+        this.listeners.set(type, listener);
+      }
+
+      emit(type, data) {
+        const event = { data };
+        if (type === "message") this.onmessage?.(event);
+        else this.listeners.get(type)?.(event);
+      }
+
+      close() {
+        this.closed = true;
+      }
+    },
     Notification: class TestNotification {
       static permission = "granted";
 
@@ -170,6 +252,8 @@ function loadTaskProjection() {
     },
     window: {
       location: { href: "", assign(value) { this.href = value; } },
+      prompt: () => null,
+      confirm: () => false,
       clearInterval(id) {
         clearedIntervals.push(id);
       },
@@ -180,16 +264,36 @@ function loadTaskProjection() {
       },
       setTimeout(callback, delay) {
         scheduledTimeout = { callback, delay };
+        scheduledTimeouts.push(scheduledTimeout);
         return 1;
       }
     }
   };
   context.globalThis = context;
-  vm.runInNewContext(instrumented, context, { filename: appPath });
+  for (const file of [
+    "app-runtime.js", "app-state.js", "app-storage.js", "app-actions.js",
+    "app-sync.js", "app-bootstrap.js", "app-session.js", "app-view.js", "app.js"
+  ]) {
+    const scriptPath = path.join(__dirname, file);
+    vm.runInNewContext(fs.readFileSync(scriptPath, "utf8"), context, { filename: scriptPath });
+  }
+  context.PomodoroughAppTest.reduceCommand = createTimerReducer({
+    clone: structuredClone,
+    clampNumber(value, minimum, maximum) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return minimum;
+      return Math.min(maximum, Math.max(minimum, number));
+    },
+    emptyTimer: context.PomodoroughAppTest.emptyTimer
+  });
+  context.PomodoroughAppTest.state.deviceId = "test-device";
   return {
     ...context.PomodoroughAppTest,
     scheduledTimeoutDelay() {
       return scheduledTimeout?.delay ?? null;
+    },
+    scheduledTimeoutDelays() {
+      return scheduledTimeouts.map(({ delay }) => delay);
     },
     scheduledIntervals() {
       return scheduledIntervals;
@@ -200,11 +304,35 @@ function loadTaskProjection() {
     notifications() {
       return notifications;
     },
+    eventSources() {
+      return eventSources;
+    },
+    warnings() {
+      return warnings;
+    },
     toneStarts() {
       return toneStarts;
     },
     setOnline(value) {
       context.navigator.onLine = value;
+    },
+    setPromptResult(value) {
+      context.window.prompt = () => value;
+    },
+    setConfirmResult(value) {
+      context.window.confirm = () => value;
+    },
+    notice() {
+      return { textContent: notice.textContent, hidden: notice.hidden };
+    },
+    deleteAccountButtonDisabled() {
+      return deleteAccountButton.disabled;
+    },
+    logoutButtonDisabled() {
+      return logoutButton.disabled;
+    },
+    locationHref() {
+      return context.window.location.href;
     },
     setQueuesForTest(value) {
       queues = value;
@@ -217,9 +345,33 @@ function loadTaskProjection() {
     },
     taskSelectorDisabled() {
       return taskSelector.disabled;
+    },
+    screenButton(screen) {
+      return screen === "tasks" ? tasksTab : timerTab;
+    },
+    screenPanel(screen) {
+      return screen === "tasks" ? tasksScreen : timerScreen;
+    },
+    activeElement() {
+      return testDocument.activeElement;
     }
   };
 }
+
+test("ignored cross-device acknowledgements converge without a conflict", () => {
+  const app = loadTaskProjection();
+  const groups = {
+    commands: { acknowledgements: [{ outcome: "ignored", reason: "superseded" }] },
+    tasks: { acknowledgements: [{ outcome: "ignored", reason: "superseded" }] },
+    durations: { acknowledgements: [{ outcome: "ignored", reason: "superseded" }] },
+    autoStart: { acknowledgements: [{ outcome: "ignored", reason: "superseded" }] },
+    selectedTask: { acknowledgements: [{ outcome: "ignored", reason: "superseded" }] }
+  };
+
+  assert.deepEqual(app.rejectedSyncAcknowledgements(groups), []);
+  groups.commands.acknowledgements[0].outcome = "rejected";
+  assert.equal(app.rejectedSyncAcknowledgements(groups).length, 1);
+});
 
 const baseTime = Date.parse("2026-07-15T10:00:00.000Z");
 
@@ -301,24 +453,60 @@ function expectedMatrixTimer(status, type, target) {
   };
 }
 
-test("task deletion hides independent selection and task reappearance restores it", () => {
+test("screen tabs move focus and activation with arrows, Home, and End", () => {
   const app = loadTaskProjection();
-  const { state, rebuildOptimisticTasks, rebuildOptimisticSelectedTask, selectedTaskIdForNextFocus } = app;
+  const timerTab = app.screenButton("timer");
+  const tasksTab = app.screenButton("tasks");
+  const timerPanel = app.screenPanel("timer");
+  const tasksPanel = app.screenPanel("tasks");
+
+  function assertActive(screen) {
+    const timerSelected = screen === "timer";
+    assert.equal(app.state.activeScreen, screen);
+    assert.equal(timerTab.getAttribute("aria-selected"), String(timerSelected));
+    assert.equal(tasksTab.getAttribute("aria-selected"), String(!timerSelected));
+    assert.equal(timerTab.tabIndex, timerSelected ? 0 : -1);
+    assert.equal(tasksTab.tabIndex, timerSelected ? -1 : 0);
+    assert.equal(timerPanel.hidden, !timerSelected);
+    assert.equal(tasksPanel.hidden, timerSelected);
+    assert.equal(app.activeElement(), timerSelected ? timerTab : tasksTab);
+  }
+
+  app.setupScreenNavigation();
+  app.renderScreens();
+  timerTab.focus();
+  assertActive("timer");
+
+  assert.equal(timerTab.dispatch("keydown", { key: "ArrowRight" }).defaultPrevented, true);
+  assertActive("tasks");
+
+  assert.equal(tasksTab.dispatch("keydown", { key: "ArrowLeft" }).defaultPrevented, true);
+  assertActive("timer");
+
+  assert.equal(timerTab.dispatch("keydown", { key: "End" }).defaultPrevented, true);
+  assertActive("tasks");
+
+  assert.equal(tasksTab.dispatch("keydown", { key: "Home" }).defaultPrevented, true);
+  assertActive("timer");
+});
+
+test("task projection clears unavailable selection and restores it when task reappears", () => {
+  const app = loadTaskProjection();
+  const { state, rebuildOptimisticState, selectedTaskIdForNextFocus } = app;
   state.baseTasks = [{ id: "selected-task", title: "Selected" }];
   state.pendingTaskOperations = [];
   state.baseSelectedTaskId = "selected-task";
   state.pendingSelectedTaskOperations = [];
-  rebuildOptimisticSelectedTask();
+  rebuildOptimisticState();
 
   state.baseTasks = [];
-  rebuildOptimisticTasks();
+  rebuildOptimisticState();
   assert.equal(state.tasks.length, 0);
-  assert.equal(state.selectedTaskId, "selected-task");
+  assert.equal(state.selectedTaskId, null);
   assert.equal(selectedTaskIdForNextFocus(), null);
   app.renderTaskSelector();
   assert.deepEqual(app.taskSelectorOptions(), [
-    { value: "", textContent: "No task", disabled: false },
-    { value: "selected-task", textContent: "Selected task unavailable", disabled: true }
+    { value: "", textContent: "No task", disabled: false }
   ]);
 
   state.pendingTaskOperations = [{
@@ -329,7 +517,7 @@ test("task deletion hides independent selection and task reappearance restores i
     hlcWallMs: 1,
     hlcCounter: 0
   }];
-  rebuildOptimisticTasks();
+  rebuildOptimisticState();
   assert.deepEqual(Array.from(state.tasks, (task) => task.id), ["selected-task"]);
   assert.equal(state.selectedTaskId, "selected-task");
   assert.equal(selectedTaskIdForNextFocus(), "selected-task");
@@ -341,9 +529,9 @@ test("task deletion hides independent selection and task reappearance restores i
     hlcWallMs: 2,
     hlcCounter: 0
   });
-  rebuildOptimisticTasks();
+  rebuildOptimisticState();
   assert.equal(state.tasks.length, 0);
-  assert.equal(state.selectedTaskId, "selected-task");
+  assert.equal(state.selectedTaskId, null);
 });
 
 test("paused focus keeps active assignment while next-task selector remains editable", () => {
@@ -377,6 +565,7 @@ test("No task selection persists nullable operation and schedules sync without c
   app.state.selectedTaskId = "task-current";
   app.state.pendingSelectedTaskOperations = [];
   app.state.timer = timer("running", "canonical-active");
+  app.state.baseTimer = structuredClone(app.state.timer);
   const activeTimer = structuredClone(app.state.timer);
 
   assert.equal(await app.issueSelectedTaskOperation(null), true);
@@ -384,6 +573,7 @@ test("No task selection persists nullable operation and schedules sync without c
   assert.equal(app.allocatedMutationInput().storeName, "pendingSelectedTasks");
   assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [{
     id: "selected-operation",
+    deviceId: "test-device",
     taskId: null,
     occurredAt: new Date(baseTime).toISOString(),
     hlcWallMs: baseTime,
@@ -450,6 +640,43 @@ test("owner quarantine round-trip preserves selected-task base and pending claim
   );
 });
 
+test("cached owner activation restores quarantined state only before identity validation", async () => {
+  const app = loadTaskProjection();
+  app.state.user = { id: "cached-owner" };
+  app.state.localOwnerId = "cached-owner";
+  app.state.baseSelectedTaskId = "task-cached";
+  app.state.selectedTaskId = "task-cached";
+  const cached = app.ownerStateValue();
+  app.resetOwnerState();
+  app.state.quarantinedLocal = cached;
+  app.state.localOwnerId = "cached-owner";
+  app.state.bootstrapGateOwned = true;
+  app.state.bootstrapPending = null;
+  app.state.sessionIdentityValidated = false;
+  app.state.authenticated = true;
+  app.state.csrfToken = "stale-csrf";
+  app.state.bootstrapBlocked = true;
+  app.state.bootstrapGatePersisted = true;
+
+  assert.equal(await app.activateCachedOwnerOffline(), true);
+  assert.equal(app.state.user.id, "cached-owner");
+  assert.equal(app.state.selectedTaskId, "task-cached");
+  assert.equal(app.state.quarantinedLocal, null);
+  assert.equal(app.state.authenticated, false);
+  assert.equal(app.state.csrfToken, null);
+  assert.equal(app.state.offlineOwnerMode, true);
+  assert.equal(app.state.bootstrapBlocked, false);
+  assert.equal(app.state.bootstrapGatePersisted, false);
+  assert.equal(app.state.bootstrapGateOwned, false);
+
+  app.state.quarantinedLocal = cached;
+  app.state.localOwnerId = "cached-owner";
+  app.state.bootstrapGateOwned = true;
+  app.state.sessionIdentityValidated = true;
+  assert.equal(await app.activateCachedOwnerOffline(), false);
+  assert.equal(app.state.quarantinedLocal, cached);
+});
+
 test("changed session identity closes old revision stream before replacement", () => {
   const app = loadTaskProjection();
   let closeCount = 0;
@@ -482,6 +709,50 @@ test("unchanged session identity keeps current revision stream", () => {
 
   assert.equal(closeCount, 0);
   assert.equal(app.hasRevisionStreamForTest(), true);
+});
+
+test("revision stream opens only for a validated online account without bootstrap work", () => {
+  const app = loadTaskProjection();
+  app.openRevisionStream();
+  assert.equal(app.eventSources().length, 0);
+
+  app.state.sessionIdentityValidated = true;
+  app.state.authenticated = true;
+  app.state.bootstrapBlocked = false;
+  app.state.bootstrapGatePersisted = false;
+  app.setOnline(false);
+  app.openRevisionStream();
+  assert.equal(app.eventSources().length, 0);
+
+  app.setOnline(true);
+  app.openRevisionStream();
+  app.openRevisionStream();
+  assert.equal(app.eventSources().length, 1);
+  assert.equal(app.eventSources()[0].url, "/api/v1/stream");
+});
+
+test("revision stream schedules newer and malformed hints then closes on offline failure", () => {
+  const app = loadTaskProjection();
+  app.state.sessionIdentityValidated = true;
+  app.state.authenticated = true;
+  app.state.bootstrapBlocked = false;
+  app.state.bootstrapGatePersisted = false;
+  app.state.revision = 12;
+  app.openRevisionStream();
+  const source = app.eventSources()[0];
+
+  source.emit("message", "12");
+  assert.deepEqual(app.scheduledTimeoutDelays(), []);
+  source.emit("revision", JSON.stringify({ revision: 13 }));
+  source.emit("message", "not-a-revision");
+  assert.deepEqual(app.scheduledTimeoutDelays(), [0, 0]);
+
+  source.onerror();
+  assert.equal(source.closed, false);
+  app.setOnline(false);
+  source.onerror();
+  assert.equal(source.closed, true);
+  assert.equal(app.hasRevisionStreamForTest(), false);
 });
 
 test("periodic reconciliation forces an empty-queue canonical pull after a missed revision hint", () => {
@@ -533,6 +804,7 @@ test("completion alert notifies and repeats sound until explicitly stopped", asy
   assert.equal(app.toneStarts(), 1);
   assert.equal(app.notifications().length, 1);
   assert.equal(app.notifications()[0].title, "Focus complete");
+  assert.equal(app.notifications()[0].options.body, "Your next Pomodorough interval is ready.");
   assert.equal(app.notifications()[0].options.requireInteraction, true);
   const soundInterval = app.scheduledIntervals().find(
     ({ delay }) => delay === app.completionSoundIntervalMs
@@ -579,7 +851,7 @@ test("auto-start projection follows canonical state and pending local intent", (
     hlcCounter: 0
   }];
 
-  app.rebuildOptimisticAutoStart();
+  app.rebuildOptimisticState();
 
   assert.equal(app.state.autoStartBreaks, false);
 });
@@ -765,45 +1037,38 @@ test("optimistic reducer preserves both histories when latest action revives ano
   assert.deepEqual(Array.from(result.history, (item) => item.commandId), [finish.id, finish.id]);
 });
 
-test("optimistic reducer preserves historical identity through reactivation clear and finish", () => {
+test("optimistic history sorting preserves RFC3339 nanosecond precision", () => {
   const app = loadTaskProjection();
-  const sessions = new Map();
   const source = timer("running");
   source.id = "timer-a";
-  const historical = {
-    id: "history-z",
-    timerId: "timer-z",
-    commandId: "old-finish",
+  const target = {
+    id: "history-y",
+    timerId: "timer-y",
+    commandId: "old-finish-y",
     phase: "focus",
     status: "completed",
     plannedDurationMs: 25 * 60_000,
-    completedAt: new Date(baseTime).toISOString(),
-    endedAt: new Date(baseTime).toISOString()
+    completedAt: "2026-07-20T12:00:00.000000050Z",
+    endedAt: "2026-07-20T12:00:00.000000050Z"
   };
-  const resume = {
-    ...matrixCommand("resume", "same"),
-    id: "resume-z",
+  const later = {
+    ...target,
+    id: "history-z",
     timerId: "timer-z",
-    occurredAt: new Date(baseTime + 1).toISOString()
+    commandId: "old-finish-z",
+    completedAt: "2026-07-20T12:00:00.000000900Z",
+    endedAt: "2026-07-20T12:00:00.000000900Z"
   };
-  const clear = {
-    ...matrixCommand("clear", "same"),
-    id: "clear-z",
-    timerId: "timer-z",
-    occurredAt: new Date(baseTime + 2).toISOString()
-  };
-  const finish = {
-    ...matrixCommand("finish", "same"),
-    id: "finish-z",
-    timerId: "timer-z",
-    occurredAt: new Date(baseTime + 3).toISOString()
-  };
+  const finish = matrixCommand("finish", "same");
+  finish.timerId = "timer-y";
+  finish.occurredAt = "2026-07-20T12:00:00.000000100Z";
 
-  let result = app.reduceCommand(source, [historical], resume, sessions);
-  result = app.reduceCommand(result.timer, result.history, clear, sessions);
-  result = app.reduceCommand(result.timer, result.history, finish, sessions);
+  const result = app.reduceCommand(source, [target, later], finish);
 
-  assert.equal(result.history.find((item) => item.timerId === "timer-z").id, "history-z");
+  assert.deepEqual(
+    Array.from(result.history, (item) => item.timerId),
+    ["timer-z", "timer-y", "timer-a"]
+  );
 });
 
 test("optimistic reducer restores a timer after an earlier clear in one replay", () => {
@@ -1106,10 +1371,210 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
   }
 });
 
+test("IndexedDB request and transaction adapters preserve success and failure causes", async () => {
+  const app = loadTaskProjection();
+
+  const successfulRequest = {};
+  const successfulResult = app.requestResult(successfulRequest);
+  successfulRequest.result = { key: "snapshot" };
+  successfulRequest.onsuccess();
+  assert.deepEqual(await successfulResult, { key: "snapshot" });
+
+  const requestFailure = new Error("request failed");
+  const failedRequest = { error: requestFailure };
+  const rejectedResult = app.requestResult(failedRequest);
+  failedRequest.onerror();
+  await assert.rejects(rejectedResult, (error) => error === requestFailure);
+
+  const completedTransaction = {};
+  const completion = app.transactionDone(completedTransaction);
+  completedTransaction.oncomplete();
+  await completion;
+
+  const abortCause = new Error("transaction rolled back");
+  const abortedTransaction = { error: abortCause };
+  const aborted = app.transactionDone(abortedTransaction);
+  abortedTransaction.onabort();
+  await assert.rejects(aborted, (error) => error === abortCause);
+
+  const failedTransaction = { error: requestFailure };
+  const failed = app.transactionDone(failedTransaction);
+  failedTransaction.onerror();
+  await assert.rejects(failed, (error) => error === requestFailure);
+});
+
+test("new local identity persists once and survives later in-memory identity changes", async () => {
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+  const app = loadTaskProjection();
+  const database = await app.openDatabase();
+  app.setDatabaseForTest(database);
+  app.state.deviceId = "device-first-launch";
+  app.state.deviceSequence = 17;
+  app.state.hlcWallMs = baseTime;
+  app.state.hlcCounter = 3;
+  app.state.selectedPhase = "long_break";
+
+  await app.persistNewLocalIdentity({});
+  const persisted = await app.readLocalRecords();
+  assert.equal(persisted.deviceId.value, "device-first-launch");
+  assert.equal(persisted.deviceSequence.value, 17);
+  assert.deepEqual(JSON.parse(JSON.stringify(persisted.hlc.value)), { wallMs: baseTime, counter: 3 });
+  assert.equal(persisted.settings.value.selectedPhase, "long_break");
+
+  app.state.deviceId = "device-must-not-replace";
+  app.state.deviceSequence = 99;
+  await app.persistNewLocalIdentity(persisted);
+  const unchanged = await app.readLocalRecords();
+  assert.equal(unchanged.deviceId.value, "device-first-launch");
+  assert.equal(unchanged.deviceSequence.value, 17);
+
+  database.close();
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+});
+
+test("browser database schema and local-record read restore restart-safe defaults", async () => {
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+  const app = loadTaskProjection();
+  const database = await app.openDatabase();
+  app.setDatabaseForTest(database);
+
+  assert.deepEqual(
+    [...database.objectStoreNames],
+    ["meta", "pending", "pendingAutoStarts", "pendingDurations", "pendingSelectedTasks", "pendingTasks"]
+  );
+
+  const transaction = database.transaction("meta", "readwrite");
+  transaction.objectStore("meta").put({ key: "deviceId", value: "device-restarted" });
+  transaction.objectStore("meta").put({
+    key: "settings",
+    value: {
+      selectedPhase: "short_break",
+      durationSyncBootstrapped: true,
+      autoStartSyncBootstrapped: true,
+      selectedTaskSyncBootstrapped: true
+    }
+  });
+  await indexedDBTransaction(transaction);
+
+  const records = await app.readLocalRecords();
+  assert.equal(records.deviceId.value, "device-restarted");
+  assert.deepEqual(records.pending, []);
+  assert.deepEqual(records.pendingTaskOperations, []);
+  assert.deepEqual(records.pendingDurationOperations, []);
+  assert.deepEqual(records.pendingAutoStartOperations, []);
+  assert.deepEqual(records.pendingSelectedTaskOperations, []);
+
+  app.restoreLocalRecords(records, { operations: [], resolution: null });
+  assert.equal(app.state.deviceId, "device-restarted");
+  assert.equal(app.state.selectedPhase, "short_break");
+  assert.equal(app.state.durationSyncBootstrapped, true);
+  assert.equal(app.state.autoStartSyncBootstrapped, true);
+  assert.equal(app.state.selectedTaskSyncBootstrapped, true);
+
+  database.close();
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+});
+
+test("legacy duration migrations atomically normalize queues and retire local settings", async () => {
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+  const app = loadTaskProjection();
+  const database = await app.openDatabase();
+  app.setDatabaseForTest(database);
+
+  let transaction = database.transaction("meta", "readwrite");
+  transaction.objectStore("meta").put({
+    key: "settings",
+    value: {
+      selectedPhase: "focus",
+      pendingDurationOperations: [
+        { id: "legacy-duration", phase: "focus", durationMs: 1_800_000, hlcWallMs: 0, hlcCounter: 0 },
+        { id: "modern-duration", phase: "short_break", durationMs: 360_000, hlcWallMs: 10, hlcCounter: 1, occurredAt: "2024-01-01T00:00:00.000Z" }
+      ]
+    }
+  });
+  await indexedDBTransaction(transaction);
+
+  await app.migrateDurationQueueFromSettings();
+  transaction = database.transaction(["meta", "pendingDurations"], "readonly");
+  let settings = await indexedDBRequest(transaction.objectStore("meta").get("settings"));
+  let durations = await indexedDBRequest(transaction.objectStore("pendingDurations").getAll());
+  await indexedDBTransaction(transaction);
+  assert.equal(Object.hasOwn(settings.value, "pendingDurationOperations"), false);
+  assert.equal(durations.length, 2);
+  assert.equal(durations.find((item) => item.id === "legacy-duration").occurredAt, new Date(0).toISOString());
+  assert.equal(durations.find((item) => item.id === "modern-duration").occurredAt, "2024-01-01T00:00:00.000Z");
+
+  transaction = database.transaction(["meta", "pendingDurations"], "readwrite");
+  transaction.objectStore("pendingDurations").clear();
+  transaction.objectStore("meta").put({
+    key: "settings",
+    value: { selectedPhase: "focus", durations: { focus: 30, short_break: 5, long_break: 15 } }
+  });
+  await indexedDBTransaction(transaction);
+
+  await app.bootstrapLegacyDurations();
+  transaction = database.transaction(["meta", "pendingDurations"], "readonly");
+  settings = await indexedDBRequest(transaction.objectStore("meta").get("settings"));
+  durations = await indexedDBRequest(transaction.objectStore("pendingDurations").getAll());
+  await indexedDBTransaction(transaction);
+  assert.equal(settings.value.durationSyncBootstrapped, true);
+  assert.equal(Object.hasOwn(settings.value, "durations"), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(durations)), [{
+    id: "test-tab-id",
+    ownerId: "bootstrap",
+    phase: "focus",
+    durationMs: 1_800_000,
+    occurredAt: new Date(0).toISOString(),
+    hlcWallMs: 0,
+    hlcCounter: 0
+  }]);
+
+  database.close();
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+});
+
+test("settings and snapshot persistence values isolate mutable canonical state", () => {
+  const app = loadTaskProjection();
+  app.state.selectedPhase = "longBreak";
+  app.state.durationSyncBootstrapped = true;
+  app.state.autoStartSyncBootstrapped = false;
+  app.state.selectedTaskSyncBootstrapped = true;
+  app.state.revision = 42;
+  app.state.baseTimer = { id: "timer-1", nested: { status: "running" } };
+  app.state.baseHistory = [{ id: "history-1" }];
+  app.state.baseTasks = [{ id: "task-1", title: "Release" }];
+  app.state.baseDurationsMs = { focus: 1_500_000 };
+  app.state.baseAutoStartBreaks = true;
+  app.state.baseSelectedTaskId = "task-1";
+  app.state.user = { id: "user-1" };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(app.settingsValue({ selectedPhase: "focus" }))), {
+    selectedPhase: "focus",
+    durationSyncBootstrapped: true,
+    autoStartSyncBootstrapped: false,
+    selectedTaskSyncBootstrapped: true
+  });
+
+  const snapshot = app.snapshotValue({ revision: 43 });
+  assert.equal(snapshot.revision, 43);
+  assert.equal(snapshot.canonicalTimer.id, "timer-1");
+  assert.equal(snapshot.selectedTaskId, "task-1");
+  snapshot.canonicalTimer.nested.status = "paused";
+  snapshot.tasks[0].title = "Mutated";
+  snapshot.user.id = "other-user";
+  assert.equal(app.state.baseTimer.nested.status, "running");
+  assert.equal(app.state.baseTasks[0].title, "Release");
+  assert.equal(app.state.user.id, "user-1");
+});
+
 test("account deletion does not broadcast local sign-out before server confirmation", () => {
-  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
-  const body = source.slice(source.indexOf("  async function deleteAccount()"), source.indexOf("  async function logout()"));
-  assert.ok(body.indexOf("if (!response.ok)") < body.indexOf("markPendingLogout()"));
+  const source = fs.readFileSync(path.join(__dirname, "app-session.js"), "utf8");
+  const start = source.indexOf("    async deleteAccount()");
+  const end = source.indexOf("    async requestAccountDeletion", start);
+  assert.ok(start >= 0 && end > start, "session lifecycle must own account deletion");
+  const body = source.slice(start, end);
+  assert.ok(body.indexOf("await this.requestAccountDeletion(confirmation)")
+    < body.indexOf("this.markPendingLogout()"));
 });
 
 test("account deletion requires the exact destructive phrase", () => {
@@ -1118,6 +1583,69 @@ test("account deletion requires the exact destructive phrase", () => {
   for (const value of ["", "delete", "DELETE ", " DELETE", null, undefined]) {
     assert.equal(app.accountDeletionConfirmationIsValid(value), false, String(value));
   }
+});
+
+test("account deletion keeps local state when confirmation, connectivity, or server deletion fails", async () => {
+  const app = loadTaskProjection();
+  let requests = 0;
+  app.setFetchForTest(async () => {
+    requests += 1;
+    return { ok: false, status: 503 };
+  });
+
+  app.setPromptResult("delete");
+  await app.deleteAccount();
+  assert.match(app.notice().textContent, /Type DELETE exactly/);
+  assert.equal(requests, 0);
+
+  app.setPromptResult("DELETE");
+  await app.deleteAccount();
+  assert.match(app.notice().textContent, /Connect to the account server/);
+  assert.equal(requests, 0);
+
+  app.state.csrfToken = "csrf-current";
+  await app.deleteAccount();
+  assert.equal(requests, 1);
+  assert.match(app.notice().textContent, /Account deletion failed \(503\)/);
+  assert.equal(app.deleteAccountButtonDisabled(), false);
+  assert.equal(app.pendingLocalLogout(), false);
+  assert.equal(app.locationHref(), "");
+});
+
+test("confirmed account deletion clears local state only after server success", async () => {
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+  const app = loadTaskProjection();
+  const requests = [];
+  app.state.csrfToken = "csrf-current";
+  app.setPromptResult("DELETE");
+  app.setFetchForTest(async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 204 };
+  });
+
+  await app.deleteAccount();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/v1/account");
+  assert.equal(requests[0].options.method, "DELETE");
+  assert.equal(requests[0].options.headers["X-CSRF-Token"], "csrf-current");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { confirmation: "DELETE" });
+  assert.equal(app.pendingLocalLogout(), false);
+  assert.equal(app.locationHref(), "/auth/google/start?return=%2Fapp");
+});
+
+test("offline logout clears local data but keeps a durable revocation marker", async () => {
+  await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
+  const app = loadTaskProjection();
+  app.state.csrfToken = "csrf-current";
+  app.setFetchForTest(async () => ({ ok: false, status: 503 }));
+
+  await app.logout();
+
+  assert.equal(app.logoutButtonDisabled(), true);
+  assert.equal(app.pendingLocalLogout(), true);
+  assert.equal(app.locationHref(), "/auth/google/start?return=%2Fapp");
+  assert.equal(app.warnings().some(([message]) => message === "Pomodorough server revocation deferred until reconnect:"), true);
 });
 
 test("offline logout marker is durable and explicitly cleared after revocation", () => {
@@ -1133,6 +1661,49 @@ test("session revocation defers without CSRF and accepts a successful server rev
   const app = loadTaskProjection();
   assert.equal(await app.requestSessionRevocation(null), false);
   assert.equal(await app.requestSessionRevocation("csrf"), true);
+});
+
+test("local account teardown keeps the database open when its clear transaction aborts", async () => {
+  const app = loadTaskProjection();
+  let clearCount = 0;
+  let closeCount = 0;
+  const failure = new Error("clear transaction aborted");
+  const transaction = {
+    error: failure,
+    objectStore() {
+      return { clear() { clearCount += 1; } };
+    },
+    set oncomplete(_handler) {},
+    set onerror(_handler) {},
+    set onabort(handler) { Promise.resolve().then(handler); }
+  };
+  app.setDatabaseForTest({
+    transaction() { return transaction; },
+    close() { closeCount += 1; }
+  });
+
+  await assert.rejects(app.clearLocalData(), failure);
+  assert.equal(clearCount, 6);
+  assert.equal(closeCount, 0);
+});
+
+test("local account teardown clears every synchronized store and permits a clean reopen", async () => {
+  const app = loadTaskProjection();
+  const database = await app.openDatabase();
+  app.setDatabaseForTest(database);
+
+  await app.clearLocalData();
+
+  const reopened = await app.openDatabase();
+  app.setDatabaseForTest(reopened);
+  const records = await app.readLocalRecords();
+  assert.equal(records.snapshot, undefined);
+  assert.deepEqual(records.pending, []);
+  assert.deepEqual(records.pendingTaskOperations, []);
+  assert.deepEqual(records.pendingDurationOperations, []);
+  assert.deepEqual(records.pendingAutoStartOperations, []);
+  assert.deepEqual(records.pendingSelectedTaskOperations, []);
+  await app.clearLocalData();
 });
 
 test("unauthorized session check retires a pending local logout marker", async () => {
@@ -1164,6 +1735,280 @@ test("deferred offline logout never reactivates the old session while revocation
   assert.equal(app.pendingLocalLogout(), true);
 });
 
+test("session refresh uses an uncached same-origin request and rotates CSRF only for the same account", async () => {
+  const app = loadTaskProjection();
+  const requests = [];
+  app.state.user = { id: "account-1" };
+  app.state.localOwnerId = "account-1";
+  app.state.csrfToken = "stale-token";
+  app.setFetchForTest(async (url, options) => {
+    requests.push({ url, options });
+    return {
+      status: 200,
+      ok: true,
+      async json() { return { user: { id: "account-1" }, csrfToken: "fresh-token" }; }
+    };
+  });
+
+  assert.equal(await app.refreshMutationCsrf("account-1"), "fresh-token");
+  assert.equal(app.state.csrfToken, "fresh-token");
+  assert.equal(app.state.sessionIdentityValidated, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
+    url: "/api/v1/me",
+    options: { credentials: "same-origin", cache: "no-store" }
+  }]);
+});
+
+test("sync preflight reloads durable queues and skips an empty non-forced request", async () => {
+  const app = loadTaskProjection();
+  assert.equal(await app.syncPreflight(false), false);
+  app.state.ready = true;
+  app.state.authenticated = true;
+  app.state.sessionIdentityValidated = true;
+  app.state.csrfToken = "csrf";
+  app.state.user = { id: "account-1" };
+  app.state.localOwnerId = "account-1";
+  app.state.bootstrapBlocked = false;
+  app.state.bootstrapGatePersisted = false;
+  app.setQueuesForTest({
+    commands: [],
+    taskOperations: [{ id: "durable-task" }],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: []
+  });
+
+  assert.equal(await app.syncPreflight(false), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingTaskOperations)), [{ id: "durable-task" }]);
+  app.setQueuesForTest({
+    commands: [], taskOperations: [], durationOperations: [],
+    autoStartOperations: [], selectedTaskOperations: []
+  });
+  assert.equal(await app.syncPreflight(false), false);
+  assert.equal(await app.syncPreflight(true), true);
+});
+
+test("sync preflight schedules exponential retry when the durable bootstrap gate cannot be read", async () => {
+  const app = loadTaskProjection();
+  app.state.ready = true;
+  app.state.authenticated = true;
+  app.state.sessionIdentityValidated = true;
+  app.state.csrfToken = "csrf";
+  app.state.user = { id: "account-1" };
+  app.state.localOwnerId = "account-1";
+  app.state.bootstrapBlocked = false;
+  app.state.bootstrapGatePersisted = false;
+  app.setStorageMethodForTest("readBootstrapState", async () => {
+    throw new Error("IndexedDB unavailable");
+  });
+
+  assert.equal(await app.syncPreflight(false), false);
+  assert.equal(app.state.retrying, true);
+  assert.equal(app.scheduledTimeoutDelay(), 1_000);
+  assert.equal(app.retryDelayMsForTest(), 2_000);
+  assert.equal(app.warnings()[0][0], "Pomodorough bootstrap gate unavailable:");
+
+  app.setStorageMethodForTest("readBootstrapState", async () => ({ gate: null, resolution: null }));
+  app.setStorageMethodForTest("readQueues", async () => {
+    throw new Error("queue transaction unavailable");
+  });
+  assert.equal(await app.syncPreflight(false), false);
+  assert.equal(app.scheduledTimeoutDelay(), 2_000);
+  assert.equal(app.retryDelayMsForTest(), 4_000);
+  assert.equal(app.warnings()[1][0], "Pomodorough pending queues unavailable:");
+});
+
+test("retry backoff caps at one minute and does not arm while offline", () => {
+  const offline = loadTaskProjection();
+  offline.setOnline(false);
+  offline.scheduleRetry();
+  assert.deepEqual(offline.scheduledTimeoutDelays(), []);
+  assert.equal(offline.retryDelayMsForTest(), 1_000);
+
+  const online = loadTaskProjection();
+  for (let attempt = 0; attempt < 8; attempt += 1) online.scheduleRetry();
+  assert.deepEqual(online.scheduledTimeoutDelays(), [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]);
+  assert.equal(online.retryDelayMsForTest(), 60_000);
+});
+
+test("account bootstrap restart invalidates foreign ownership before migrating local preferences", async () => {
+  const app = loadTaskProjection();
+  const calls = [];
+  app.state.user = { id: "account-current" };
+  app.state.bootstrapPending = { userId: "account-old" };
+  app.setStorageMethodForTest("invalidateForeignResolution", async (_database, input) => {
+    calls.push(["invalidate", input.currentUserId, input.gateToken]);
+    return { acquired: true, resolution: null };
+  });
+  app.setStorageMethodForTest("migrateLegacyAutoStart", async (_database, input) => {
+    calls.push(["auto-start", typeof input.operationId]);
+    return { migrated: true };
+  });
+  app.setStorageMethodForTest("migrateLegacySelectedTask", async (_database, input) => {
+    calls.push(["selected-task", typeof input.operationId]);
+    return { migrated: true };
+  });
+  app.setStorageMethodForTest("readQueues", async () => ({
+    commands: [], taskOperations: [], durationOperations: [],
+    autoStartOperations: [{ id: "migrated-auto-start", enabled: true }],
+    selectedTaskOperations: [{ id: "migrated-selection", taskId: null }]
+  }));
+
+  await app.restartBootstrapForCurrentAccount();
+
+  assert.deepEqual(calls.map((entry) => entry[0]), ["invalidate", "auto-start", "selected-task"]);
+  assert.equal(calls[0][1], "account-current");
+  assert.equal(calls[0][2], "test-tab-id");
+  assert.equal(app.state.bootstrapPending, null);
+  assert.equal(app.state.bootstrapGateOwned, true);
+  assert.equal(app.state.bootstrapGatePersisted, true);
+  assert.equal(app.state.bootstrapBlocked, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingAutoStartOperations)), [
+    { id: "migrated-auto-start", enabled: true }
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [
+    { id: "migrated-selection", taskId: null }
+  ]);
+});
+
+test("bootstrap preview uses an uncached request and persists its bounded clock sample", async () => {
+  const app = loadTaskProjection();
+  const requests = [];
+  let savedClockOffset = null;
+  const serverTime = new Date().toISOString();
+  const serverHlcWallMs = Date.parse(serverTime);
+  const payload = {
+    revision: 0,
+    canonicalTimer: null,
+    history: [],
+    tasks: [],
+    durationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
+    autoStartBreaks: false,
+    selectedTaskId: null,
+    serverTime,
+    serverHlcWallMs,
+    serverHlcCounter: 0,
+    acknowledgements: [],
+    taskAcknowledgements: [],
+    durationAcknowledgements: [],
+    autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: []
+  };
+  app.setStorageMethodForTest("allocateClockRequestSequence", async () => 11);
+  app.setStorageMethodForTest("saveClockOffset", async (_database, sample) => {
+    savedClockOffset = sample;
+    return sample;
+  });
+  app.setFetchForTest(async (url, options) => {
+    requests.push({ url, options });
+    return { status: 200, ok: true, async json() { return payload; } };
+  });
+
+  assert.equal(await app.loadBootstrapPreview(), payload);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
+    url: "/api/v1/bootstrap",
+    options: { credentials: "same-origin", cache: "no-store" }
+  }]);
+  assert.equal(savedClockOffset.requestSequence, 11);
+  assert.equal(app.state.clockOffset.requestSequence, 11);
+});
+
+test("bootstrap send validation rotates legacy capture only for the active gate owner", async () => {
+  const app = loadTaskProjection();
+  const original = { userId: "account-1", payload: { requestId: "original" } };
+  const rotated = { userId: "account-1", payload: { requestId: "rotated" } };
+  const validations = [];
+  let normalizeCalls = 0;
+  app.state.user = { id: "account-1" };
+  app.state.bootstrapPending = original;
+  app.state.bootstrapGateOwned = true;
+  app.setStorageMethodForTest("normalizeLegacyDurationOperations", async (_database, options) => {
+    normalizeCalls += 1;
+    assert.equal(options.gateToken, "test-tab-id");
+    assert.equal(typeof options.replacementRequestId, "string");
+    return { resolution: rotated };
+  });
+  app.setStorageMethodForTest("validatePendingForSend", async (_database, input) => {
+    validations.push(input);
+  });
+
+  assert.equal(await app.validateBootstrapSubmission(original), rotated);
+  assert.equal(app.state.bootstrapPending, rotated);
+  assert.equal(normalizeCalls, 1);
+  assert.equal(validations[0].pending, rotated);
+  assert.equal(validations[0].currentUserId, "account-1");
+  assert.equal(validations[0].gateToken, "test-tab-id");
+
+  app.state.bootstrapGateOwned = false;
+  assert.equal(await app.validateBootstrapSubmission(original), original);
+  assert.equal(normalizeCalls, 1);
+  assert.equal(validations[1].pending, original);
+});
+
+test("bootstrap resolution persists an exact owner-bound request before it can be submitted", async () => {
+  const app = loadTaskProjection();
+  let captured = null;
+  const pending = { userId: "account-1", payload: { strategy: "keep_remote" } };
+  app.state.user = { id: "account-1" };
+  app.state.deviceId = "device-1";
+  app.state.bootstrapPreview = { revision: 17 };
+  app.setStorageMethodForTest("captureResolution", async (_database, input, options) => {
+    captured = { input, options };
+    return pending;
+  });
+
+  assert.equal(await app.persistBootstrapResolution("keep_remote"), pending);
+  assert.equal(captured.input.userId, "account-1");
+  assert.equal(captured.input.deviceId, "device-1");
+  assert.equal(captured.input.expectedRevision, 17);
+  assert.equal(captured.input.strategy, "keep_remote");
+  assert.equal(typeof captured.input.requestId, "string");
+  assert.deepEqual(JSON.parse(JSON.stringify(captured.options)), {
+    replaceExisting: false,
+    gateToken: "test-tab-id"
+  });
+  assert.equal(app.state.bootstrapPending, pending);
+  assert.equal(app.state.bootstrapGatePersisted, true);
+  assert.equal(app.state.bootstrapGateOwned, true);
+});
+
+test("bootstrap resolution fails closed for unknown strategies and a gate owned by another tab", async () => {
+  const app = loadTaskProjection();
+  let captureCount = 0;
+  app.state.user = { id: "account-1" };
+  app.state.deviceId = "device-1";
+  app.state.bootstrapPreview = { revision: 17 };
+  app.setStorageMethodForTest("captureResolution", async () => {
+    captureCount += 1;
+  });
+
+  await assert.rejects(
+    app.persistBootstrapResolution("invented_strategy"),
+    /History resolution changed in another tab/
+  );
+  app.setStorageMethodForTest("acquireBootstrapGateWithLegacyAutoStart", async () => ({
+    acquired: false,
+    resolution: null
+  }));
+  await assert.rejects(
+    app.persistBootstrapResolution("keep_remote"),
+    /Another tab owns history resolution/
+  );
+  assert.equal(captureCount, 0);
+  assert.equal(app.state.bootstrapPending, null);
+});
+
+test("session lookup rejects server failures without replacing the current credentials", async () => {
+  const app = loadTaskProjection();
+  app.state.user = { id: "account-1" };
+  app.state.csrfToken = "current-token";
+  app.setFetchForTest(async () => ({ status: 503, ok: false }));
+
+  await assert.rejects(app.fetchSessionPayload(), /Session check failed \(503\)/);
+  assert.equal(app.state.user.id, "account-1");
+  assert.equal(app.state.csrfToken, "current-token");
+});
+
 test("dynamic timer, duration, and missing-time presentation routes through localization", () => {
   const app = loadTaskProjection();
   app.setI18nForTest({
@@ -1193,6 +2038,22 @@ test("arrivals retain terminal states and announce task context honestly", () =>
   assert.equal(app.historyStatusLabel({ status: "cancelled" }), "Cancelled");
   assert.equal(app.historyStatusLabel({ status: "superseded" }), "Superseded");
 });
+
+function indexedDBRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("IndexedDB request blocked"));
+  });
+}
+
+function indexedDBTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(transaction.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
 
 function permutations(values) {
   if (values.length === 0) return [[]];

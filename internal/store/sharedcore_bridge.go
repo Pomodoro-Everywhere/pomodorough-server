@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"reflect"
 	"time"
 	"unicode/utf8"
 
@@ -140,6 +139,25 @@ func decodeCoreValue(value []byte, output any) error {
 	return nil
 }
 
+type coreNullable[T any] struct {
+	present bool
+	value   *T
+}
+
+func (nullable *coreNullable[T]) UnmarshalJSON(data []byte) error {
+	nullable.present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		nullable.value = nil
+		return nil
+	}
+	var value T
+	if err := decodeCoreValue(data, &value); err != nil {
+		return err
+	}
+	nullable.value = &value
+	return nil
+}
+
 type coreTimerCommand struct {
 	ID                string  `json:"id"`
 	DeviceID          string  `json:"deviceId"`
@@ -173,13 +191,29 @@ type coreTimerSession struct {
 }
 
 type coreTimerResult struct {
-	Canonical *timer.CanonicalTimer    `json:"canonicalTimer"`
-	History   []timer.HistoryItem      `json:"history"`
-	Sessions  []coreTimerSession       `json:"sessions"`
-	Outcomes  map[string]timer.Outcome `json:"outcomes"`
+	Canonical coreNullable[timer.CanonicalTimer] `json:"canonicalTimer"`
+	History   []timer.HistoryItem                `json:"history"`
+	Sessions  []coreTimerSession                 `json:"sessions"`
+	Outcomes  map[string]coreTimerOutcome        `json:"outcomes"`
+}
+
+type coreTimerOutcome struct {
+	Outcome *string `json:"outcome"`
+	Reason  *string `json:"reason"`
 }
 
 func reduceTimerWithSharedCore(ctx context.Context, commands []timer.Command, now time.Time) (timer.Result, error) {
+	var output coreTimerResult
+	if err := callAccountSharedCore(ctx, "timer.reduce.v1", map[string]any{
+		"commands": coreTimerCommands(commands),
+		"now":      now.UTC().Format(time.RFC3339Nano),
+	}, &output); err != nil {
+		return timer.Result{}, err
+	}
+	return timerResultFromCore(output, commands)
+}
+
+func coreTimerCommands(commands []timer.Command) []coreTimerCommand {
 	wireCommands := make([]coreTimerCommand, 0, len(commands))
 	for _, command := range commands {
 		var taskID *string
@@ -194,54 +228,66 @@ func reduceTimerWithSharedCore(ctx context.Context, commands []timer.Command, no
 			HLCWallMs: command.HLCWallMs, HLCCounter: command.HLCCounter, ObservedElapsedMs: command.ObservedElapsedMs,
 		})
 	}
-	var output coreTimerResult
-	if err := callAccountSharedCore(ctx, "timer.reduce.v1", map[string]any{
-		"commands": wireCommands,
-		"now":      now.UTC().Format(time.RFC3339Nano),
-	}, &output); err != nil {
-		return timer.Result{}, err
+	return wireCommands
+}
+
+func timerResultFromCore(output coreTimerResult, commands []timer.Command) (timer.Result, error) {
+	if err := validateCoreTimerResult(output, commands); err != nil {
+		return timer.Result{}, fmt.Errorf("validate shared timer output: %w", err)
 	}
 	result := timer.Result{
-		Canonical: output.Canonical,
+		Canonical: output.Canonical.value,
 		History:   output.History,
 		Sessions:  make([]timer.Session, 0, len(output.Sessions)),
-		Outcomes:  output.Outcomes,
+		Outcomes:  timerOutcomesFromCore(output.Outcomes),
 	}
 	if len(result.History) == 0 {
 		result.History = nil
 	}
 	for _, session := range output.Sessions {
-		anchorAt, err := time.Parse(time.RFC3339Nano, session.AnchorAt)
+		decoded, err := timerSessionFromCore(session)
 		if err != nil {
-			return timer.Result{}, fmt.Errorf("parse shared timer anchor: %w", err)
+			return timer.Result{}, err
 		}
-		startedAt, err := time.Parse(time.RFC3339Nano, session.StartedAt)
-		if err != nil {
-			return timer.Result{}, fmt.Errorf("parse shared timer start: %w", err)
-		}
-		var endedAt time.Time
-		if session.EndedAt != "" {
-			endedAt, err = time.Parse(time.RFC3339Nano, session.EndedAt)
-			if err != nil {
-				return timer.Result{}, fmt.Errorf("parse shared timer end: %w", err)
-			}
-		}
-		result.Sessions = append(result.Sessions, timer.Session{
-			TimerID: session.TimerID, TaskID: session.TaskID, Phase: session.Phase, Status: session.Status,
-			PlannedDurationMs: session.PlannedDurationMs, ElapsedAtAnchorMs: session.ElapsedAtAnchorMs,
-			AnchorAt: anchorAt, StartedAt: startedAt, StartedByDeviceID: session.StartedByDeviceID, EndedAt: endedAt,
-			LastCommandID: session.LastCommandID, TerminalCommandID: session.TerminalCommandID,
-			SupersededByTimerID: session.SupersededByTimerID, LastIntent: session.LastIntent,
-		})
+		result.Sessions = append(result.Sessions, decoded)
 	}
 	if len(result.Sessions) == 0 {
 		result.Sessions = nil
 	}
-	oracle := timer.Reduce(commands, now)
-	if !reflect.DeepEqual(result, oracle) {
-		return timer.Result{}, fmt.Errorf("shared timer reducer diverged from Go oracle: got=%#v want=%#v", result, oracle)
-	}
 	return result, nil
+}
+
+func timerOutcomesFromCore(input map[string]coreTimerOutcome) map[string]timer.Outcome {
+	outcomes := make(map[string]timer.Outcome, len(input))
+	for commandID, outcome := range input {
+		outcomes[commandID] = timer.Outcome{Outcome: *outcome.Outcome, Reason: *outcome.Reason}
+	}
+	return outcomes
+}
+
+func timerSessionFromCore(session coreTimerSession) (timer.Session, error) {
+	anchorAt, err := time.Parse(time.RFC3339Nano, session.AnchorAt)
+	if err != nil {
+		return timer.Session{}, fmt.Errorf("parse shared timer anchor: %w", err)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, session.StartedAt)
+	if err != nil {
+		return timer.Session{}, fmt.Errorf("parse shared timer start: %w", err)
+	}
+	var endedAt time.Time
+	if session.EndedAt != "" {
+		endedAt, err = time.Parse(time.RFC3339Nano, session.EndedAt)
+		if err != nil {
+			return timer.Session{}, fmt.Errorf("parse shared timer end: %w", err)
+		}
+	}
+	return timer.Session{
+		TimerID: session.TimerID, TaskID: session.TaskID, Phase: session.Phase, Status: session.Status,
+		PlannedDurationMs: session.PlannedDurationMs, ElapsedAtAnchorMs: session.ElapsedAtAnchorMs,
+		AnchorAt: anchorAt, StartedAt: startedAt, StartedByDeviceID: session.StartedByDeviceID, EndedAt: endedAt,
+		LastCommandID: session.LastCommandID, TerminalCommandID: session.TerminalCommandID,
+		SupersededByTimerID: session.SupersededByTimerID, LastIntent: session.LastIntent,
+	}, nil
 }
 
 type coreOperationClock struct {
@@ -259,6 +305,11 @@ type coreTaskOperation struct {
 	Title  string `json:"title,omitempty"`
 }
 
+type coreTaskResult struct {
+	Tasks               []task.Task       `json:"tasks"`
+	WinningOperationIDs map[string]string `json:"winningOperationIds"`
+}
+
 func reduceTasksWithSharedCore(ctx context.Context, operations []task.Operation) ([]task.Task, map[string]string, error) {
 	wire := make([]coreTaskOperation, 0, len(operations))
 	for _, operation := range operations {
@@ -271,24 +322,22 @@ func reduceTasksWithSharedCore(ctx context.Context, operations []task.Operation)
 			TaskID: operation.TaskID, Type: operation.Type, Title: operation.Title,
 		})
 	}
-	var output struct {
-		Tasks               []task.Task       `json:"tasks"`
-		WinningOperationIDs map[string]string `json:"winningOperationIds"`
-	}
+	var output coreTaskResult
 	if err := callAccountSharedCore(ctx, "task.reduce.v1", map[string]any{"operations": wire}, &output); err != nil {
 		return nil, nil, err
 	}
-	oracleTasks, oracleWinners := reduceTasks(operations)
-	if !reflect.DeepEqual(output.Tasks, oracleTasks) || !reflect.DeepEqual(output.WinningOperationIDs, oracleWinners) {
-		return nil, nil, errors.New("shared task reducer diverged from Go oracle")
-	}
-	return output.Tasks, output.WinningOperationIDs, nil
+	return taskResultFromCore(output, operations)
 }
 
 type coreDurationOperation struct {
 	coreOperationClock
 	Phase      string `json:"phase"`
 	DurationMs int64  `json:"durationMs"`
+}
+
+type coreDurationResult struct {
+	DurationsMs         map[string]int64  `json:"durationsMs"`
+	WinningOperationIDs map[string]string `json:"winningOperationIds"`
 }
 
 func reduceDurationsWithSharedCore(ctx context.Context, operations []DurationOperation) (DurationsMs, map[string]struct{}, error) {
@@ -303,30 +352,21 @@ func reduceDurationsWithSharedCore(ctx context.Context, operations []DurationOpe
 			Phase: operation.Phase, DurationMs: operation.DurationMs,
 		})
 	}
-	var output struct {
-		DurationsMs         map[string]int64  `json:"durationsMs"`
-		WinningOperationIDs map[string]string `json:"winningOperationIds"`
-	}
+	var output coreDurationResult
 	if err := callAccountSharedCore(ctx, "duration.reduce.v1", map[string]any{"operations": wire}, &output); err != nil {
 		return DurationsMs{}, nil, err
 	}
-	winners := make(map[string]struct{}, len(output.WinningOperationIDs))
-	for _, id := range output.WinningOperationIDs {
-		winners[id] = struct{}{}
-	}
-	result := DurationsMs{
-		Focus: output.DurationsMs["focus"], ShortBreak: output.DurationsMs["short_break"], LongBreak: output.DurationsMs["long_break"],
-	}
-	oracle, oracleWinners := reduceDurations(operations)
-	if !reflect.DeepEqual(result, oracle) || !reflect.DeepEqual(winners, oracleWinners) {
-		return DurationsMs{}, nil, errors.New("shared duration reducer diverged from Go oracle")
-	}
-	return result, winners, nil
+	return durationResultFromCore(output, operations)
 }
 
 type coreAutoStartOperation struct {
 	coreOperationClock
 	Enabled bool `json:"enabled"`
+}
+
+type coreAutoStartResult struct {
+	AutoStartBreaks    *bool                `json:"autoStartBreaks"`
+	WinningOperationID coreNullable[string] `json:"winningOperationId"`
 }
 
 func reduceAutoStartWithSharedCore(ctx context.Context, operations []AutoStartOperation) (bool, string, error) {
@@ -341,27 +381,21 @@ func reduceAutoStartWithSharedCore(ctx context.Context, operations []AutoStartOp
 			Enabled: operation.Enabled,
 		})
 	}
-	var output struct {
-		AutoStartBreaks    bool    `json:"autoStartBreaks"`
-		WinningOperationID *string `json:"winningOperationId"`
-	}
+	var output coreAutoStartResult
 	if err := callAccountSharedCore(ctx, "autoStart.reduce.v1", map[string]any{"operations": wire}, &output); err != nil {
 		return false, "", err
 	}
-	winner := ""
-	if output.WinningOperationID != nil {
-		winner = *output.WinningOperationID
-	}
-	oracle, oracleWinner := reduceAutoStart(operations)
-	if output.AutoStartBreaks != oracle || winner != oracleWinner {
-		return false, "", errors.New("shared auto-start reducer diverged from Go oracle")
-	}
-	return output.AutoStartBreaks, winner, nil
+	return autoStartResultFromCore(output, operations)
 }
 
 type coreSelectedTaskOperation struct {
 	coreOperationClock
 	TaskID *string `json:"taskId"`
+}
+
+type coreSelectedTaskResult struct {
+	SelectedTaskID     coreNullable[string] `json:"selectedTaskId"`
+	WinningOperationID coreNullable[string] `json:"winningOperationId"`
 }
 
 func reduceSelectedTaskWithSharedCore(ctx context.Context, operations []SelectedTaskOperation, tasks []task.Task) (*string, string, error) {
@@ -380,22 +414,11 @@ func reduceSelectedTaskWithSharedCore(ctx context.Context, operations []Selected
 	for _, current := range tasks {
 		activeTaskIDs = append(activeTaskIDs, current.ID)
 	}
-	var output struct {
-		SelectedTaskID     *string `json:"selectedTaskId"`
-		WinningOperationID *string `json:"winningOperationId"`
-	}
+	var output coreSelectedTaskResult
 	if err := callAccountSharedCore(ctx, "selectedTask.reduce.v1", map[string]any{
 		"operations": wire, "activeTaskIds": activeTaskIDs,
 	}, &output); err != nil {
 		return nil, "", err
 	}
-	winner := ""
-	if output.WinningOperationID != nil {
-		winner = *output.WinningOperationID
-	}
-	oracle, oracleWinner := reduceSelectedTask(operations, tasks)
-	if !reflect.DeepEqual(output.SelectedTaskID, oracle) || winner != oracleWinner {
-		return nil, "", errors.New("shared selected-task reducer diverged from Go oracle")
-	}
-	return output.SelectedTaskID, winner, nil
+	return selectedTaskResultFromCore(output, operations, tasks)
 }

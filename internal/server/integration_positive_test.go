@@ -135,7 +135,7 @@ func TestBearerDurationSyncReturnsCanonicalDurationsAndPublishesRevision(t *test
 	payload.DeviceID = fixture.deviceID
 	payload.Commands = []syncCommandJSON{}
 	payload.DurationOperations = []syncDurationOperationJSON{validDurationOperationJSON(now, "short_break", 600_000)}
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 
 	body, err := json.Marshal(payload)
@@ -208,7 +208,7 @@ func TestBearerSyncMaterializesDeadlineAndPublishesCanonicalRevision(t *testing.
 	if err != nil || seeded.Revision != 1 || seeded.CanonicalTimer == nil || seeded.CanonicalTimer.Status != "running" {
 		t.Fatalf("seeded timer = %#v, %v", seeded, err)
 	}
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 
 	payload := validSyncRequestJSON(time.Now().UTC())

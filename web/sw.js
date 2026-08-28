@@ -4,7 +4,7 @@ importScripts("/shared-core-metadata.js?v=1");
 
 const CORE_METADATA = self.PomodoroughSharedCoreMetadata;
 if (!CORE_METADATA) throw new Error("Shared core metadata is unavailable");
-const CACHE_NAME = `pomodorough-shell-v45-${CORE_METADATA.cacheVersion}`;
+const CACHE_NAME = `pomodorough-shell-v49-${CORE_METADATA.cacheVersion}`;
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
@@ -19,11 +19,21 @@ const SHELL = [
   "/shared-core.js?v=6",
   CORE_METADATA.wasmURL,
   "/sync-core.js?v=25",
-  "/sync-storage.js?v=26",
+  "/sync-authority.js?v=1",
+  "/sync-storage-uuid.js?v=1",
+  "/sync-storage.js?v=27",
   "/i18n.js?v=2",
   "/locales/en.json?v=2",
   "/locales/ar-XB.json?v=2",
-  "/app.js?v=32",
+  "/app-runtime.js?v=1",
+  "/app-state.js?v=1",
+  "/app-storage.js?v=1",
+  "/app-actions.js?v=1",
+  "/app-sync.js?v=1",
+  "/app-bootstrap.js?v=1",
+  "/app-session.js?v=1",
+  "/app-view.js?v=1",
+  "/app.js?v=35",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

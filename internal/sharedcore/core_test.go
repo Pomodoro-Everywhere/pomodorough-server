@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/tetratelabs/wazero"
 )
 
 func TestABICleanupCoversMalformedResultsAndPreservesFailures(t *testing.T) {
@@ -55,7 +57,7 @@ func TestABICleanupCoversMalformedResultsAndPreservesFailures(t *testing.T) {
 					if test.freeFails {
 						return nil, errors.New("free trap")
 					}
-					return nil, nil
+					return []uint64{1}, nil
 				},
 				dispatch: func(context.Context, uint64, uint64, uint64, uint64) ([]uint64, error) {
 					return []uint64{test.result}, nil
@@ -122,6 +124,41 @@ func TestAllocationWriteFailureReleasesAllocationAndPreservesCleanupFailure(t *t
 	}
 	if !slices.Equal(freed, []ownedBuffer{{77, 3}}) {
 		t.Fatalf("freed = %#v", freed)
+	}
+}
+
+func TestABIFreeRejectsInvalidStatusAndPreservesPrimaryFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		freeResult []uint64
+	}{
+		{name: "rejected ownership", freeResult: []uint64{0}},
+		{name: "unexpected success value", freeResult: []uint64{2}},
+		{name: "missing status", freeResult: nil},
+		{name: "extra status", freeResult: []uint64{1, 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			allocated := []uint64{100, 200}
+			abi := abiCalls{
+				allocate: func(context.Context, uint64) ([]uint64, error) {
+					pointer := allocated[0]
+					allocated = allocated[1:]
+					return []uint64{pointer}, nil
+				},
+				free: func(context.Context, uint64, uint64) ([]uint64, error) {
+					return test.freeResult, nil
+				},
+				dispatch: func(context.Context, uint64, uint64, uint64, uint64) ([]uint64, error) {
+					return nil, errors.New("dispatch trap")
+				},
+				write: func(uint32, []byte) bool { return true },
+			}
+
+			_, err := callABI(context.Background(), abi, "v", []byte(`{}`))
+			if err == nil || !strings.Contains(err.Error(), "dispatch trap") || !strings.Contains(err.Error(), "free shared-core buffer") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
@@ -249,7 +286,7 @@ func TestEmbeddedCoreArtifactHasPinnedProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(commit)); got != "8dc24486b38d87eb2c717e80b4315b31dd6a671d" {
+	if got := strings.TrimSpace(string(commit)); got != "71c85020eab69a803ab0d3046aa7abef890c4780" {
 		t.Fatalf("embedded core commit = %q", got)
 	}
 	checksum, err := os.ReadFile("pomodorough_core.wasm.sha256")
@@ -292,8 +329,45 @@ func TestEmbeddedCoreVersion(t *testing.T) {
 	if err := json.Unmarshal(result, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.1.5" {
+	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.1.6" {
 		t.Fatalf("unexpected core version envelope: %s", result)
+	}
+}
+
+func TestEmbeddedCoreRejectsInvalidAndDuplicateFrees(t *testing.T) {
+	ctx := context.Background()
+	runtime := wazero.NewRuntime(ctx)
+	defer runtime.Close(ctx)
+	module, err := runtime.Instantiate(ctx, wasm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer module.Close(ctx)
+
+	alloc := module.ExportedFunction("pomodorough_alloc")
+	free := module.ExportedFunction("pomodorough_free_v2")
+	if alloc == nil || free == nil {
+		t.Fatal("embedded core is missing allocation ownership exports")
+	}
+	allocated, err := alloc.Call(ctx, 8)
+	if err != nil || len(allocated) != 1 || allocated[0] == 0 {
+		t.Fatalf("allocate embedded buffer: values=%v err=%v", allocated, err)
+	}
+	pointer := allocated[0]
+	for _, test := range []struct {
+		name      string
+		arguments []uint64
+		want      uint64
+	}{
+		{"wrong length", []uint64{pointer, 7}, 0},
+		{"valid", []uint64{pointer, 8}, 1},
+		{"duplicate", []uint64{pointer, 8}, 0},
+		{"null", []uint64{0, 8}, 0},
+	} {
+		values, callErr := free.Call(ctx, test.arguments...)
+		if callErr != nil || len(values) != 1 || values[0] != test.want {
+			t.Errorf("%s free: values=%v err=%v want status=%d", test.name, values, callErr, test.want)
+		}
 	}
 }
 

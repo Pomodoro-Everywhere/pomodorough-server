@@ -25,7 +25,7 @@ func TestHTTPStreamRequiresAuthenticationAndIgnoresLastEventIDOnReconnect(t *tes
 	testServer := httptest.NewServer(fixture.handler)
 	defer testServer.Close()
 	for _, lastEventID := range []string{"999", "0"} {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := serverTestContext(t)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, testServer.URL+"/api/v1/stream", nil)
 		if err != nil {
 			cancel()
@@ -58,7 +58,7 @@ func TestHTTPStreamSuppressesDuplicatesAndSendsKeepalive(t *testing.T) {
 	fixture.application.streamKeepaliveInterval = 10 * time.Millisecond
 	testServer := httptest.NewServer(fixture.handler)
 	defer testServer.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := serverTestContext(t)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, testServer.URL+"/api/v1/stream", nil)
 	if err != nil {
@@ -74,13 +74,13 @@ func TestHTTPStreamSuppressesDuplicatesAndSendsKeepalive(t *testing.T) {
 	if revision := scanNextRevision(t, scanner); revision != 0 {
 		t.Fatalf("initial revision = %d, want 0", revision)
 	}
-	fixture.application.hub.publish(fixture.userID, 1)
-	fixture.application.hub.publish(fixture.userID, 1)
+	fixture.application.hub.publish(fixture.userID, 1, 1)
+	fixture.application.hub.publish(fixture.userID, 1, 1)
 	if revision := scanNextRevision(t, scanner); revision != 1 {
 		t.Fatalf("first published revision = %d, want 1", revision)
 	}
-	fixture.application.hub.publish(fixture.userID, 1)
-	fixture.application.hub.publish(fixture.userID, 2)
+	fixture.application.hub.publish(fixture.userID, 1, 1)
+	fixture.application.hub.publish(fixture.userID, 1, 2)
 	if revision := scanNextRevision(t, scanner); revision != 2 {
 		t.Fatalf("next published revision = %d, want 2", revision)
 	}
@@ -92,16 +92,77 @@ func TestHTTPStreamSuppressesDuplicatesAndSendsKeepalive(t *testing.T) {
 	t.Fatal("stream closed before keepalive")
 }
 
+func TestHTTPLogoutClosesExistingSessionStream(t *testing.T) {
+	fixture := newServerFixture(t)
+	streamDone := startOpenNativeStream(t, fixture)
+
+	request := httptest.NewRequest(http.MethodPost, "https://pomodorough.egigoka.me/api/v1/auth/logout", nil)
+	request.Header.Set("Authorization", "Bearer "+fixture.accessToken)
+	response := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d body=%s", response.Code, response.Body.String())
+	}
+	assertStreamHandlerReturns(t, streamDone)
+}
+
+func TestHTTPDeviceRevocationClosesExistingDeviceStream(t *testing.T) {
+	fixture := newServerFixture(t)
+	streamDone := startOpenNativeStream(t, fixture)
+
+	request, response := newJSONRequest(t, http.MethodPost, "https://pomodorough.egigoka.me/api/v1/auth/revoke-device", map[string]string{"deviceId": fixture.deviceID})
+	addWebAuthentication(request, fixture)
+	addValidCSRF(request, fixture)
+	fixture.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("device revocation status = %d body=%s", response.Code, response.Body.String())
+	}
+	assertStreamHandlerReturns(t, streamDone)
+}
+
+func startOpenNativeStream(t *testing.T, fixture serverFixture) <-chan struct{} {
+	t.Helper()
+	fixture.application.streamKeepaliveInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/api/v1/stream", nil).WithContext(ctx)
+	writer := &openStreamWriter{header: make(http.Header), flushed: make(chan struct{}, 1)}
+	done := make(chan struct{})
+	go func() {
+		fixture.application.handleStream(writer, request, principal{
+			UserID: fixture.userID, SessionID: "native-session", DeviceID: fixture.deviceID, Method: "bearer", Generation: 1,
+		})
+		close(done)
+	}()
+	select {
+	case <-writer.flushed:
+	case <-done:
+		t.Fatal("stream handler returned before initial revision flush")
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not flush initial revision")
+	}
+	return done
+}
+
+func assertStreamHandlerReturns(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("revoked authenticated stream remained open")
+	}
+}
+
 func TestHTTPStreamWriteFailureReturnsAndUnsubscribes(t *testing.T) {
 	fixture := newServerFixture(t)
 	w := &failingStreamWriter{header: make(http.Header)}
 	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/api/v1/stream", nil)
-	fixture.application.handleStream(w, request, principal{UserID: fixture.userID})
+	fixture.application.handleStream(w, request, principal{UserID: fixture.userID, Generation: 1})
 	if w.flushes != 1 {
 		t.Fatalf("stream flush attempts = %d, want 1", w.flushes)
 	}
 	fixture.application.hub.mu.Lock()
-	subscribers := len(fixture.application.hub.subscribers[fixture.userID])
+	subscribers := len(fixture.application.hub.subscribers[revisionScope{userID: fixture.userID, generation: 1}])
 	fixture.application.hub.mu.Unlock()
 	if subscribers != 0 {
 		t.Fatalf("subscribers after write failure = %d, want 0", subscribers)
@@ -130,6 +191,25 @@ type failingStreamWriter struct {
 	body    bytes.Buffer
 	status  int
 	flushes int
+}
+
+type openStreamWriter struct {
+	header  http.Header
+	flushed chan struct{}
+}
+
+func (w *openStreamWriter) Header() http.Header { return w.header }
+
+func (w *openStreamWriter) WriteHeader(int) {}
+
+func (w *openStreamWriter) Write(body []byte) (int, error) { return len(body), nil }
+
+func (w *openStreamWriter) FlushError() error {
+	select {
+	case w.flushed <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (w *failingStreamWriter) Header() http.Header { return w.header }

@@ -33,7 +33,7 @@ func TestHTTPBootstrapPreviewWithoutDeadlineDoesNotMutateAndKeepRemoteDoesNotPub
 		t.Fatal(err)
 	}
 	db.Close()
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 
 	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/api/v1/bootstrap", nil)
@@ -177,7 +177,7 @@ func TestHTTPBootstrapMergeIsIdempotentAndMapsConflicts(t *testing.T) {
 	payload.Commands = []syncCommandJSON{command}
 	payload.TaskOperations = []syncTaskOperationJSON{operation}
 	payload.DurationOperations = []syncDurationOperationJSON{validDurationOperationJSON(now, "short_break", 600_000)}
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 
 	first := postAuthenticatedJSON(t, fixture, "/api/v1/bootstrap/resolve", payload)
@@ -226,7 +226,7 @@ func TestHTTPBootstrapReplaceAndBearerDeviceMatch(t *testing.T) {
 		PlannedDurationMs: int64Pointer(25 * 60_000), OccurredAt: now.Add(time.Second).Format(time.RFC3339Nano),
 		HLCWallMs: int64Pointer(now.Add(time.Second).UnixMilli()), HLCCounter: int64Pointer(0), ObservedElapsedMs: int64Pointer(0),
 	}}
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 	response := postAuthenticatedJSON(t, fixture, "/api/v1/bootstrap/resolve", payload)
 	if response.Code != http.StatusOK {
@@ -269,7 +269,7 @@ func TestHTTPConcurrentBootstrapCASPublishesOneRevision(t *testing.T) {
 	payloads[0].DurationOperations = []syncDurationOperationJSON{validDurationOperationJSON(now, "focus", 1_200_000)}
 	payloads[1].DurationOperations = []syncDurationOperationJSON{validDurationOperationJSON(now, "short_break", 600_000)}
 	payloads[1].DurationOperations[0].ID = "duration-operation-0002"
-	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	revisions, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1)
 	defer unsubscribe()
 
 	responses := make([]*httptest.ResponseRecorder, len(payloads))

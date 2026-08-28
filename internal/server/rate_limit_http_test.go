@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -51,7 +50,7 @@ func TestStreamConcurrentLimitReturns429(t *testing.T) {
 	fixture := newServerFixture(t)
 	fixture.application.streamLimiter = newConcurrentLimiter(0)
 	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/api/v1/stream", nil)
-	ctx, cancel := context.WithTimeout(request.Context(), 50*time.Millisecond)
+	ctx, cancel := serverTestContext(t)
 	defer cancel()
 	request = request.WithContext(ctx)
 	addWebAuthentication(request, fixture)

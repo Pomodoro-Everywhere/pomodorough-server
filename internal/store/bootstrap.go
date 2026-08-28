@@ -39,7 +39,56 @@ func (s *Store) Bootstrap(ctx context.Context, db *sql.DB, userID string, now ti
 	return s.materializeProjection(ctx, db, userID, now)
 }
 
+func (s *Store) BootstrapForGeneration(ctx context.Context, userID string, generation int64, now time.Time) (SyncResult, error) {
+	return s.materializeProjectionForGeneration(ctx, userID, generation, now)
+}
+
 func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string, request BootstrapResolutionRequest, now time.Time) (SyncResult, error) {
+	unlock := s.LockUser(userID)
+	defer unlock()
+	return s.resolveBootstrapLocked(ctx, db, request, now)
+}
+
+func (s *Store) ResolveBootstrapForGeneration(ctx context.Context, userID string, generation int64, request BootstrapResolutionRequest, now time.Time) (SyncResult, error) {
+	return withAccountGeneration(s, ctx, userID, generation, func(db *sql.DB) (SyncResult, error) {
+		return s.resolveBootstrapLocked(ctx, db, request, now)
+	})
+}
+
+func (s *Store) resolveBootstrapLocked(ctx context.Context, db *sql.DB, request BootstrapResolutionRequest, now time.Time) (SyncResult, error) {
+	syncRequest, payloadHash, err := validateBootstrapResolutionRequest(request)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("begin bootstrap resolution: %w", err)
+	}
+	defer tx.Rollback()
+
+	stored, found, err := lookupStoredBootstrapResponse(ctx, tx, request, payloadHash)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	if found {
+		return stored, nil
+	}
+	revision, err := bootstrapRevisionForRequest(ctx, tx, request.ExpectedRevision)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	application, err := applyBootstrapStrategy(ctx, tx, request, syncRequest, now)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	revision, changed, err := persistBootstrapApplication(ctx, tx, request.Strategy, application, revision)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return recordBootstrapResponse(ctx, tx, request, syncRequest, application, revision, changed, payloadHash, now)
+}
+
+func validateBootstrapResolutionRequest(request BootstrapResolutionRequest) (SyncRequest, [sha256.Size]byte, error) {
 	syncRequest := SyncRequest{
 		DeviceID:               request.DeviceID,
 		Commands:               request.Commands,
@@ -49,131 +98,158 @@ func (s *Store) ResolveBootstrap(ctx context.Context, db *sql.DB, userID string,
 		SelectedTaskOperations: request.SelectedTaskOperations,
 	}
 	if err := validateUniqueOperationIDs(syncRequest); err != nil {
-		return SyncResult{}, err
+		return SyncRequest{}, [sha256.Size]byte{}, err
 	}
 	if request.Strategy != BootstrapKeepRemote && request.Strategy != BootstrapReplaceRemote && request.Strategy != BootstrapMerge {
-		return SyncResult{}, fmt.Errorf("invalid bootstrap strategy %q", request.Strategy)
+		return SyncRequest{}, [sha256.Size]byte{}, fmt.Errorf("invalid bootstrap strategy %q", request.Strategy)
 	}
 	if request.Strategy == BootstrapKeepRemote && (len(request.Commands) != 0 || len(request.TaskOperations) != 0 || len(request.DurationOperations) != 0 || len(request.AutoStartOperations) != 0 || len(request.SelectedTaskOperations) != 0) {
-		return SyncResult{}, errors.New("keep_remote requires empty operation arrays")
+		return SyncRequest{}, [sha256.Size]byte{}, errors.New("keep_remote requires empty operation arrays")
 	}
 	payloadHash, err := bootstrapPayloadHash(request)
 	if err != nil {
-		return SyncResult{}, err
+		return SyncRequest{}, [sha256.Size]byte{}, err
 	}
+	return syncRequest, payloadHash, nil
+}
 
-	unlock := s.LockUser(userID)
-	defer unlock()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("begin bootstrap resolution: %w", err)
-	}
-	defer tx.Rollback()
-
+func lookupStoredBootstrapResponse(ctx context.Context, tx *sql.Tx, request BootstrapResolutionRequest, payloadHash [sha256.Size]byte) (SyncResult, bool, error) {
 	var storedHash []byte
 	var storedResponse string
-	err = tx.QueryRowContext(ctx, `SELECT payload_hash, response_json FROM bootstrap_resolutions WHERE request_id = ?`, request.RequestID).Scan(&storedHash, &storedResponse)
-	if err == nil {
-		hashMatches := subtle.ConstantTimeCompare(storedHash, payloadHash[:]) == 1
-		if !hashMatches && !request.SelectedTaskOperationsPresent {
-			previousHash, err := previousBootstrapPayloadHash(request)
-			if err != nil {
-				return SyncResult{}, err
-			}
-			hashMatches = subtle.ConstantTimeCompare(storedHash, previousHash[:]) == 1
-		}
-		if !hashMatches && !request.AutoStartOperationsPresent && !request.SelectedTaskOperationsPresent {
-			legacyHash, err := legacyBootstrapPayloadHash(request)
-			if err != nil {
-				return SyncResult{}, err
-			}
-			hashMatches = subtle.ConstantTimeCompare(storedHash, legacyHash[:]) == 1
-		}
-		if !hashMatches {
-			return SyncResult{}, ErrRequestIDConflict
-		}
-		var result SyncResult
-		if err := json.Unmarshal([]byte(storedResponse), &result); err != nil {
-			return SyncResult{}, fmt.Errorf("decode stored bootstrap response: %w", err)
-		}
-		if err := validateCanonicalRevision(result.Revision); err != nil {
-			return SyncResult{}, err
-		}
-		return normalizeStoredSyncResult(result)
+	err := tx.QueryRowContext(ctx, `SELECT payload_hash, response_json FROM bootstrap_resolutions WHERE request_id = ?`, request.RequestID).Scan(&storedHash, &storedResponse)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SyncResult{}, false, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return SyncResult{}, fmt.Errorf("read bootstrap resolution: %w", err)
+	if err != nil {
+		return SyncResult{}, false, fmt.Errorf("read bootstrap resolution: %w", err)
 	}
+	hashMatches, err := storedBootstrapPayloadMatches(storedHash, payloadHash, request)
+	if err != nil {
+		return SyncResult{}, false, err
+	}
+	if !hashMatches {
+		return SyncResult{}, false, ErrRequestIDConflict
+	}
+	var result SyncResult
+	if err := json.Unmarshal([]byte(storedResponse), &result); err != nil {
+		return SyncResult{}, false, fmt.Errorf("decode stored bootstrap response: %w", err)
+	}
+	if err := validateCanonicalRevision(result.Revision); err != nil {
+		return SyncResult{}, false, err
+	}
+	result, err = normalizeStoredSyncResult(result)
+	return result, true, err
+}
 
+func storedBootstrapPayloadMatches(storedHash []byte, payloadHash [sha256.Size]byte, request BootstrapResolutionRequest) (bool, error) {
+	if subtle.ConstantTimeCompare(storedHash, payloadHash[:]) == 1 {
+		return true, nil
+	}
+	if !request.SelectedTaskOperationsPresent {
+		previousHash, err := previousBootstrapPayloadHash(request)
+		if err != nil {
+			return false, err
+		}
+		if subtle.ConstantTimeCompare(storedHash, previousHash[:]) == 1 {
+			return true, nil
+		}
+	}
+	if !request.AutoStartOperationsPresent && !request.SelectedTaskOperationsPresent {
+		legacyHash, err := legacyBootstrapPayloadHash(request)
+		if err != nil {
+			return false, err
+		}
+		return subtle.ConstantTimeCompare(storedHash, legacyHash[:]) == 1, nil
+	}
+	return false, nil
+}
+
+func bootstrapRevisionForRequest(ctx context.Context, tx *sql.Tx, expectedRevision int64) (int64, error) {
 	var revision int64
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&revision); err != nil {
-		return SyncResult{}, fmt.Errorf("read account revision: %w", err)
+		return 0, fmt.Errorf("read account revision: %w", err)
 	}
 	if err := validateCanonicalRevision(revision); err != nil {
-		return SyncResult{}, err
+		return 0, err
 	}
-	if revision != request.ExpectedRevision {
-		return SyncResult{}, ErrRevisionConflict
+	if revision != expectedRevision {
+		return 0, ErrRevisionConflict
 	}
+	return revision, nil
+}
 
+type bootstrapStrategyApplication struct {
+	operations operationApplication
+	before     accountReduction
+	reduction  accountReduction
+}
+
+func applyBootstrapStrategy(ctx context.Context, tx *sql.Tx, request BootstrapResolutionRequest, syncRequest SyncRequest, now time.Time) (bootstrapStrategyApplication, error) {
 	var before accountReduction
+	var err error
 	if request.Strategy == BootstrapKeepRemote || request.Strategy == BootstrapReplaceRemote {
 		before, err = reduceAccount(ctx, tx, now)
 		if err != nil {
-			return SyncResult{}, err
+			return bootstrapStrategyApplication{}, err
 		}
 	}
 	application := operationApplication{}
 	if request.Strategy == BootstrapReplaceRemote {
 		if err := clearForBootstrapReplacement(ctx, tx, request.AutoStartOperationsPresent, request.SelectedTaskOperationsPresent); err != nil {
-			return SyncResult{}, err
+			return bootstrapStrategyApplication{}, err
 		}
 	}
 	if request.Strategy != BootstrapKeepRemote {
 		application, err = applyOperations(ctx, tx, syncRequest)
 		if err != nil {
-			return SyncResult{}, err
+			return bootstrapStrategyApplication{}, err
 		}
 	}
-
 	reduction := before
 	if request.Strategy != BootstrapKeepRemote {
 		reduction, err = reduceAccount(ctx, tx, now)
 		if err != nil {
-			return SyncResult{}, err
+			return bootstrapStrategyApplication{}, err
 		}
 	}
-	projectionChanged, err := timerProjectionChanged(ctx, tx, reduction.timer)
+	return bootstrapStrategyApplication{operations: application, before: before, reduction: reduction}, nil
+}
+
+func persistBootstrapApplication(ctx context.Context, tx *sql.Tx, strategy string, application bootstrapStrategyApplication, revision int64) (int64, bool, error) {
+	projectionChanged, err := timerProjectionChanged(ctx, tx, application.reduction.timer)
 	if err != nil {
-		return SyncResult{}, err
+		return 0, false, err
 	}
-	changed := application.changed
-	if request.Strategy == BootstrapReplaceRemote {
-		changed = !slices.Equal(before.commands, reduction.commands) ||
-			!slices.Equal(before.taskOperations, reduction.taskOperations) ||
-			!slices.Equal(before.durationOperations, reduction.durationOperations) ||
-			!slices.Equal(before.autoStartOperations, reduction.autoStartOperations) ||
-			!equalSelectedTaskOperations(before.selectedTaskOperations, reduction.selectedTaskOperations)
+	changed := application.operations.changed
+	if strategy == BootstrapReplaceRemote {
+		changed = !slices.Equal(application.before.commands, application.reduction.commands) ||
+			!slices.Equal(application.before.taskOperations, application.reduction.taskOperations) ||
+			!slices.Equal(application.before.durationOperations, application.reduction.durationOperations) ||
+			!slices.Equal(application.before.autoStartOperations, application.reduction.autoStartOperations) ||
+			!equalSelectedTaskOperations(application.before.selectedTaskOperations, application.reduction.selectedTaskOperations)
 	}
 	changed = changed || projectionChanged
 	if changed {
 		revision, err = safeRevisionIncrement(revision)
 		if err != nil {
-			return SyncResult{}, err
+			return 0, false, err
 		}
 	}
 	if changed {
-		if err := persistReduction(ctx, tx, reduction, revision); err != nil {
-			return SyncResult{}, err
+		if err := persistReduction(ctx, tx, application.reduction, revision); err != nil {
+			return 0, false, err
 		}
 	}
+	return revision, changed, nil
+}
 
-	result, err := resultFromReduction(ctx, reduction, revision, now, &syncRequest)
+func recordBootstrapResponse(ctx context.Context, tx *sql.Tx, request BootstrapResolutionRequest, syncRequest SyncRequest, application bootstrapStrategyApplication, revision int64, changed bool, payloadHash [sha256.Size]byte, now time.Time) (SyncResult, error) {
+	result, err := resultFromReduction(ctx, application.reduction, revision, now, &syncRequest)
 	if err != nil {
 		return SyncResult{}, err
 	}
 	if request.Strategy != BootstrapKeepRemote {
-		addAcknowledgements(&result, syncRequest, application, reduction)
+		addAcknowledgements(&result, syncRequest, application.operations, application.reduction)
 	}
 	result.Changed = changed
 	responseJSON, err := json.Marshal(result)

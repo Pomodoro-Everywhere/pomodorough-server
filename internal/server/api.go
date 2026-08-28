@@ -1,111 +1,23 @@
 package server
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"regexp"
 	"time"
 
 	"pomodorough/internal/authn"
 	"pomodorough/internal/store"
-	"pomodorough/internal/task"
-	"pomodorough/internal/timer"
 )
-
-const (
-	maxSyncBody      = 1 << 20
-	maxBootstrapBody = 32 << 20
-	maxSafeInteger   = int64(9_007_199_254_740_991)
-	maxClockSkew     = 5 * time.Minute
-)
-
-var (
-	idPattern                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
-	platformPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
-	validTypes               = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}}
-	validPhases              = map[string]struct{}{"focus": {}, "short_break": {}, "long_break": {}}
-	validTaskOperationTypes  = map[string]struct{}{"upsert": {}, "delete": {}}
-	validBootstrapStrategies = map[string]struct{}{
-		store.BootstrapKeepRemote: {}, store.BootstrapReplaceRemote: {}, store.BootstrapMerge: {},
-	}
-)
-
-type syncRequestJSON struct {
-	DeviceID               string                          `json:"deviceId"`
-	LastRevision           *int64                          `json:"lastRevision"`
-	Commands               []syncCommandJSON               `json:"commands"`
-	TaskOperations         []syncTaskOperationJSON         `json:"taskOperations,omitempty"`
-	DurationOperations     []syncDurationOperationJSON     `json:"durationOperations,omitempty"`
-	AutoStartOperations    []syncAutoStartOperationJSON    `json:"autoStartOperations,omitempty"`
-	SelectedTaskOperations []syncSelectedTaskOperationJSON `json:"selectedTaskOperations,omitempty"`
-}
-
-type syncCommandJSON struct {
-	ID                string `json:"id"`
-	DeviceSequence    *int64 `json:"deviceSequence"`
-	TimerID           string `json:"timerId"`
-	TaskID            string `json:"taskId,omitempty"`
-	Type              string `json:"type"`
-	Phase             string `json:"phase"`
-	PlannedDurationMs *int64 `json:"plannedDurationMs"`
-	OccurredAt        string `json:"occurredAt"`
-	HLCWallMs         *int64 `json:"hlcWallMs"`
-	HLCCounter        *int64 `json:"hlcCounter"`
-	ObservedElapsedMs *int64 `json:"observedElapsedMs"`
-}
-
-type syncTaskOperationJSON struct {
-	ID         string `json:"id"`
-	TaskID     string `json:"taskId"`
-	Type       string `json:"type"`
-	Title      string `json:"title,omitempty"`
-	OccurredAt string `json:"occurredAt"`
-	HLCWallMs  *int64 `json:"hlcWallMs"`
-	HLCCounter *int64 `json:"hlcCounter"`
-}
-
-type syncDurationOperationJSON struct {
-	ID         string `json:"id"`
-	Phase      string `json:"phase"`
-	DurationMs *int64 `json:"durationMs"`
-	OccurredAt string `json:"occurredAt"`
-	HLCWallMs  *int64 `json:"hlcWallMs"`
-	HLCCounter *int64 `json:"hlcCounter"`
-}
-
-type syncAutoStartOperationJSON struct {
-	ID         string `json:"id"`
-	Enabled    *bool  `json:"enabled"`
-	OccurredAt string `json:"occurredAt"`
-	HLCWallMs  *int64 `json:"hlcWallMs"`
-	HLCCounter *int64 `json:"hlcCounter"`
-}
-
-type syncSelectedTaskOperationJSON struct {
-	ID         string          `json:"id"`
-	TaskID     json.RawMessage `json:"taskId,omitempty"`
-	OccurredAt string          `json:"occurredAt"`
-	HLCWallMs  *int64          `json:"hlcWallMs"`
-	HLCCounter *int64          `json:"hlcCounter"`
-}
-
-type bootstrapResolutionRequestJSON struct {
-	RequestID              string                      `json:"requestId"`
-	DeviceID               string                      `json:"deviceId"`
-	ExpectedRevision       *int64                      `json:"expectedRevision"`
-	Strategy               string                      `json:"strategy"`
-	Commands               []syncCommandJSON           `json:"commands"`
-	TaskOperations         []syncTaskOperationJSON     `json:"taskOperations"`
-	DurationOperations     []syncDurationOperationJSON `json:"durationOperations"`
-	AutoStartOperations    json.RawMessage             `json:"autoStartOperations,omitempty"`
-	SelectedTaskOperations json.RawMessage             `json:"selectedTaskOperations,omitempty"`
-}
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity principal) {
+	if err := s.store.ValidateAccountGeneration(r.Context(), identity.UserID, identity.Generation); err != nil {
+		if isUnauthorized(err) {
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		s.internalAPIError(w, "validate account generation", err)
+		return
+	}
 	csrfToken := ""
 	if identity.Method == "cookie" {
 		if cookie, err := r.Cookie(authn.CSRFCookie); err == nil {
@@ -121,15 +33,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 				s.internalAPIError(w, "generate replacement CSRF token", err)
 				return
 			}
-			db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-			if err != nil {
-				writeAPIError(w, http.StatusUnauthorized, "unauthorized")
-				return
-			}
 			hash := authn.HashString(csrfToken)
-			err = store.UpdateCSRF(r.Context(), db, identity.SessionID, hash)
-			db.Close()
+			err = s.store.UpdateCSRFForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, hash)
 			if err != nil {
+				if isUnauthorized(err) {
+					writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+					return
+				}
 				s.internalAPIError(w, "replace CSRF token", err)
 				return
 			}
@@ -145,17 +55,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity principal) {
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
+	err := s.store.RevokeSessionForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, time.Now())
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	err = store.RevokeSession(r.Context(), db, identity.SessionID, time.Now())
-	db.Close()
-	if err != nil {
+		if isUnauthorized(err) {
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		s.internalAPIError(w, "revoke session", err)
 		return
 	}
+	s.hub.disconnectSession(identity.UserID, identity.Generation, identity.SessionID)
 	if identity.Method == "cookie" {
 		clearSessionCookies(w)
 	}
@@ -171,11 +80,15 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ide
 		writeAPIError(w, http.StatusBadRequest, "type DELETE to confirm account deletion")
 		return
 	}
-	if err := s.store.DeleteUser(r.Context(), identity.UserID); err != nil {
+	if err := s.store.DeleteUserForGeneration(r.Context(), identity.UserID, identity.Generation); err != nil {
+		if isUnauthorized(err) {
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		s.internalAPIError(w, "delete account", err)
 		return
 	}
-	s.hub.disconnect(identity.UserID)
+	s.hub.disconnect(identity.UserID, identity.Generation)
 	s.logger.Info("account deleted")
 	if identity.Method == "cookie" {
 		clearSessionCookies(w)
@@ -192,17 +105,16 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, iden
 		writeAPIError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
+	err := s.store.RevokeDeviceForGeneration(r.Context(), identity.UserID, identity.Generation, request.DeviceID, time.Now())
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	err = store.RevokeDevice(r.Context(), db, request.DeviceID, time.Now())
-	db.Close()
-	if err != nil {
+		if isUnauthorized(err) {
+			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		s.internalAPIError(w, "revoke device", err)
 		return
 	}
+	s.hub.disconnectDevice(identity.UserID, identity.Generation, request.DeviceID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -220,13 +132,11 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		writeAPIError(w, http.StatusForbidden, "device mismatch")
 		return
 	}
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-	if err != nil {
+	result, err := s.store.SyncForGeneration(r.Context(), identity.UserID, identity.Generation, request, time.Now())
+	if isUnauthorized(err) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	result, err := s.store.Sync(r.Context(), db, identity.UserID, request, time.Now())
-	db.Close()
 	if errors.Is(err, store.ErrRevisionExhausted) {
 		writeAPIError(w, http.StatusConflict, "revision exhausted")
 		return
@@ -246,18 +156,16 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 	)
 	writeJSON(w, http.StatusOK, result)
 	if result.Changed {
-		s.hub.publish(identity.UserID, result.Revision)
+		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identity principal) {
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-	if err != nil {
+	result, err := s.store.BootstrapForGeneration(r.Context(), identity.UserID, identity.Generation, time.Now())
+	if isUnauthorized(err) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	result, err := s.store.Bootstrap(r.Context(), db, identity.UserID, time.Now())
-	db.Close()
 	if errors.Is(err, store.ErrRevisionExhausted) {
 		writeAPIError(w, http.StatusConflict, "revision exhausted")
 		return
@@ -268,7 +176,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identit
 	}
 	writeJSON(w, http.StatusOK, result)
 	if result.Changed {
-		s.hub.publish(identity.UserID, result.Revision)
+		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
 }
 
@@ -287,13 +195,11 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 		writeAPIError(w, http.StatusForbidden, "device mismatch")
 		return
 	}
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-	if err != nil {
+	result, err := s.store.ResolveBootstrapForGeneration(r.Context(), identity.UserID, identity.Generation, request, now)
+	if isUnauthorized(err) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	result, err := s.store.ResolveBootstrap(r.Context(), db, identity.UserID, request, now)
-	db.Close()
 	if errors.Is(err, store.ErrRevisionConflict) {
 		writeAPIError(w, http.StatusConflict, "revision conflict")
 		return
@@ -312,18 +218,16 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 	}
 	writeJSON(w, http.StatusOK, result)
 	if result.Changed {
-		s.hub.publish(identity.UserID, result.Revision)
+		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity principal) {
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-	if err != nil {
+	history, revision, changed, err := s.store.HistoryForGeneration(r.Context(), identity.UserID, identity.Generation, time.Now())
+	if isUnauthorized(err) {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	history, revision, changed, err := s.store.History(r.Context(), db, identity.UserID, time.Now())
-	db.Close()
 	if errors.Is(err, store.ErrRevisionExhausted) {
 		writeAPIError(w, http.StatusConflict, "revision exhausted")
 		return
@@ -334,382 +238,6 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity 
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": history})
 	if changed {
-		s.hub.publish(identity.UserID, revision)
+		s.hub.publish(identity.UserID, identity.Generation, revision)
 	}
-}
-
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity principal) {
-	release, allowed := s.streamLimiter.acquire(identity.UserID)
-	if !allowed {
-		s.writeRateLimit(w, r, "account_stream", 30*time.Second)
-		return
-	}
-	defer release()
-	updates, unsubscribe := s.hub.subscribe(identity.UserID)
-	defer unsubscribe()
-	db, err := s.store.OpenExistingUser(r.Context(), identity.UserID)
-	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	_, revision, changed, err := s.store.History(r.Context(), db, identity.UserID, time.Now())
-	db.Close()
-	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
-		return
-	}
-	if err != nil {
-		s.internalAPIError(w, "read stream revision", err)
-		return
-	}
-	if changed {
-		s.hub.publish(identity.UserID, revision)
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	controller := http.NewResponseController(w)
-	writeRevision := func(value int64) error {
-		_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		if _, err := fmt.Fprintf(w, "event: revision\ndata: {\"revision\":%d}\n\n", value); err != nil {
-			return err
-		}
-		return controller.Flush()
-	}
-	if err := writeRevision(revision); err != nil {
-		return
-	}
-	lastSent := revision
-	keepalive := time.NewTicker(s.streamKeepaliveInterval)
-	defer keepalive.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case revision, open := <-updates:
-			if !open {
-				return
-			}
-			if revision <= lastSent {
-				continue
-			}
-			if err := writeRevision(revision); err != nil {
-				return
-			}
-			lastSent = revision
-		case <-keepalive.C:
-			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
-			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
-				return
-			}
-			if err := controller.Flush(); err != nil {
-				return
-			}
-		}
-	}
-}
-
-type requestRuntimeError struct {
-	cause error
-}
-
-func (e *requestRuntimeError) Error() string { return e.cause.Error() }
-func (e *requestRuntimeError) Unwrap() error { return e.cause }
-
-func isRequestRuntimeError(err error) bool {
-	var target *requestRuntimeError
-	return errors.As(err, &target)
-}
-
-func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (store.SyncRequest, error) {
-	var payload syncRequestJSON
-	if err := decodeJSON(w, r, maxSyncBody, &payload); err != nil {
-		return store.SyncRequest{}, err
-	}
-	if !validID(payload.DeviceID) || payload.LastRevision == nil || *payload.LastRevision < 0 || *payload.LastRevision > store.MaxSafeRevision || payload.Commands == nil || len(payload.Commands) > 256 || len(payload.TaskOperations) > 256 || len(payload.DurationOperations) > 256 || len(payload.AutoStartOperations) > 256 || len(payload.SelectedTaskOperations) > 256 {
-		return store.SyncRequest{}, fmt.Errorf("invalid sync envelope")
-	}
-	request, err := parseOperations(r.Context(), payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, payload.AutoStartOperations, payload.SelectedTaskOperations, 256, now)
-	if err != nil {
-		return store.SyncRequest{}, err
-	}
-	request.LastRevision = *payload.LastRevision
-	return request, nil
-}
-
-func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now time.Time) (store.BootstrapResolutionRequest, error) {
-	var payload bootstrapResolutionRequestJSON
-	if err := decodeJSON(w, r, maxBootstrapBody, &payload); err != nil {
-		return store.BootstrapResolutionRequest{}, err
-	}
-	autoStartOperations, autoStartOperationsPresent, err := parseOptionalAutoStartOperations(payload.AutoStartOperations)
-	if err != nil {
-		return store.BootstrapResolutionRequest{}, err
-	}
-	selectedTaskOperations, selectedTaskOperationsPresent, err := parseOptionalSelectedTaskOperations(payload.SelectedTaskOperations)
-	if err != nil {
-		return store.BootstrapResolutionRequest{}, err
-	}
-	_, validStrategy := validBootstrapStrategies[payload.Strategy]
-	if !validID(payload.RequestID) || !validID(payload.DeviceID) || payload.ExpectedRevision == nil || *payload.ExpectedRevision < 0 || *payload.ExpectedRevision > store.MaxSafeRevision || !validStrategy ||
-		payload.Commands == nil || payload.TaskOperations == nil || payload.DurationOperations == nil ||
-		len(payload.Commands) > 4096 || len(payload.TaskOperations) > 4096 || len(payload.DurationOperations) > 4096 || len(autoStartOperations) > 4096 || len(selectedTaskOperations) > 4096 {
-		return store.BootstrapResolutionRequest{}, fmt.Errorf("invalid bootstrap resolution envelope")
-	}
-	if payload.Strategy == store.BootstrapKeepRemote && (len(payload.Commands) != 0 || len(payload.TaskOperations) != 0 || len(payload.DurationOperations) != 0 || len(autoStartOperations) != 0 || len(selectedTaskOperations) != 0) {
-		return store.BootstrapResolutionRequest{}, fmt.Errorf("keep_remote requires empty operation arrays")
-	}
-	operations, err := parseOperations(r.Context(), payload.DeviceID, payload.Commands, payload.TaskOperations, payload.DurationOperations, autoStartOperations, selectedTaskOperations, 4096, now)
-	if err != nil {
-		return store.BootstrapResolutionRequest{}, err
-	}
-	return store.BootstrapResolutionRequest{
-		RequestID: payload.RequestID, DeviceID: payload.DeviceID, ExpectedRevision: *payload.ExpectedRevision, Strategy: payload.Strategy,
-		Commands: operations.Commands, TaskOperations: operations.TaskOperations, DurationOperations: operations.DurationOperations,
-		AutoStartOperations: operations.AutoStartOperations, AutoStartOperationsPresent: autoStartOperationsPresent,
-		SelectedTaskOperations: operations.SelectedTaskOperations, SelectedTaskOperationsPresent: selectedTaskOperationsPresent,
-	}, nil
-}
-
-func parseOptionalSelectedTaskOperations(raw json.RawMessage) ([]syncSelectedTaskOperationJSON, bool, error) {
-	if len(raw) == 0 {
-		return nil, false, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, false, errors.New("selectedTaskOperations must be an array")
-	}
-	var operations []syncSelectedTaskOperationJSON
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&operations); err != nil || operations == nil {
-		return nil, false, errors.New("selectedTaskOperations must be an array")
-	}
-	return operations, true, nil
-}
-
-func parseOptionalAutoStartOperations(raw json.RawMessage) ([]syncAutoStartOperationJSON, bool, error) {
-	if len(raw) == 0 {
-		return nil, false, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, false, errors.New("autoStartOperations must be an array")
-	}
-	var operations []syncAutoStartOperationJSON
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&operations); err != nil || operations == nil {
-		return nil, false, errors.New("autoStartOperations must be an array")
-	}
-	return operations, true, nil
-}
-
-func parseOperations(ctx context.Context, deviceID string, commands []syncCommandJSON, taskOperations []syncTaskOperationJSON, durationOperations []syncDurationOperationJSON, autoStartOperations []syncAutoStartOperationJSON, selectedTaskOperations []syncSelectedTaskOperationJSON, maximum int, now time.Time) (store.SyncRequest, error) {
-	if len(commands) > maximum || len(taskOperations) > maximum || len(durationOperations) > maximum || len(autoStartOperations) > maximum || len(selectedTaskOperations) > maximum {
-		return store.SyncRequest{}, fmt.Errorf("too many operations")
-	}
-	request := store.SyncRequest{
-		DeviceID:               deviceID,
-		Commands:               make([]timer.Command, 0, len(commands)),
-		TaskOperations:         make([]task.Operation, 0, len(taskOperations)),
-		DurationOperations:     make([]store.DurationOperation, 0, len(durationOperations)),
-		AutoStartOperations:    make([]store.AutoStartOperation, 0, len(autoStartOperations)),
-		SelectedTaskOperations: make([]store.SelectedTaskOperation, 0, len(selectedTaskOperations)),
-	}
-	seenCommandIDs := make(map[string]struct{}, len(commands))
-	seenTaskOperationIDs := make(map[string]struct{}, len(taskOperations))
-	seenDurationOperationIDs := make(map[string]struct{}, len(durationOperations))
-	seenAutoStartOperationIDs := make(map[string]struct{}, len(autoStartOperations))
-	seenSelectedTaskOperationIDs := make(map[string]struct{}, len(selectedTaskOperations))
-	for _, input := range commands {
-		if !validID(input.ID) || !validID(input.TimerID) || input.DeviceSequence == nil || *input.DeviceSequence <= 0 || *input.DeviceSequence > maxSafeInteger {
-			return store.SyncRequest{}, fmt.Errorf("invalid command identity")
-		}
-		if _, duplicate := seenCommandIDs[input.ID]; duplicate {
-			return store.SyncRequest{}, fmt.Errorf("duplicate command identity")
-		}
-		seenCommandIDs[input.ID] = struct{}{}
-		if _, valid := validTypes[input.Type]; !valid {
-			return store.SyncRequest{}, fmt.Errorf("invalid command type")
-		}
-		if input.TaskID != "" && (!validID(input.TaskID) || input.Type != "start" || input.Phase != "focus") {
-			return store.SyncRequest{}, fmt.Errorf("invalid task association")
-		}
-		if _, valid := validPhases[input.Phase]; !valid {
-			return store.SyncRequest{}, fmt.Errorf("invalid command phase")
-		}
-		if input.PlannedDurationMs == nil || *input.PlannedDurationMs < int64(time.Minute/time.Millisecond) || *input.PlannedDurationMs > int64(4*time.Hour/time.Millisecond) {
-			return store.SyncRequest{}, fmt.Errorf("invalid timer duration")
-		}
-		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
-		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid hybrid clock: %w", err)
-		}
-		if input.ObservedElapsedMs == nil {
-			return store.SyncRequest{}, fmt.Errorf("missing observed elapsed")
-		}
-		request.Commands = append(request.Commands, timer.Command{
-			ID: input.ID, DeviceID: deviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
-			TaskID: input.TaskID,
-			Type:   input.Type, Phase: input.Phase, PlannedDurationMs: *input.PlannedDurationMs, OccurredAt: occurredAt,
-			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter, ObservedElapsedMs: *input.ObservedElapsedMs,
-		})
-	}
-	taskTitles := make([]string, 0, len(taskOperations))
-	for _, input := range taskOperations {
-		if !validID(input.ID) || !validID(input.TaskID) {
-			return store.SyncRequest{}, fmt.Errorf("invalid task operation identity")
-		}
-		if _, duplicate := seenTaskOperationIDs[input.ID]; duplicate {
-			return store.SyncRequest{}, fmt.Errorf("duplicate task operation identity")
-		}
-		seenTaskOperationIDs[input.ID] = struct{}{}
-		if _, valid := validTaskOperationTypes[input.Type]; !valid {
-			return store.SyncRequest{}, fmt.Errorf("invalid task operation type")
-		}
-		if input.Type == "upsert" {
-			taskTitles = append(taskTitles, input.Title)
-		} else if input.Title != "" {
-			return store.SyncRequest{}, fmt.Errorf("delete task operation has title")
-		}
-	}
-	identities, err := task.SharedIdentities(ctx, taskTitles)
-	if task.IsSharedIdentityRuntimeError(err) {
-		return store.SyncRequest{}, &requestRuntimeError{cause: err}
-	}
-	if err != nil {
-		return store.SyncRequest{}, fmt.Errorf("invalid task title")
-	}
-	identityIndex := 0
-	for _, input := range taskOperations {
-		title := ""
-		if input.Type == "upsert" {
-			identity := identities[identityIndex]
-			identityIndex++
-			if identity.ID != input.TaskID {
-				return store.SyncRequest{}, fmt.Errorf("invalid task title")
-			}
-			title = identity.Title
-		}
-		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
-		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid task operation clock: %w", err)
-		}
-		request.TaskOperations = append(request.TaskOperations, task.Operation{
-			ID: input.ID, DeviceID: deviceID, TaskID: input.TaskID, Type: input.Type, Title: title,
-			OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
-		})
-	}
-	for _, input := range durationOperations {
-		if !validID(input.ID) {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration operation identity")
-		}
-		if _, duplicate := seenDurationOperationIDs[input.ID]; duplicate {
-			return store.SyncRequest{}, fmt.Errorf("duplicate duration operation identity")
-		}
-		seenDurationOperationIDs[input.ID] = struct{}{}
-		if _, valid := validPhases[input.Phase]; !valid {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration phase")
-		}
-		if input.DurationMs == nil || *input.DurationMs < 60_000 || *input.DurationMs > 10_800_000 || *input.DurationMs%60_000 != 0 {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration value")
-		}
-		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
-		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid duration operation clock: %w", err)
-		}
-		request.DurationOperations = append(request.DurationOperations, store.DurationOperation{
-			ID: input.ID, DeviceID: deviceID, Phase: input.Phase, DurationMs: *input.DurationMs,
-			OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
-		})
-	}
-	for _, input := range autoStartOperations {
-		if !validID(input.ID) {
-			return store.SyncRequest{}, fmt.Errorf("invalid auto-start operation identity")
-		}
-		if _, duplicate := seenAutoStartOperationIDs[input.ID]; duplicate {
-			return store.SyncRequest{}, fmt.Errorf("duplicate auto-start operation identity")
-		}
-		seenAutoStartOperationIDs[input.ID] = struct{}{}
-		if input.Enabled == nil {
-			return store.SyncRequest{}, fmt.Errorf("missing auto-start value")
-		}
-		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
-		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid auto-start operation clock: %w", err)
-		}
-		request.AutoStartOperations = append(request.AutoStartOperations, store.AutoStartOperation{
-			ID: input.ID, DeviceID: deviceID, Enabled: *input.Enabled, OccurredAt: occurredAt,
-			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
-		})
-	}
-	for _, input := range selectedTaskOperations {
-		if !validID(input.ID) {
-			return store.SyncRequest{}, fmt.Errorf("invalid selected-task operation identity")
-		}
-		if _, duplicate := seenSelectedTaskOperationIDs[input.ID]; duplicate {
-			return store.SyncRequest{}, fmt.Errorf("duplicate selected-task operation identity")
-		}
-		seenSelectedTaskOperationIDs[input.ID] = struct{}{}
-		taskID, err := parseNullableTaskID(input.TaskID)
-		if err != nil {
-			return store.SyncRequest{}, err
-		}
-		occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, true, now)
-		if err != nil {
-			return store.SyncRequest{}, fmt.Errorf("invalid selected-task operation clock: %w", err)
-		}
-		request.SelectedTaskOperations = append(request.SelectedTaskOperations, store.SelectedTaskOperation{
-			ID: input.ID, DeviceID: deviceID, TaskID: taskID, OccurredAt: occurredAt,
-			HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
-		})
-	}
-	return request, nil
-}
-
-func parseNullableTaskID(raw json.RawMessage) (*string, error) {
-	if len(raw) == 0 {
-		return nil, errors.New("missing selected-task value")
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil
-	}
-	var taskID string
-	if err := json.Unmarshal(raw, &taskID); err != nil || !validID(taskID) {
-		return nil, errors.New("invalid selected-task value")
-	}
-	return &taskID, nil
-}
-
-func parseOperationClock(occurredAtValue string, wallMs, counter *int64, allowLegacy bool, now time.Time) (time.Time, error) {
-	if wallMs == nil || counter == nil || *wallMs < 0 || *wallMs > maxSafeInteger || *counter < 0 || *counter > maxSafeInteger {
-		return time.Time{}, errors.New("clock is outside the safe integer range")
-	}
-	occurredAt, err := time.Parse(time.RFC3339Nano, occurredAtValue)
-	if err != nil {
-		return time.Time{}, errors.New("occurrence time is not RFC 3339")
-	}
-	if *wallMs == 0 {
-		if !allowLegacy || *counter != 0 || !occurredAt.Equal(time.Unix(0, 0).UTC()) {
-			return time.Time{}, errors.New("invalid legacy clock sentinel")
-		}
-		return occurredAt, nil
-	}
-	latest := now.Add(maxClockSkew)
-	if *wallMs > latest.UnixMilli() || occurredAt.After(latest) {
-		return time.Time{}, errors.New("clock is too far ahead of server time")
-	}
-	delta := occurredAt.Sub(time.UnixMilli(*wallMs))
-	if delta < -maxClockSkew || delta > maxClockSkew {
-		return time.Time{}, errors.New("occurrence time and hybrid clock disagree")
-	}
-	return occurredAt, nil
-}
-
-func validID(value string) bool {
-	return idPattern.MatchString(value)
-}
-
-func validPlatform(value string) bool {
-	return platformPattern.MatchString(value)
 }

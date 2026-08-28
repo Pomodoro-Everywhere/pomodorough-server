@@ -68,39 +68,6 @@
       || durationsDiffer(remote.durationsMs, remote.defaultDurationsMs);
   }
 
-  function decideBootstrap(input) {
-    const localOwnerId = input.localOwnerId || null;
-    const currentUserId = input.currentUserId || null;
-    if (localOwnerId && localOwnerId === currentUserId) {
-      return { mode: "normal_sync", reason: "same_owner" };
-    }
-    if (localOwnerId && localOwnerId !== currentUserId) {
-      return { mode: "auto", strategy: "keep_remote", reason: "different_owner" };
-    }
-
-    const localHistoryCount = completedHistoryCount(input.localHistory);
-    const remoteHistoryCount = completedHistoryCount(input.remoteHistory);
-    const localStateExists = Boolean(input.hasLocalState)
-      || (Array.isArray(input.localHistory) && input.localHistory.length > 0);
-    const remoteStateExists = Boolean(input.hasRemoteState)
-      || (Array.isArray(input.remoteHistory) && input.remoteHistory.length > 0);
-    if ((localHistoryCount > 0 && remoteStateExists)
-        || (remoteHistoryCount > 0 && localStateExists)) {
-      return { mode: "choose", localHistoryCount, remoteHistoryCount };
-    }
-    if (localHistoryCount > 0) {
-      return { mode: "auto", strategy: "replace_remote", reason: "local_only" };
-    }
-    if (remoteHistoryCount > 0) {
-      return { mode: "auto", strategy: "keep_remote", reason: "remote_only" };
-    }
-    return {
-      mode: "auto",
-      strategy: localStateExists ? "merge" : "keep_remote",
-      reason: localStateExists ? "local_state_only" : "empty"
-    };
-  }
-
   function confirmationFor(strategy) {
     switch (strategy) {
       case "replace_remote":
@@ -308,13 +275,6 @@
     };
   }
 
-  function compareAutoStartOperations(left, right) {
-    return Number(left.hlcWallMs) - Number(right.hlcWallMs)
-      || Number(left.hlcCounter) - Number(right.hlcCounter)
-      || compareStrings(left.deviceId, right.deviceId)
-      || compareStrings(left.id, right.id);
-  }
-
   function compareStrings(left, right) {
     const leftValue = String(left || "");
     const rightValue = String(right || "");
@@ -332,28 +292,6 @@
       || compareStrings(left.id, right.id);
   }
 
-  function applyAutoStartOperations(baseAutoStartBreaks, operations) {
-    const ordered = [...(operations || [])].sort(compareAutoStartOperations);
-    return ordered.length ? ordered[ordered.length - 1].enabled === true : baseAutoStartBreaks === true;
-  }
-
-  function applySelectedTaskOperations(baseSelectedTaskId, operations) {
-    const ordered = [...(operations || [])].sort(compareAutoStartOperations);
-    return ordered.length ? ordered[ordered.length - 1].taskId ?? null : baseSelectedTaskId ?? null;
-  }
-
-  function applyDurationOperations(baseDurationsMs, operations) {
-    const durationsMs = clone(baseDurationsMs || {});
-    for (const operation of [...(operations || [])].sort((left, right) =>
-      clockComponent(left.hlcWallMs) - clockComponent(right.hlcWallMs)
-      || clockComponent(left.hlcCounter) - clockComponent(right.hlcCounter)
-      || compareStrings(left.id, right.id)
-    )) {
-      durationsMs[operation.phase] = operation.durationMs;
-    }
-    return durationsMs;
-  }
-
   function buildSyncBatch(input, limit = 256) {
     return {
       commands: sendableTimerCommands(input.commands, limit),
@@ -364,96 +302,6 @@
     };
   }
 
-  function generatedBreakUpdates(commands, acknowledgements, canonical) {
-    const outcomes = new Map((acknowledgements || []).map((item) => [item.commandId, item.outcome]));
-    const commandsById = new Map((commands || []).map((item) => [item.id, item]));
-    const promoteCommands = [];
-    const dropCommandIds = [];
-    const dropTimerIds = [];
-    const sourceIds = [...new Set((commands || [])
-      .map((command) => command.dependsOnCommandId)
-      .filter((sourceId) => sourceId && outcomes.has(sourceId)))];
-    for (const sourceId of sourceIds) {
-      const source = commandsById.get(sourceId);
-      const dependents = (commands || []).filter((command) => command.dependsOnCommandId === sourceId);
-      const generatedStart = dependents.find((command) =>
-        command.type === "start" && command.generatedBreak === true
-      );
-      const exactHistoryItem = (canonical?.history || []).find((item) =>
-        item.timerId === source?.timerId
-          && item.commandId === source?.id
-          && item.phase === "focus"
-          && item.status === "completed"
-      );
-      const exactTimer = canonical?.canonicalTimer?.id === source?.timerId
-        && canonical.canonicalTimer.phase === "focus"
-        && canonical.canonicalTimer.status === "completed"
-        && canonical.canonicalTimer.lastIntent?.type === "finish"
-        && canonical.canonicalTimer.lastIntent?.commandId === source?.id;
-      const superseded = canonical?.canonicalTimer
-        && ["running", "paused"].includes(canonical.canonicalTimer.status)
-        && canonical.canonicalTimer.id !== source?.timerId
-        && canonical.canonicalTimer.id !== generatedStart?.timerId;
-      const sourceAccepted = source?.type === "finish"
-        && ["applied", "ignored"].includes(outcomes.get(sourceId))
-        && (exactHistoryItem || exactTimer)
-        && !superseded
-        && generatedStart;
-      if (!sourceAccepted) {
-        for (const command of dependents) {
-          dropCommandIds.push(command.id);
-          if (command.generatedBreak === true) dropTimerIds.push(command.timerId);
-        }
-        continue;
-      }
-      const sourceCompletedAt = exactHistoryItem?.completedAt || exactHistoryItem?.endedAt
-        || (exactTimer ? canonical.canonicalTimer.anchorAt : null)
-        || source.physicalOccurredAt || source.occurredAt;
-      const sourceDate = new Date(sourceCompletedAt);
-      const sameLocalDay = (timestamp) => {
-        const date = new Date(timestamp);
-        return Number.isFinite(date.getTime()) && Number.isFinite(sourceDate.getTime())
-          && date.getFullYear() === sourceDate.getFullYear()
-          && date.getMonth() === sourceDate.getMonth()
-          && date.getDate() === sourceDate.getDate();
-      };
-      const completedFocuses = (canonical?.history || [])
-        .filter((item) => item.phase === "focus" && item.status === "completed"
-          && sameLocalDay(item.completedAt || item.endedAt))
-        .sort((left, right) =>
-          compareStrings(left.completedAt || "", right.completedAt || "")
-            || compareStrings(left.commandId || "", right.commandId || "")
-        );
-      const sourceIndex = completedFocuses.findIndex((item) =>
-        item.commandId === source.id || item.timerId === source.timerId
-      );
-      const completedCount = sourceIndex >= 0 ? sourceIndex + 1 : completedFocuses.length + 1;
-      const generatedBreakCompleted = dependents.some((command) => command.type === "finish");
-      const phase = generatedBreakCompleted
-        ? generatedStart.phase
-        : completedCount > 0 && completedCount % 4 === 0
-          ? "long_break"
-          : "short_break";
-      const durationMs = generatedBreakCompleted
-        ? Number(generatedStart.plannedDurationMs)
-        : Number(canonical?.durationsMs?.[phase]);
-      for (const command of dependents) {
-        const promoted = clone(command);
-        delete promoted.dependsOnCommandId;
-        delete promoted.generatedBreak;
-        promoted.phase = phase;
-        if (Number.isSafeInteger(durationMs) && durationMs > 0) {
-          promoted.plannedDurationMs = durationMs;
-          promoted.observedElapsedMs = Math.min(
-            durationMs,
-            Math.max(0, Number(promoted.observedElapsedMs) || 0)
-          );
-        }
-        promoteCommands.push(promoted);
-      }
-    }
-    return { promoteCommands, dropCommandIds, dropTimerIds };
-  }
 
   function exactAcknowledgements(payload, field, sentItems, idField) {
     const acknowledgements = payload[field];
@@ -716,82 +564,7 @@
     return response;
   }
 
-  function applyTaskOperations(baseTasks, operations) {
-    const tasks = new Map((baseTasks || []).map((task) => [task.id, clone(task)]));
-    const ordered = [...(operations || [])].sort((left, right) =>
-      Number(left.hlcWallMs) - Number(right.hlcWallMs)
-      || Number(left.hlcCounter) - Number(right.hlcCounter)
-      || String(left.id).localeCompare(String(right.id))
-    );
-    for (const operation of ordered) {
-      if (operation.type === "upsert") tasks.set(operation.taskId, { id: operation.taskId, title: operation.title });
-      if (operation.type === "delete") tasks.delete(operation.taskId);
-    }
-    return [...tasks.values()].sort((left, right) =>
-      left.title.localeCompare(right.title) || left.id.localeCompare(right.id)
-    );
-  }
-
-  function rebaseSyncState(local, payload, sent) {
-    const validated = validateAcknowledgements(payload, sent);
-    const pending = (local.commands || []).filter((item) => !validated.commands.acknowledgedIds.has(item.id));
-    const pendingTaskOperations = (local.taskOperations || []).filter((item) => !validated.tasks.acknowledgedIds.has(item.id));
-    const pendingDurationOperations = (local.durationOperations || []).filter((item) => !validated.durations.acknowledgedIds.has(item.id));
-    const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !validated.autoStart.acknowledgedIds.has(item.id));
-    const pendingSelectedTaskOperations = (local.selectedTaskOperations || []).filter((item) => !validated.selectedTask.acknowledgedIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated);
-  }
-
-  function applyResolutionState(local, payload, pendingResolution) {
-    const validated = validateAcknowledgements(payload, pendingResolution.payload);
-    const discarded = pendingResolution.queueIds || {};
-    const commandIds = new Set(discarded.commands || []);
-    const taskOperationIds = new Set(discarded.taskOperations || []);
-    const durationOperationIds = new Set(discarded.durationOperations || []);
-    const autoStartOperationIds = new Set(discarded.autoStartOperations || []);
-    const selectedTaskOperationIds = new Set(discarded.selectedTaskOperations || []);
-    const pending = (local.commands || []).filter((item) => !commandIds.has(item.id));
-    const pendingTaskOperations = (local.taskOperations || []).filter((item) => !taskOperationIds.has(item.id));
-    const pendingDurationOperations = (local.durationOperations || []).filter((item) => !durationOperationIds.has(item.id));
-    const pendingAutoStartOperations = (local.autoStartOperations || []).filter((item) => !autoStartOperationIds.has(item.id));
-    const pendingSelectedTaskOperations = (local.selectedTaskOperations || []).filter((item) => !selectedTaskOperationIds.has(item.id));
-    return canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated);
-  }
-
-  function canonicalRebase(local, payload, pending, pendingTaskOperations, pendingDurationOperations, pendingAutoStartOperations, pendingSelectedTaskOperations, validated) {
-    const baseTasks = Array.isArray(payload.tasks) ? clone(payload.tasks) : clone(local.baseTasks || []);
-    const baseAutoStartBreaks = Object.prototype.hasOwnProperty.call(payload, "autoStartBreaks")
-      ? payload.autoStartBreaks
-      : local.baseAutoStartBreaks === true;
-    const baseSelectedTaskId = Object.prototype.hasOwnProperty.call(payload, "selectedTaskId")
-      ? payload.selectedTaskId
-      : local.baseSelectedTaskId ?? null;
-    return {
-      acknowledgements: validated,
-      pending,
-      pendingTaskOperations,
-      pendingDurationOperations,
-      pendingAutoStartOperations,
-      pendingSelectedTaskOperations,
-      baseTimer: Object.prototype.hasOwnProperty.call(payload, "canonicalTimer") ? clone(payload.canonicalTimer) : clone(local.baseTimer),
-      baseHistory: Array.isArray(payload.history) ? clone(payload.history) : clone(local.baseHistory || []),
-      baseTasks,
-      baseDurationsMs: Object.prototype.hasOwnProperty.call(payload, "durationsMs") ? clone(payload.durationsMs) : clone(local.baseDurationsMs),
-      baseAutoStartBreaks,
-      baseSelectedTaskId,
-      autoStartBreaks: applyAutoStartOperations(baseAutoStartBreaks, pendingAutoStartOperations),
-      selectedTaskId: applySelectedTaskOperations(baseSelectedTaskId, pendingSelectedTaskOperations),
-      tasks: applyTaskOperations(baseTasks, pendingTaskOperations),
-      revision: payload.revision ?? local.revision
-    };
-  }
-
   return Object.freeze({
-    applyResolutionState,
-    applyAutoStartOperations,
-    applySelectedTaskOperations,
-    applyDurationOperations,
-    applyTaskOperations,
     autoStartRequestOperation,
     bootstrapDialogView,
     buildResolutionPayload,
@@ -803,16 +576,14 @@
     compareTimerCommands,
     confirmationFor,
     createPendingResolution,
-    decideBootstrap,
     durationRequestOperation,
-    generatedBreakUpdates,
+
     hasLocalState,
     hasRemoteState,
     isResolutionStrategy,
     pendingMatchesUser,
     pendingResolutionCanSubmit,
     postJSONWithCsrfRetry,
-    rebaseSyncState,
     requiresBootstrapResolution,
     RESOLUTION_OPERATION_LIMIT,
     resolutionLimitViolation,

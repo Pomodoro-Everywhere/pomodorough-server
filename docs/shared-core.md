@@ -14,7 +14,7 @@ The server runs the same Rust WebAssembly reducer as the clients and browser. Go
 
 `internal/server/parseOperations` calls `task.SharedIdentities` for task title normalization and deterministic task IDs. A request's task identities are dispatched through one isolated module instance, including the 4,096-operation bootstrap boundary.
 
-The existing Go reducers remain as differential oracles. The Rust output is authoritative, but every production reduction is compared with its Go oracle before persistence; divergence fails the surrounding transaction closed rather than falling back to and committing native output.
+The existing Go reducers remain test-only compatibility oracles. Production treats Rust output as authoritative and validates its schema, bounds, ordering, and references before persistence. Deliberate SharedCore policy divergence from a legacy Go reducer is accepted; malformed or referentially inconsistent output fails the surrounding transaction closed. The server never falls back to and commits native reducer output.
 
 ## Runtime boundary
 

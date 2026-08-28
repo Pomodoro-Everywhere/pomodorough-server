@@ -29,7 +29,7 @@
       for (const name of [
         "memory",
         "pomodorough_alloc",
-        "pomodorough_free",
+        "pomodorough_free_v2",
         "pomodorough_dispatch"
       ]) {
         if (!exports[name]) throw new Error(`Shared core is missing export ${name}`);
@@ -58,6 +58,35 @@
       return SharedCore.fromBytes(await response.arrayBuffer());
     }
 
+    taskIdentity(input) {
+      return this.call("task.identity.v1", input);
+    }
+
+    projectSynchronizedState(input) {
+      return this.call("projection.apply.v2", input);
+    }
+
+    planBootstrap(input) {
+      return this.call("bootstrap.plan.v1", input);
+    }
+
+    reconcileSynchronizedState(input) {
+      return this.call("reconcile.rebase.v1", input);
+    }
+
+    planTimerCompletion(input) {
+      const value = this.call("timer.completionPlan.v1", input);
+      this.#validateCompletionPlan(value);
+      return value;
+    }
+
+    tickHlc(input) {
+      const value = this.call("hlc.tick.v1", input);
+      this.#validateHlcTick(value);
+      return value;
+    }
+
+    // size-exception: one WASM buffer lifetime keeps dispatch cleanup atomic across every failure path.
     call(operation, input) {
       if (this.unusableCause) {
         throw new Error("Shared core instance is unusable after cleanup failure", {
@@ -161,6 +190,33 @@
       }
     }
 
+    #validateCompletionPlan(value) {
+      const keys = [
+        "commandEligible", "expired", "generatedBreakEligible", "generatedBreakPhase",
+        "queueAutoBreak", "reserveGeneratedBreak", "selectedPhase", "sourceAlreadyAccepted"
+      ];
+      const phase = (candidate) => candidate === null
+        || ["focus", "short_break", "long_break"].includes(candidate);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+          || Object.keys(value).sort().join(",") !== keys.sort().join(",")
+          || !["expired", "commandEligible", "reserveGeneratedBreak", "queueAutoBreak",
+            "generatedBreakEligible", "sourceAlreadyAccepted"].every(
+            (name) => typeof value[name] === "boolean"
+          )
+          || !phase(value.selectedPhase) || !phase(value.generatedBreakPhase)) {
+        throw new Error("Shared core returned an invalid completion plan");
+      }
+    }
+
+    #validateHlcTick(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+          || Object.keys(value).sort().join(",") !== "counter,wallMs"
+          || !Number.isSafeInteger(value.wallMs) || value.wallMs < 0
+          || !Number.isSafeInteger(value.counter) || value.counter < 0) {
+        throw new Error("Shared core returned an invalid HLC tick");
+      }
+    }
+
     #allocateAndWrite(bytes) {
       const pointer = this.instance.exports.pomodorough_alloc(bytes.length);
       if (!pointer) throw new Error("Shared core allocation failed");
@@ -170,7 +226,7 @@
         return pointer;
       } catch (primary) {
         try {
-          this.instance.exports.pomodorough_free(pointer, bytes.length);
+          this.#release(pointer, bytes.length);
         } catch (cleanup) {
           this.unusableCause = cleanup;
           primary.cleanupErrors = [cleanup];
@@ -184,12 +240,19 @@
       for (const [pointer, length] of buffers) {
         if (!pointer || !length) continue;
         try {
-          this.instance.exports.pomodorough_free(pointer, length);
+          this.#release(pointer, length);
         } catch (error) {
           failures.push(error);
         }
       }
       return failures;
+    }
+
+    #release(pointer, length) {
+      const status = this.instance.exports.pomodorough_free_v2(pointer, length);
+      if (status !== 1) {
+        throw new Error(`Shared core rejected free with status ${status}`);
+      }
     }
 
     #checkMemory() {

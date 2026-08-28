@@ -17,6 +17,8 @@ import (
 	"pomodorough/internal/store"
 )
 
+var gracefulShutdownTimeout = 15 * time.Second
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := config.Load()
@@ -36,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer dataDirLock.Close()
-	userStore, err := store.New(cfg.DataDir)
+	userStore, err := store.NewWithDeletionLedger(cfg.DataDir, cfg.DeletionLedgerDir)
 	if err != nil {
 		logger.Error("initialize storage", "error", err)
 		os.Exit(1)
@@ -46,11 +48,16 @@ func main() {
 		logger.Error("initialize server", "error", err)
 		os.Exit(1)
 	}
+	if err := runServer(cfg, application, logger); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
 
+func runServer(cfg config.Config, application *server.Server, logger *slog.Logger) error {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		logger.Error("listen", "address", cfg.ListenAddr, "error", err)
-		os.Exit(1)
+		return errors.New("listen on " + cfg.ListenAddr + ": " + err.Error())
 	}
 	httpServer := &http.Server{
 		Handler:           application.Handler(),
@@ -60,13 +67,19 @@ func main() {
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-
 	serveErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "address", cfg.ListenAddr, "public_url", cfg.PublicURL)
 		serveErrors <- httpServer.Serve(listener)
 	}()
+	if err := awaitShutdown(httpServer, serveErrors, logger); err != nil {
+		return err
+	}
+	logger.Info("server stopped")
+	return nil
+}
 
+func awaitShutdown(httpServer *http.Server, serveErrors <-chan error, logger *slog.Logger) error {
 	signals, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	select {
@@ -74,18 +87,15 @@ func main() {
 		logger.Info("shutdown requested")
 	case err := <-serveErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server stopped", "error", err)
-			os.Exit(1)
+			return err
 		}
-		return
+		return nil
 	}
-
-	shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownContext, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
 		_ = httpServer.Close()
-		os.Exit(1)
+		return errors.New("graceful shutdown: " + err.Error())
 	}
-	logger.Info("server stopped")
+	return nil
 }

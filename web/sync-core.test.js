@@ -2,7 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const sync = require("./sync-core.js");
+const productionSync = require("./sync-core.js");
+const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
+const sync = Object.freeze({ ...productionSync, ...legacyDecisionCompat });
 
 const defaults = { focus: 1_500_000, short_break: 300_000, long_break: 900_000 };
 
@@ -1042,123 +1044,10 @@ test("generated break waits for applied finish while later independent start rem
   });
   assert.deepEqual(resolution.payload.commands.map((item) => item.id), [finish.id]);
   assert.deepEqual(resolution.queueIds.commands, [finish.id]);
-
-  const applied = sync.generatedBreakUpdates(commands, [
-    { commandId: finish.id, outcome: "applied", reason: "" }
-  ], {
-    history: [{
-      timerId: finish.timerId,
-      commandId: finish.id,
-      phase: "focus",
-      status: "completed",
-      completedAt: "2026-07-22T12:25:00Z"
-    }],
-    durationsMs: defaults,
-    canonicalTimer: null
-  });
-  assert.deepEqual(applied.promoteCommands.map((item) => item.id), [generated.id]);
-  assert.equal(Object.hasOwn(applied.promoteCommands[0], "dependsOnCommandId"), false);
-  assert.deepEqual(applied.dropCommandIds, []);
-
-  const ignored = sync.generatedBreakUpdates(commands, [
-    { commandId: finish.id, outcome: "ignored", reason: "superseded" }
-  ], { canonicalTimer: { id: "remote-newer", status: "running" } });
-  assert.deepEqual(ignored, {
-    promoteCommands: [],
-    dropCommandIds: [generated.id],
-    dropTimerIds: [generated.timerId]
-  });
-  assert.equal(ignored.dropCommandIds.includes(independent.id), false);
-
-  const supersededAfterApply = sync.generatedBreakUpdates(commands, [
-    { commandId: finish.id, outcome: "applied", reason: "" }
-  ], { canonicalTimer: { id: "remote-newer", status: "running" } });
-  assert.deepEqual(supersededAfterApply.dropCommandIds, [generated.id]);
+  assert.equal(Object.hasOwn(sync, "generatedBreakUpdates"), false);
 });
 
-test("generated break resolves every dependent command across outcome evidence and phase matrix", () => {
-  const chains = [
-    ["start"],
-    ["start", "pause"],
-    ["start", "pause", "resume"],
-    ["start", "finish"],
-    ["start", "cancel"],
-    ["start", "finish", "clear"]
-  ];
-  for (const outcome of ["applied", "ignored", "rejected"]) {
-    for (const exactCompletion of [false, true]) {
-      for (const phaseCorrection of [false, true]) {
-        for (const types of chains) {
-          const suffix = `${outcome}-${exactCompletion}-${phaseCorrection}-${types.join("-")}`;
-          const source = {
-            ...command(`source-${suffix}`, 1),
-            type: "finish",
-            timerId: `focus-${suffix}`,
-            phase: "focus"
-          };
-          const dependents = types.map((type, index) => ({
-            ...command(`dependent-${index}-${suffix}`, index + 2),
-            type,
-            timerId: `break-${suffix}`,
-            phase: "short_break",
-            plannedDurationMs: defaults.short_break,
-            observedElapsedMs: index * 1_000,
-            dependsOnCommandId: source.id,
-            ...(index === 0 ? { generatedBreak: true } : {})
-          }));
-          const prior = phaseCorrection
-            ? [1, 2, 3].map((index) => ({
-                ...history(`prior-${index}-${suffix}`),
-                commandId: `prior-command-${index}-${suffix}`,
-                completedAt: `2026-07-22T12:2${index}:00Z`
-              }))
-            : [];
-          if (phaseCorrection) {
-            prior.unshift({
-              ...history(`yesterday-${suffix}`),
-              commandId: `yesterday-command-${suffix}`,
-              completedAt: "2026-07-21T12:00:00Z"
-            });
-          }
-          const evidence = {
-            ...history(`completion-${suffix}`),
-            timerId: exactCompletion ? source.timerId : `other-${suffix}`,
-            commandId: exactCompletion ? source.id : `other-command-${suffix}`,
-            completedAt: "2026-07-22T12:25:00Z"
-          };
-          const result = sync.generatedBreakUpdates(
-            [source, ...dependents],
-            [{ commandId: source.id, outcome, reason: "" }],
-            {
-              canonicalTimer: null,
-              history: [...prior, evidence],
-              durationsMs: defaults
-            }
-          );
-          const releases = exactCompletion && outcome !== "rejected";
-          assert.deepEqual(
-            result.promoteCommands.map((item) => item.id),
-            releases ? dependents.map((item) => item.id) : [],
-            suffix
-          );
-          assert.deepEqual(
-            result.dropCommandIds,
-            releases ? [] : dependents.map((item) => item.id),
-            suffix
-          );
-          if (releases) {
-            const expectedPhase = phaseCorrection && !types.includes("finish")
-              ? "long_break"
-              : "short_break";
-            assert.ok(result.promoteCommands.every((item) =>
-              item.phase === expectedPhase
-                && item.plannedDurationMs === defaults[expectedPhase]
-                && !Object.hasOwn(item, "dependsOnCommandId")
-                && !Object.hasOwn(item, "generatedBreak")
-            ), suffix);
-          }
-        }
-      }
-    }
-  }
+test("shipping sync core contains no generated-break reconciliation policy", () => {
+  const source = require("node:fs").readFileSync(require.resolve("./sync-core.js"), "utf8");
+  assert.doesNotMatch(source, /generatedBreakUpdates|promoteGeneratedBreaks|completedFocusCount/);
 });

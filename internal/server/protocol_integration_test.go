@@ -1,13 +1,13 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -71,26 +71,60 @@ func (s *protocolNativeStore) pendingCount() int {
 }
 
 type protocolRevisionStream struct {
+	context   context.Context
 	cancel    context.CancelFunc
 	body      io.ReadCloser
 	revisions chan int64
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+type protocolConnectionTracker struct {
+	mu      sync.Mutex
+	states  map[net.Conn]http.ConnState
+	changed chan struct{}
+}
+
+type protocolFixtureSeed struct {
+	credentials integrationuser.Credentials
+	database    []byte
+}
+
+var cachedProtocolFixtureSeed struct {
+	seed protocolFixtureSeed
+	err  error
+	once sync.Once
 }
 
 type protocolFixture struct {
 	application *Server
 	server      *httptest.Server
+	context     context.Context
+	cancel      context.CancelFunc
+	transport   *http.Transport
+	connections *protocolConnectionTracker
 	userStore   *store.Store
 	userID      string
 	clients     []*protocolClient
 	mu          sync.Mutex
+	closeOnce   sync.Once
 	identifier  int64
 	logicalTime time.Time
 	sequences   map[string]int64
 }
 
 func newProtocolFixture(t *testing.T) *protocolFixture {
+	return newProtocolFixtureWithStreams(t, false)
+}
+
+func newStreamingProtocolFixture(t *testing.T) *protocolFixture {
+	return newProtocolFixtureWithStreams(t, true)
+}
+
+func newProtocolFixtureWithStreams(t *testing.T, openStreams bool) *protocolFixture {
 	t.Helper()
-	dataDir := t.TempDir()
+	testContext, cancel := serverTestContext(t)
+	t.Cleanup(cancel)
 	secret := []byte(strings.Repeat("protocol-integration-secret-", 2))
 	devices := []integrationuser.Device{
 		{Name: "pwa", DeviceID: "device-pwa", Platform: "web"},
@@ -98,14 +132,14 @@ func newProtocolFixture(t *testing.T) *protocolFixture {
 		{Name: "linux", DeviceID: "device-linux", Platform: "linux"},
 		{Name: "android", DeviceID: "device-android", Platform: "android"},
 	}
-	credentials, err := integrationuser.Provision(context.Background(), integrationuser.Request{
-		DataDir: dataDir, AppSecret: secret, Subject: "protocol-integration-subject", Devices: devices, TTL: time.Hour,
-	})
+	seed := loadProtocolFixtureSeed(t, testContext, secret, devices)
+	dataDir := t.TempDir()
+	userStore, err := store.New(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	userStore, err := store.New(dataDir)
-	if err != nil {
+	userPath := filepath.Join(dataDir, "users", seed.credentials.UserID+".sqlite")
+	if err := os.WriteFile(userPath, seed.database, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	webRoot := t.TempDir()
@@ -121,29 +155,110 @@ func newProtocolFixture(t *testing.T) *protocolFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testServer := httptest.NewServer(application.Handler())
+	connections := &protocolConnectionTracker{states: make(map[net.Conn]http.ConnState), changed: make(chan struct{}, 1)}
+	testServer := httptest.NewUnstartedServer(application.Handler())
+	testServer.Config.ConnState = connections.track
+	testServer.Start()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	httpClient := &http.Client{Transport: transport}
 	fixture := &protocolFixture{
-		application: application, server: testServer, userStore: userStore, userID: credentials.UserID,
+		application: application, server: testServer, context: testContext, cancel: cancel, transport: transport, connections: connections,
+		userStore: userStore, userID: seed.credentials.UserID,
 		logicalTime: time.Now().UTC().Add(-time.Minute), sequences: make(map[string]int64),
 	}
-	for _, credential := range credentials.Clients {
+	t.Cleanup(func() { fixture.close(t) })
+	for _, credential := range seed.credentials.Clients {
 		fixture.clients = append(fixture.clients, &protocolClient{
 			name: credential.Name, deviceID: credential.DeviceID, accessToken: credential.AccessToken,
-			httpClient: &http.Client{Timeout: 5 * time.Second},
+			httpClient: httpClient,
 		})
 	}
-	for _, client := range fixture.clients {
-		client.stream = fixture.openRevisionStream(t, client)
-	}
-	t.Cleanup(func() {
+	if openStreams {
 		for _, client := range fixture.clients {
+			client.stream = fixture.openRevisionStream(t, client)
+		}
+	}
+	return fixture
+}
+
+func loadProtocolFixtureSeed(t *testing.T, ctx context.Context, secret []byte, devices []integrationuser.Device) protocolFixtureSeed {
+	t.Helper()
+	cachedProtocolFixtureSeed.once.Do(func() {
+		dataDir := t.TempDir()
+		credentials, err := integrationuser.Provision(ctx, integrationuser.Request{
+			DataDir: dataDir, AppSecret: secret, Subject: "protocol-integration-subject", Devices: devices, TTL: time.Hour,
+		})
+		if err != nil {
+			cachedProtocolFixtureSeed.err = err
+			return
+		}
+		cachedProtocolFixtureSeed.seed.credentials = credentials
+		userPath := filepath.Join(dataDir, "users", credentials.UserID+".sqlite")
+		cachedProtocolFixtureSeed.seed.database, cachedProtocolFixtureSeed.err = os.ReadFile(userPath)
+	})
+	if cachedProtocolFixtureSeed.err != nil {
+		t.Fatal(cachedProtocolFixtureSeed.err)
+	}
+	return cachedProtocolFixtureSeed.seed
+}
+
+func (f *protocolFixture) close(t *testing.T) {
+	t.Helper()
+	f.closeOnce.Do(func() {
+		f.cancel()
+		for _, client := range f.clients {
 			if client.stream != nil {
 				client.stream.close()
 			}
 		}
-		testServer.Close()
+		f.transport.CloseIdleConnections()
+		f.connections.assertClosed(t)
+		f.server.Close()
 	})
-	return fixture
+}
+
+func (c *protocolConnectionTracker) track(connection net.Conn, state http.ConnState) {
+	c.mu.Lock()
+	if state == http.StateClosed || state == http.StateHijacked {
+		delete(c.states, connection)
+	} else {
+		c.states[connection] = state
+	}
+	c.mu.Unlock()
+	select {
+	case c.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (c *protocolConnectionTracker) assertClosed(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		count, counts := c.snapshot()
+		if count == 0 {
+			return
+		}
+		select {
+		case <-c.changed:
+			continue
+		case <-ctx.Done():
+			t.Errorf("httptest.Server leaked %d connections (new=%d active=%d idle=%d)",
+				count, counts[http.StateNew], counts[http.StateActive], counts[http.StateIdle])
+			return
+		}
+	}
+}
+
+func (c *protocolConnectionTracker) snapshot() (int, map[http.ConnState]int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counts := map[http.ConnState]int{}
+	for _, state := range c.states {
+		counts[state]++
+	}
+	return len(c.states), counts
 }
 
 func (f *protocolFixture) nextID(prefix string) string {
@@ -157,6 +272,9 @@ func (f *protocolFixture) nextTime() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logicalTime = f.logicalTime.Add(time.Millisecond)
+	if now := time.Now().UTC(); f.logicalTime.Before(now) {
+		f.logicalTime = now
+	}
 	return f.logicalTime
 }
 
@@ -184,7 +302,7 @@ func (f *protocolFixture) doJSON(client *protocolClient, path string, payload an
 	if err != nil {
 		return 0, nil, err
 	}
-	request, err := http.NewRequest(http.MethodPost, f.server.URL+path, bytes.NewReader(encoded))
+	request, err := http.NewRequestWithContext(f.context, http.MethodPost, f.server.URL+path, bytes.NewReader(encoded))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -228,14 +346,14 @@ func (f *protocolFixture) pull(t *testing.T, client *protocolClient) store.SyncR
 
 func (f *protocolFixture) openRevisionStream(t *testing.T, client *protocolClient) *protocolRevisionStream {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(f.context)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, f.server.URL+"/api/v1/stream", nil)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+client.accessToken)
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.httpClient.Do(request)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -246,30 +364,18 @@ func (f *protocolFixture) openRevisionStream(t *testing.T, client *protocolClien
 		cancel()
 		t.Fatalf("open SSE status=%d body=%s", response.StatusCode, body)
 	}
-	stream := &protocolRevisionStream{cancel: cancel, body: response.Body, revisions: make(chan int64, 64)}
+	stream := &protocolRevisionStream{
+		context: ctx, cancel: cancel, body: response.Body, revisions: make(chan int64, 64), done: make(chan struct{}),
+	}
 	go func() {
-		defer close(stream.revisions)
-		scanner := bufio.NewScanner(response.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			var event struct {
-				Revision int64 `json:"revision"`
-			}
-			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event) == nil {
-				stream.revisions <- event.Revision
-			}
-		}
+		defer close(stream.done)
+		scanProtocolRevisions(ctx, response.Body, stream.revisions)
 	}()
 	return stream
 }
 
 func (s *protocolRevisionStream) waitAtLeast(t *testing.T, revision int64) {
 	t.Helper()
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
 	for {
 		select {
 		case observed, ok := <-s.revisions:
@@ -279,15 +385,18 @@ func (s *protocolRevisionStream) waitAtLeast(t *testing.T, revision int64) {
 			if observed >= revision {
 				return
 			}
-		case <-timer.C:
-			t.Fatalf("timed out waiting for SSE revision %d", revision)
+		case <-s.context.Done():
+			t.Fatalf("waiting for SSE revision %d: %v", revision, s.context.Err())
 		}
 	}
 }
 
 func (s *protocolRevisionStream) close() {
-	s.cancel()
-	_ = s.body.Close()
+	s.closeOnce.Do(func() {
+		s.cancel()
+		_ = s.body.Close()
+		<-s.done
+	})
 }
 
 func comparableProtocolState(result store.SyncResult) string {
@@ -437,7 +546,9 @@ func (f *protocolFixture) converge(t *testing.T, revision int64) []store.SyncRes
 	t.Helper()
 	results := make([]store.SyncResult, len(f.clients))
 	for _, client := range f.clients {
-		client.stream.waitAtLeast(t, revision)
+		if client.stream != nil {
+			client.stream.waitAtLeast(t, revision)
+		}
 	}
 	for index, client := range f.clients {
 		results[index] = f.pull(t, client)
@@ -461,6 +572,7 @@ type protocolTransition struct {
 }
 
 func TestLogicalProtocolClientsConvergeAcrossTimerTransitionTable(t *testing.T) {
+	clientNames := []string{"pwa", "ios", "linux", "android"}
 	transitions := []protocolTransition{
 		{name: "none-to-running", from: "none", action: "start", wantStatus: "running"},
 		{name: "running-to-paused", from: "running", action: "pause", wantStatus: "paused"},
@@ -473,62 +585,103 @@ func TestLogicalProtocolClientsConvergeAcrossTimerTransitionTable(t *testing.T) 
 		{name: "terminal-to-cleared", from: "terminal", action: "clear", wantHistory: "completed", wantNil: true},
 		{name: "terminal-to-new-running", from: "terminal", action: "new", wantStatus: "running", wantHistory: "completed"},
 	}
-	for clientIndex, name := range []string{"pwa", "ios", "linux", "android"} {
-		for _, transition := range transitions {
-			clientIndex, transition := clientIndex, transition
-			t.Run(name+"-"+transition.name, func(t *testing.T) {
-				fixture := newProtocolFixture(t)
-				initiator := fixture.clients[clientIndex]
-				timerID := fixture.nextID("timer")
-				revision := int64(0)
-				if transition.from != "none" {
-					payload := fixture.syncPayload(initiator)
-					payload.Commands = []syncCommandJSON{fixture.command(initiator, timerID, "start", "focus", 1_500_000, 0, "", fixture.nextTime())}
-					revision = fixture.sync(t, initiator, payload).Revision
-					fixture.converge(t, revision)
-				}
-				if transition.from == "paused" {
-					payload := fixture.syncPayload(initiator)
-					payload.Commands = []syncCommandJSON{fixture.command(initiator, timerID, "pause", "focus", 1_500_000, 30_000, "", fixture.nextTime())}
-					revision = fixture.sync(t, initiator, payload).Revision
-					fixture.converge(t, revision)
-				}
-				if transition.from == "terminal" {
-					payload := fixture.syncPayload(initiator)
-					payload.Commands = []syncCommandJSON{fixture.command(initiator, timerID, "finish", "focus", 1_500_000, 1_500_000, "", fixture.nextTime())}
-					revision = fixture.sync(t, initiator, payload).Revision
-					fixture.converge(t, revision)
-				}
+	fixture := newProtocolFixture(t)
+	historyCount := 0
+	lastRevision := int64(0)
+	for transitionIndex, transition := range transitions {
+		clientIndex := transitionIndex % len(clientNames)
+		t.Run(clientNames[clientIndex]+"-"+transition.name, func(t *testing.T) {
+			initiator := fixture.clients[clientIndex]
+			timerID := fixture.nextID("timer")
+			payload := fixture.syncPayload(initiator)
+			if transition.from != "none" {
+				payload.Commands = append(payload.Commands,
+					fixture.command(initiator, timerID, "start", "focus", 1_500_000, 0, "", fixture.nextTime()))
+			}
+			if transition.from == "paused" {
+				payload.Commands = append(payload.Commands,
+					fixture.command(initiator, timerID, "pause", "focus", 1_500_000, 30_000, "", fixture.nextTime()))
+			}
+			if transition.from == "terminal" {
+				payload.Commands = append(payload.Commands,
+					fixture.command(initiator, timerID, "finish", "focus", 1_500_000, 1_500_000, "", fixture.nextTime()))
+			}
 
-				payload := fixture.syncPayload(initiator)
-				actionTimerID := timerID
-				action := transition.action
-				if transition.action == "start" || transition.action == "new" || transition.action == "supersede" {
-					action = "start"
-				}
-				if transition.action == "new" || transition.action == "supersede" {
-					actionTimerID = fixture.nextID("timer")
-				}
-				payload.Commands = []syncCommandJSON{fixture.command(initiator, actionTimerID, action, "focus", 1_500_000, 45_000, "", fixture.nextTime())}
-				revision = fixture.sync(t, initiator, payload).Revision
-				results := fixture.converge(t, revision)
-				state := results[0]
-				if transition.wantNil {
-					if state.CanonicalTimer != nil {
-						t.Fatalf("canonical timer = %#v, want nil", state.CanonicalTimer)
-					}
-				} else if state.CanonicalTimer == nil || state.CanonicalTimer.Status != transition.wantStatus || state.CanonicalTimer.ID != actionTimerID {
-					t.Fatalf("canonical timer = %#v, want %s/%s", state.CanonicalTimer, actionTimerID, transition.wantStatus)
-				}
-				if transition.wantHistory == "" && len(state.History) != 0 {
-					t.Fatalf("unexpected history = %#v", state.History)
-				}
-				if transition.wantHistory != "" && (len(state.History) != 1 || state.History[0].Status != transition.wantHistory) {
-					t.Fatalf("history = %#v, want one %s", state.History, transition.wantHistory)
-				}
-			})
+			actionTimerID := timerID
+			action := transition.action
+			if transition.action == "start" || transition.action == "new" || transition.action == "supersede" {
+				action = "start"
+			}
+			if transition.action == "new" || transition.action == "supersede" {
+				actionTimerID = fixture.nextID("timer")
+			}
+			payload.Commands = append(payload.Commands,
+				fixture.command(initiator, actionTimerID, action, "focus", 1_500_000, 45_000, "", fixture.nextTime()))
+			state := fixture.sync(t, initiator, payload)
+			fixture.convergePeer(t, state, fixture.clients[(clientIndex+1)%len(fixture.clients)])
+			assertProtocolTransitionState(t, state, transition, actionTimerID, timerID, historyCount)
+			historyCount, lastRevision = fixture.clearCanonicalTimer(t, initiator, state)
+		})
+	}
+	fixture.converge(t, lastRevision)
+}
+
+func (f *protocolFixture) convergePeer(t *testing.T, want store.SyncResult, peer *protocolClient) {
+	t.Helper()
+	if peer.stream != nil {
+		peer.stream.waitAtLeast(t, want.Revision)
+	}
+	got := f.pull(t, peer)
+	if comparableProtocolState(got) != comparableProtocolState(want) {
+		t.Fatalf("logical client %s diverged:\nwant %s\ngot  %s", peer.name, comparableProtocolState(want), comparableProtocolState(got))
+	}
+}
+
+func assertProtocolTransitionState(t *testing.T, state store.SyncResult, transition protocolTransition, actionTimerID, historyTimerID string, historyStart int) {
+	t.Helper()
+	if transition.wantNil {
+		if state.CanonicalTimer != nil {
+			t.Fatalf("canonical timer = %#v, want nil", state.CanonicalTimer)
+		}
+	} else if state.CanonicalTimer == nil || state.CanonicalTimer.Status != transition.wantStatus || state.CanonicalTimer.ID != actionTimerID {
+		t.Fatalf("canonical timer = %#v, want %s/%s", state.CanonicalTimer, actionTimerID, transition.wantStatus)
+	}
+	wantHistoryCount := historyStart
+	if transition.wantHistory != "" {
+		wantHistoryCount++
+	}
+	if len(state.History) != wantHistoryCount {
+		t.Fatalf("history count = %d, want %d: %#v", len(state.History), wantHistoryCount, state.History)
+	}
+	if transition.wantHistory == "" {
+		return
+	}
+	for _, item := range state.History {
+		if item.TimerID == historyTimerID && item.Status == transition.wantHistory {
+			return
 		}
 	}
+	t.Fatalf("history = %#v, want %s/%s", state.History, historyTimerID, transition.wantHistory)
+}
+
+func (f *protocolFixture) clearCanonicalTimer(t *testing.T, client *protocolClient, state store.SyncResult) (int, int64) {
+	t.Helper()
+	if state.CanonicalTimer == nil {
+		return len(state.History), state.Revision
+	}
+	timerID := state.CanonicalTimer.ID
+	payload := f.syncPayload(client)
+	if state.CanonicalTimer.Status == "running" || state.CanonicalTimer.Status == "paused" {
+		payload.Commands = append(payload.Commands,
+			f.command(client, timerID, "cancel", "focus", 1_500_000, 45_000, "", f.nextTime()))
+	}
+	payload.Commands = append(payload.Commands,
+		f.command(client, timerID, "clear", "focus", 1_500_000, 45_000, "", f.nextTime()))
+	state = f.sync(t, client, payload)
+	if state.CanonicalTimer != nil {
+		t.Fatalf("cleanup canonical timer = %#v, want nil", state.CanonicalTimer)
+	}
+	return len(state.History), state.Revision
 }
 
 func TestLogicalProtocolClientsConvergeTasksDurationsAndAutoStart(t *testing.T) {
@@ -921,7 +1074,7 @@ func TestLogicalProtocolConcurrentStartsAndFinishCancelConvergeDeterministically
 }
 
 func TestLogicalProtocolSSECoalescingOfflineReconnectAndDuplicateHints(t *testing.T) {
-	fixture := newProtocolFixture(t)
+	fixture := newStreamingProtocolFixture(t)
 	mutator, offline := fixture.clients[0], fixture.clients[3]
 	offline.stream.close()
 	offline.stream = nil

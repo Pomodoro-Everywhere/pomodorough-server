@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"pomodorough/internal/task"
@@ -154,11 +153,25 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 	}
 	unlock := s.LockUser(userID)
 	defer unlock()
+	return s.syncLocked(ctx, db, request, now)
+}
+
+func (s *Store) SyncForGeneration(ctx context.Context, userID string, generation int64, request SyncRequest, now time.Time) (SyncResult, error) {
+	if err := validateUniqueOperationIDs(request); err != nil {
+		return SyncResult{}, err
+	}
+	return withAccountGeneration(s, ctx, userID, generation, func(db *sql.DB) (SyncResult, error) {
+		return s.syncLocked(ctx, db, request, now)
+	})
+}
+
+func (s *Store) syncLocked(ctx context.Context, db *sql.DB, request SyncRequest, now time.Time) (SyncResult, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("begin sync: %w", err)
 	}
 	defer tx.Rollback()
+
 	if _, err := tx.ExecContext(ctx, `INSERT INTO devices(id, platform, created_at_ms, last_seen_at_ms, revoked_at_ms)
 		VALUES (?, 'web', ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms`, request.DeviceID, now.UnixMilli(), now.UnixMilli()); err != nil {
@@ -191,17 +204,27 @@ func (s *Store) Sync(ctx context.Context, db *sql.DB, userID string, request Syn
 	if err != nil {
 		return SyncResult{}, err
 	}
-	addAcknowledgements(&result, request, applied, reduction)
-	result.Changed = applied.changed || projectionChanged
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit sync: %w", err)
 	}
+	addAcknowledgements(&result, request, applied, reduction)
+	result.Changed = applied.changed || projectionChanged
 	return result, nil
 }
 
 func (s *Store) materializeProjection(ctx context.Context, db *sql.DB, userID string, now time.Time) (SyncResult, error) {
 	unlock := s.LockUser(userID)
 	defer unlock()
+	return s.materializeProjectionLocked(ctx, db, now)
+}
+
+func (s *Store) materializeProjectionForGeneration(ctx context.Context, userID string, generation int64, now time.Time) (SyncResult, error) {
+	return withAccountGeneration(s, ctx, userID, generation, func(db *sql.DB) (SyncResult, error) {
+		return s.materializeProjectionLocked(ctx, db, now)
+	})
+}
+
+func (s *Store) materializeProjectionLocked(ctx context.Context, db *sql.DB, now time.Time) (SyncResult, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("begin projection materialization: %w", err)
@@ -229,10 +252,10 @@ func (s *Store) materializeProjection(ctx context.Context, db *sql.DB, userID st
 	if err != nil {
 		return SyncResult{}, err
 	}
-	result.Changed = changed
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit projection materialization: %w", err)
 	}
+	result.Changed = changed
 	return result, nil
 }
 
@@ -310,42 +333,65 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 		autoStartRejections:    make(map[string]AutoStartAcknowledgement),
 		selectedTaskRejections: make(map[string]SelectedTaskAcknowledgement),
 	}
-	for _, command := range request.Commands {
+	if err := applyTimerOperations(ctx, tx, request.DeviceID, request.Commands, &application); err != nil {
+		return operationApplication{}, err
+	}
+	if err := applyTaskOperations(ctx, tx, request.DeviceID, request.TaskOperations, &application); err != nil {
+		return operationApplication{}, err
+	}
+	if err := applyDurationOperations(ctx, tx, request.DeviceID, request.DurationOperations, &application); err != nil {
+		return operationApplication{}, err
+	}
+	if err := applyAutoStartOperations(ctx, tx, request.DeviceID, request.AutoStartOperations, &application); err != nil {
+		return operationApplication{}, err
+	}
+	if err := applySelectedTaskOperations(ctx, tx, request.DeviceID, request.SelectedTaskOperations, &application); err != nil {
+		return operationApplication{}, err
+	}
+	return application, nil
+}
+
+func applyTimerOperations(ctx context.Context, tx *sql.Tx, deviceID string, commands []timer.Command, application *operationApplication) error {
+	for _, command := range commands {
 		existing, err := loadCommand(ctx, tx, command.ID)
 		if err == nil {
-			if !sameCommand(existing, command, request.DeviceID) {
+			if !sameCommand(existing, command, deviceID) {
 				application.commandRejections[command.ID] = timer.Outcome{Outcome: "rejected", Reason: "command ID already used with different payload"}
 			}
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check command id: %w", err)
+			return fmt.Errorf("check command id: %w", err)
 		}
 		var existingID string
-		err = tx.QueryRowContext(ctx, `SELECT id FROM timer_commands WHERE device_id = ? AND device_sequence = ?`, request.DeviceID, command.DeviceSequence).Scan(&existingID)
+		err = tx.QueryRowContext(ctx, `SELECT id FROM timer_commands WHERE device_id = ? AND device_sequence = ?`, deviceID, command.DeviceSequence).Scan(&existingID)
 		if err == nil {
 			application.commandRejections[command.ID] = timer.Outcome{Outcome: "rejected", Reason: "device sequence already used"}
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check device sequence: %w", err)
+			return fmt.Errorf("check device sequence: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO timer_commands(
 			id, device_id, device_sequence, timer_id, task_id, command_type, phase, planned_duration_ms,
 			occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter, observed_elapsed_ms
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			command.ID, request.DeviceID, command.DeviceSequence, command.TimerID, nullString(command.TaskID), command.Type, command.Phase,
+			command.ID, deviceID, command.DeviceSequence, command.TimerID, nullString(command.TaskID), command.Type, command.Phase,
 			command.PlannedDurationMs, command.OccurredAt.UTC().Format(time.RFC3339Nano), command.OccurredAt.UnixMilli(),
 			command.HLCWallMs, command.HLCCounter, command.ObservedElapsedMs,
 		); err != nil {
-			return operationApplication{}, fmt.Errorf("insert timer command: %w", err)
+			return fmt.Errorf("insert timer command: %w", err)
 		}
 		application.changed = true
 	}
-	for _, operation := range request.TaskOperations {
+	return nil
+}
+
+func applyTaskOperations(ctx context.Context, tx *sql.Tx, deviceID string, operations []task.Operation, application *operationApplication) error {
+	for _, operation := range operations {
 		existing, err := loadTaskOperation(ctx, tx, operation.ID)
 		if err == nil {
-			if !sameTaskOperation(existing, operation, request.DeviceID) {
+			if !sameTaskOperation(existing, operation, deviceID) {
 				application.taskRejections[operation.ID] = TaskAcknowledgement{
 					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
 				}
@@ -353,20 +399,24 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check task operation id: %w", err)
+			return fmt.Errorf("check task operation id: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_operations(
 			id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.TaskID, operation.Type,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, deviceID, operation.TaskID, operation.Type,
 			operation.Title, operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
-			return operationApplication{}, fmt.Errorf("insert task operation: %w", err)
+			return fmt.Errorf("insert task operation: %w", err)
 		}
 		application.changed = true
 	}
-	for _, operation := range request.DurationOperations {
+	return nil
+}
+
+func applyDurationOperations(ctx context.Context, tx *sql.Tx, deviceID string, operations []DurationOperation, application *operationApplication) error {
+	for _, operation := range operations {
 		existing, err := loadDurationOperation(ctx, tx, operation.ID)
 		if err == nil {
-			if !sameDurationOperation(existing, operation, request.DeviceID) {
+			if !sameDurationOperation(existing, operation, deviceID) {
 				application.durationRejections[operation.ID] = DurationAcknowledgement{
 					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
 				}
@@ -374,20 +424,24 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check duration operation id: %w", err)
+			return fmt.Errorf("check duration operation id: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO duration_operations(
 			id, device_id, phase, duration_ms, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.Phase, operation.DurationMs,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, deviceID, operation.Phase, operation.DurationMs,
 			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
-			return operationApplication{}, fmt.Errorf("insert duration operation: %w", err)
+			return fmt.Errorf("insert duration operation: %w", err)
 		}
 		application.changed = true
 	}
-	for _, operation := range request.AutoStartOperations {
+	return nil
+}
+
+func applyAutoStartOperations(ctx context.Context, tx *sql.Tx, deviceID string, operations []AutoStartOperation, application *operationApplication) error {
+	for _, operation := range operations {
 		existing, err := loadAutoStartOperation(ctx, tx, operation.ID)
 		if err == nil {
-			if !sameAutoStartOperation(existing, operation, request.DeviceID) {
+			if !sameAutoStartOperation(existing, operation, deviceID) {
 				application.autoStartRejections[operation.ID] = AutoStartAcknowledgement{
 					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
 				}
@@ -395,20 +449,24 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check auto-start operation id: %w", err)
+			return fmt.Errorf("check auto-start operation id: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO auto_start_operations(
 			id, device_id, enabled, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, operation.Enabled,
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, deviceID, operation.Enabled,
 			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
-			return operationApplication{}, fmt.Errorf("insert auto-start operation: %w", err)
+			return fmt.Errorf("insert auto-start operation: %w", err)
 		}
 		application.changed = true
 	}
-	for _, operation := range request.SelectedTaskOperations {
+	return nil
+}
+
+func applySelectedTaskOperations(ctx context.Context, tx *sql.Tx, deviceID string, operations []SelectedTaskOperation, application *operationApplication) error {
+	for _, operation := range operations {
 		existing, err := loadSelectedTaskOperation(ctx, tx, operation.ID)
 		if err == nil {
-			if !sameSelectedTaskOperation(existing, operation, request.DeviceID) {
+			if !sameSelectedTaskOperation(existing, operation, deviceID) {
 				application.selectedTaskRejections[operation.ID] = SelectedTaskAcknowledgement{
 					OperationID: operation.ID, Outcome: "rejected", Reason: "operation ID already used with different payload",
 				}
@@ -416,17 +474,17 @@ func applyOperations(ctx context.Context, tx *sql.Tx, request SyncRequest) (oper
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return operationApplication{}, fmt.Errorf("check selected-task operation id: %w", err)
+			return fmt.Errorf("check selected-task operation id: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO selected_task_operations(
 			id, device_id, task_id, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, request.DeviceID, nullableString(operation.TaskID),
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, operation.ID, deviceID, nullableString(operation.TaskID),
 			operation.OccurredAt.UTC().Format(time.RFC3339Nano), operation.OccurredAt.UnixMilli(), operation.HLCWallMs, operation.HLCCounter); err != nil {
-			return operationApplication{}, fmt.Errorf("insert selected-task operation: %w", err)
+			return fmt.Errorf("insert selected-task operation: %w", err)
 		}
 		application.changed = true
 	}
-	return application, nil
+	return nil
 }
 
 func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (accountReduction, error) {
@@ -437,48 +495,87 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 	if err := validateCanonicalRevision(reduction.revision); err != nil {
 		return accountReduction{}, err
 	}
+	if err := reduceTimerProjection(ctx, source, now, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	if err := reduceTaskProjection(ctx, source, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	if err := reduceDurationProjection(ctx, source, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	if err := reduceAutoStartProjection(ctx, source, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	if err := reduceSelectedTaskProjection(ctx, source, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	return reduction, nil
+}
+
+func reduceTimerProjection(ctx context.Context, source databaseQueryer, now time.Time, reduction *accountReduction) error {
 	var err error
 	reduction.commands, err = loadCommands(ctx, source)
 	if err != nil {
-		return accountReduction{}, err
+		return err
 	}
 	reduction.timer, err = reduceTimerWithSharedCore(ctx, reduction.commands, now)
 	if err != nil {
-		return accountReduction{}, fmt.Errorf("reduce timer with shared core: %w", err)
+		return fmt.Errorf("reduce timer with shared core: %w", err)
 	}
+	return nil
+}
+
+func reduceTaskProjection(ctx context.Context, source databaseQueryer, reduction *accountReduction) error {
+	var err error
 	reduction.taskOperations, err = loadTaskOperations(ctx, source)
 	if err != nil {
-		return accountReduction{}, err
+		return err
 	}
 	reduction.tasks, reduction.winningTaskOperations, err = reduceTasksWithSharedCore(ctx, reduction.taskOperations)
 	if err != nil {
-		return accountReduction{}, fmt.Errorf("reduce tasks with shared core: %w", err)
+		return fmt.Errorf("reduce tasks with shared core: %w", err)
 	}
+	return nil
+}
+
+func reduceDurationProjection(ctx context.Context, source databaseQueryer, reduction *accountReduction) error {
+	var err error
 	reduction.durationOperations, err = loadDurationOperations(ctx, source)
 	if err != nil {
-		return accountReduction{}, err
+		return err
 	}
 	reduction.durations, reduction.winningDurationOperations, err = reduceDurationsWithSharedCore(ctx, reduction.durationOperations)
 	if err != nil {
-		return accountReduction{}, fmt.Errorf("reduce durations with shared core: %w", err)
+		return fmt.Errorf("reduce durations with shared core: %w", err)
 	}
+	return nil
+}
+
+func reduceAutoStartProjection(ctx context.Context, source databaseQueryer, reduction *accountReduction) error {
+	var err error
 	reduction.autoStartOperations, err = loadAutoStartOperations(ctx, source)
 	if err != nil {
-		return accountReduction{}, err
+		return err
 	}
 	reduction.autoStartBreaks, reduction.winningAutoStartOperation, err = reduceAutoStartWithSharedCore(ctx, reduction.autoStartOperations)
 	if err != nil {
-		return accountReduction{}, fmt.Errorf("reduce auto-start with shared core: %w", err)
+		return fmt.Errorf("reduce auto-start with shared core: %w", err)
 	}
+	return nil
+}
+
+func reduceSelectedTaskProjection(ctx context.Context, source databaseQueryer, reduction *accountReduction) error {
+	var err error
 	reduction.selectedTaskOperations, err = loadSelectedTaskOperations(ctx, source)
 	if err != nil {
-		return accountReduction{}, err
+		return err
 	}
 	reduction.selectedTaskID, reduction.winningSelectedTaskOperation, err = reduceSelectedTaskWithSharedCore(ctx, reduction.selectedTaskOperations, reduction.tasks)
 	if err != nil {
-		return accountReduction{}, fmt.Errorf("reduce selected task with shared core: %w", err)
+		return fmt.Errorf("reduce selected task with shared core: %w", err)
 	}
-	return reduction, nil
+	return nil
 }
 
 func persistReduction(ctx context.Context, tx *sql.Tx, reduction accountReduction, revision int64) error {
@@ -517,26 +614,41 @@ func persistReduction(ctx context.Context, tx *sql.Tx, reduction accountReductio
 }
 
 func timerProjectionChanged(ctx context.Context, source databaseQueryer, result timer.Result) (bool, error) {
-	var persistedCurrentID sql.NullString
-	if err := source.QueryRowContext(ctx, `SELECT current_timer_id FROM account_state WHERE singleton = 1`).Scan(&persistedCurrentID); err != nil {
-		return false, fmt.Errorf("read current timer projection: %w", err)
+	persistedCurrentID, err := loadCurrentTimerProjectionID(ctx, source)
+	if err != nil {
+		return false, err
 	}
 	currentID := ""
 	if result.Canonical != nil {
 		currentID = result.Canonical.ID
 	}
-	if persistedCurrentID.String != currentID {
+	if persistedCurrentID != currentID {
 		return true, nil
 	}
+	persistedSessions, err := loadTimerSessionProjection(ctx, source, len(result.Sessions))
+	if err != nil {
+		return false, err
+	}
+	return !sameTimerSessionProjection(persistedSessions, result.Sessions), nil
+}
 
+func loadCurrentTimerProjectionID(ctx context.Context, source databaseQueryer) (string, error) {
+	var currentID sql.NullString
+	if err := source.QueryRowContext(ctx, `SELECT current_timer_id FROM account_state WHERE singleton = 1`).Scan(&currentID); err != nil {
+		return "", fmt.Errorf("read current timer projection: %w", err)
+	}
+	return currentID.String, nil
+}
+
+func loadTimerSessionProjection(ctx context.Context, source databaseQueryer, capacity int) ([]timer.Session, error) {
 	rows, err := source.QueryContext(ctx, `SELECT timer_id, task_id, phase, status, planned_duration_ms, elapsed_at_anchor_ms,
 		anchor_at_ms, started_at_ms, ended_at_ms, last_command_id, terminal_command_id, superseded_by_timer_id
 	FROM timer_sessions ORDER BY timer_id`)
 	if err != nil {
-		return false, fmt.Errorf("read timer projection: %w", err)
+		return nil, fmt.Errorf("read timer projection: %w", err)
 	}
 	defer rows.Close()
-	persisted := make([]timer.Session, 0, len(result.Sessions))
+	persisted := make([]timer.Session, 0, capacity)
 	for rows.Next() {
 		var session timer.Session
 		var taskID, terminalCommandID, supersededByTimerID sql.NullString
@@ -545,7 +657,7 @@ func timerProjectionChanged(ctx context.Context, source databaseQueryer, result 
 		if err := rows.Scan(&session.TimerID, &taskID, &session.Phase, &session.Status, &session.PlannedDurationMs,
 			&session.ElapsedAtAnchorMs, &anchorAtMs, &startedAtMs, &endedAtMs, &session.LastCommandID,
 			&terminalCommandID, &supersededByTimerID); err != nil {
-			return false, fmt.Errorf("scan timer projection: %w", err)
+			return nil, fmt.Errorf("scan timer projection: %w", err)
 		}
 		session.TaskID = taskID.String
 		session.AnchorAt = time.UnixMilli(anchorAtMs).UTC()
@@ -558,12 +670,16 @@ func timerProjectionChanged(ctx context.Context, source databaseQueryer, result 
 		persisted = append(persisted, session)
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterate timer projection: %w", err)
+		return nil, fmt.Errorf("iterate timer projection: %w", err)
 	}
-	if len(persisted) != len(result.Sessions) {
-		return true, nil
+	return persisted, nil
+}
+
+func sameTimerSessionProjection(persisted, reduced []timer.Session) bool {
+	if len(persisted) != len(reduced) {
+		return false
 	}
-	for index, session := range result.Sessions {
+	for index, session := range reduced {
 		stored := persisted[index]
 		if stored.TimerID != session.TimerID || stored.TaskID != session.TaskID || stored.Phase != session.Phase ||
 			stored.Status != session.Status || stored.PlannedDurationMs != session.PlannedDurationMs ||
@@ -571,10 +687,10 @@ func timerProjectionChanged(ctx context.Context, source databaseQueryer, result 
 			!sameProjectedTime(stored.StartedAt, session.StartedAt) || !sameProjectedTime(stored.EndedAt, session.EndedAt) ||
 			stored.LastCommandID != session.LastCommandID || stored.TerminalCommandID != session.TerminalCommandID ||
 			stored.SupersededByTimerID != session.SupersededByTimerID {
-			return true, nil
+			return false
 		}
 	}
-	return false, nil
+	return true
 }
 
 func sameProjectedTime(left, right time.Time) bool {
@@ -654,18 +770,30 @@ func resultFromReductionWithCore(ctx context.Context, call coreJSONCall, reducti
 }
 
 func addAcknowledgements(result *SyncResult, request SyncRequest, application operationApplication, reduction accountReduction) {
-	result.Acknowledgements = make([]Acknowledgement, 0, len(request.Commands))
-	for _, command := range request.Commands {
+	result.Acknowledgements = timerAcknowledgements(request.Commands, application, reduction)
+	result.TaskAcknowledgements = taskAcknowledgements(request.TaskOperations, application, reduction)
+	result.DurationAcknowledgements = durationAcknowledgements(request.DurationOperations, application, reduction)
+	result.AutoStartAcknowledgements = autoStartAcknowledgements(request.AutoStartOperations, application, reduction)
+	result.SelectedTaskAcknowledgements = selectedTaskAcknowledgements(request.SelectedTaskOperations, application, reduction)
+}
+
+func timerAcknowledgements(commands []timer.Command, application operationApplication, reduction accountReduction) []Acknowledgement {
+	acknowledgements := make([]Acknowledgement, 0, len(commands))
+	for _, command := range commands {
 		outcome, rejected := application.commandRejections[command.ID]
 		if !rejected {
 			outcome = reduction.timer.Outcomes[command.ID]
 		}
-		result.Acknowledgements = append(result.Acknowledgements, Acknowledgement{CommandID: command.ID, Outcome: outcome.Outcome, Reason: outcome.Reason})
+		acknowledgements = append(acknowledgements, Acknowledgement{CommandID: command.ID, Outcome: outcome.Outcome, Reason: outcome.Reason})
 	}
-	result.TaskAcknowledgements = make([]TaskAcknowledgement, 0, len(request.TaskOperations))
-	for _, operation := range request.TaskOperations {
+	return acknowledgements
+}
+
+func taskAcknowledgements(operations []task.Operation, application operationApplication, reduction accountReduction) []TaskAcknowledgement {
+	acknowledgements := make([]TaskAcknowledgement, 0, len(operations))
+	for _, operation := range operations {
 		if acknowledgement, rejected := application.taskRejections[operation.ID]; rejected {
-			result.TaskAcknowledgements = append(result.TaskAcknowledgements, acknowledgement)
+			acknowledgements = append(acknowledgements, acknowledgement)
 			continue
 		}
 		acknowledgement := TaskAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer task operation"}
@@ -673,12 +801,16 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Outcome = "applied"
 			acknowledgement.Reason = ""
 		}
-		result.TaskAcknowledgements = append(result.TaskAcknowledgements, acknowledgement)
+		acknowledgements = append(acknowledgements, acknowledgement)
 	}
-	result.DurationAcknowledgements = make([]DurationAcknowledgement, 0, len(request.DurationOperations))
-	for _, operation := range request.DurationOperations {
+	return acknowledgements
+}
+
+func durationAcknowledgements(operations []DurationOperation, application operationApplication, reduction accountReduction) []DurationAcknowledgement {
+	acknowledgements := make([]DurationAcknowledgement, 0, len(operations))
+	for _, operation := range operations {
 		if acknowledgement, rejected := application.durationRejections[operation.ID]; rejected {
-			result.DurationAcknowledgements = append(result.DurationAcknowledgements, acknowledgement)
+			acknowledgements = append(acknowledgements, acknowledgement)
 			continue
 		}
 		acknowledgement := DurationAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer duration operation"}
@@ -686,12 +818,16 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Outcome = "applied"
 			acknowledgement.Reason = ""
 		}
-		result.DurationAcknowledgements = append(result.DurationAcknowledgements, acknowledgement)
+		acknowledgements = append(acknowledgements, acknowledgement)
 	}
-	result.AutoStartAcknowledgements = make([]AutoStartAcknowledgement, 0, len(request.AutoStartOperations))
-	for _, operation := range request.AutoStartOperations {
+	return acknowledgements
+}
+
+func autoStartAcknowledgements(operations []AutoStartOperation, application operationApplication, reduction accountReduction) []AutoStartAcknowledgement {
+	acknowledgements := make([]AutoStartAcknowledgement, 0, len(operations))
+	for _, operation := range operations {
 		if acknowledgement, rejected := application.autoStartRejections[operation.ID]; rejected {
-			result.AutoStartAcknowledgements = append(result.AutoStartAcknowledgements, acknowledgement)
+			acknowledgements = append(acknowledgements, acknowledgement)
 			continue
 		}
 		acknowledgement := AutoStartAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer auto-start operation"}
@@ -699,12 +835,16 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Outcome = "applied"
 			acknowledgement.Reason = ""
 		}
-		result.AutoStartAcknowledgements = append(result.AutoStartAcknowledgements, acknowledgement)
+		acknowledgements = append(acknowledgements, acknowledgement)
 	}
-	result.SelectedTaskAcknowledgements = make([]SelectedTaskAcknowledgement, 0, len(request.SelectedTaskOperations))
-	for _, operation := range request.SelectedTaskOperations {
+	return acknowledgements
+}
+
+func selectedTaskAcknowledgements(operations []SelectedTaskOperation, application operationApplication, reduction accountReduction) []SelectedTaskAcknowledgement {
+	acknowledgements := make([]SelectedTaskAcknowledgement, 0, len(operations))
+	for _, operation := range operations {
 		if acknowledgement, rejected := application.selectedTaskRejections[operation.ID]; rejected {
-			result.SelectedTaskAcknowledgements = append(result.SelectedTaskAcknowledgements, acknowledgement)
+			acknowledgements = append(acknowledgements, acknowledgement)
 			continue
 		}
 		acknowledgement := SelectedTaskAcknowledgement{OperationID: operation.ID, Outcome: "ignored", Reason: "superseded by newer selected-task operation"}
@@ -712,8 +852,9 @@ func addAcknowledgements(result *SyncResult, request SyncRequest, application op
 			acknowledgement.Outcome = "applied"
 			acknowledgement.Reason = ""
 		}
-		result.SelectedTaskAcknowledgements = append(result.SelectedTaskAcknowledgements, acknowledgement)
+		acknowledgements = append(acknowledgements, acknowledgement)
 	}
+	return acknowledgements
 }
 
 func loadCommand(ctx context.Context, source databaseQueryer, id string) (timer.Command, error) {
@@ -838,6 +979,14 @@ func (s *Store) History(ctx context.Context, db *sql.DB, userID string, now time
 	return result.History, result.Revision, result.Changed, nil
 }
 
+func (s *Store) HistoryForGeneration(ctx context.Context, userID string, generation int64, now time.Time) ([]timer.HistoryItem, int64, bool, error) {
+	result, err := s.materializeProjectionForGeneration(ctx, userID, generation, now)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return result.History, result.Revision, result.Changed, nil
+}
+
 type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
@@ -905,28 +1054,6 @@ func loadTaskOperations(ctx context.Context, source queryer) ([]task.Operation, 
 	return operations, nil
 }
 
-func reduceTasks(operations []task.Operation) ([]task.Task, map[string]string) {
-	winners := make(map[string]task.Operation)
-	for _, operation := range operations {
-		winners[operation.TaskID] = operation
-	}
-	tasks := make([]task.Task, 0, len(winners))
-	winningIDs := make(map[string]string, len(winners))
-	for taskID, operation := range winners {
-		winningIDs[taskID] = operation.ID
-		if operation.Type == "upsert" {
-			tasks = append(tasks, task.Task{ID: taskID, Title: operation.Title})
-		}
-	}
-	sort.Slice(tasks, func(i, j int) bool {
-		if tasks[i].Title != tasks[j].Title {
-			return tasks[i].Title < tasks[j].Title
-		}
-		return tasks[i].ID < tasks[j].ID
-	})
-	return tasks, winningIDs
-}
-
 func loadDurationOperations(ctx context.Context, source queryer) ([]DurationOperation, error) {
 	rows, err := source.QueryContext(ctx, `SELECT id, device_id, phase, duration_ms, occurred_at, hlc_wall_ms, hlc_counter
 		FROM duration_operations ORDER BY phase, hlc_wall_ms, hlc_counter, device_id, id`)
@@ -952,27 +1079,6 @@ func loadDurationOperations(ctx context.Context, source queryer) ([]DurationOper
 		return nil, fmt.Errorf("iterate duration operations: %w", err)
 	}
 	return operations, nil
-}
-
-func reduceDurations(operations []DurationOperation) (DurationsMs, map[string]struct{}) {
-	durations := DurationsMs{Focus: 1_500_000, ShortBreak: 300_000, LongBreak: 900_000}
-	winnersByPhase := make(map[string]string, 3)
-	for _, operation := range operations {
-		winnersByPhase[operation.Phase] = operation.ID
-		switch operation.Phase {
-		case "focus":
-			durations.Focus = operation.DurationMs
-		case "short_break":
-			durations.ShortBreak = operation.DurationMs
-		case "long_break":
-			durations.LongBreak = operation.DurationMs
-		}
-	}
-	winners := make(map[string]struct{}, len(winnersByPhase))
-	for _, operationID := range winnersByPhase {
-		winners[operationID] = struct{}{}
-	}
-	return durations, winners
 }
 
 func loadAutoStartOperations(ctx context.Context, source queryer) ([]AutoStartOperation, error) {
@@ -1001,14 +1107,6 @@ func loadAutoStartOperations(ctx context.Context, source queryer) ([]AutoStartOp
 	return operations, nil
 }
 
-func reduceAutoStart(operations []AutoStartOperation) (bool, string) {
-	if len(operations) == 0 {
-		return false, ""
-	}
-	winner := operations[len(operations)-1]
-	return winner.Enabled, winner.ID
-}
-
 func loadSelectedTaskOperations(ctx context.Context, source queryer) ([]SelectedTaskOperation, error) {
 	rows, err := source.QueryContext(ctx, `SELECT id, device_id, task_id, occurred_at, hlc_wall_ms, hlc_counter
 		FROM selected_task_operations ORDER BY hlc_wall_ms, hlc_counter, device_id, id`)
@@ -1035,23 +1133,6 @@ func loadSelectedTaskOperations(ctx context.Context, source queryer) ([]Selected
 		return nil, fmt.Errorf("iterate selected-task operations: %w", err)
 	}
 	return operations, nil
-}
-
-func reduceSelectedTask(operations []SelectedTaskOperation, tasks []task.Task) (*string, string) {
-	if len(operations) == 0 {
-		return nil, ""
-	}
-	winner := operations[len(operations)-1]
-	if winner.TaskID == nil {
-		return nil, winner.ID
-	}
-	for _, current := range tasks {
-		if current.ID == *winner.TaskID {
-			selectedTaskID := *winner.TaskID
-			return &selectedTaskID, winner.ID
-		}
-	}
-	return nil, winner.ID
 }
 
 func nullString(value string) any {

@@ -87,8 +87,9 @@ func validateCompiledModule(compiled wazero.CompiledModule) error {
 			parameters: []api.ValueType{api.ValueTypeI32},
 			results:    []api.ValueType{api.ValueTypeI32},
 		},
-		"pomodorough_free": {
+		"pomodorough_free_v2": {
 			parameters: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32},
+			results:    []api.ValueType{api.ValueTypeI32},
 		},
 		"pomodorough_dispatch": {
 			parameters: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
@@ -201,7 +202,7 @@ type ownedBuffer struct {
 
 func callModule(ctx context.Context, module api.Module, operation string, input []byte) ([]byte, error) {
 	alloc := module.ExportedFunction("pomodorough_alloc")
-	free := module.ExportedFunction("pomodorough_free")
+	free := module.ExportedFunction("pomodorough_free_v2")
 	dispatch := module.ExportedFunction("pomodorough_dispatch")
 	memory := module.Memory()
 	if alloc == nil || free == nil || dispatch == nil || memory == nil {
@@ -225,17 +226,7 @@ func callModule(ctx context.Context, module api.Module, operation string, input 
 func callABI(ctx context.Context, abi abiCalls, operation string, input []byte) (result []byte, err error) {
 	owned := make([]ownedBuffer, 0, 3)
 	defer func() {
-		var cleanupErr error
-		for index := len(owned) - 1; index >= 0; index-- {
-			buffer := owned[index]
-			if buffer.pointer == 0 || buffer.length == 0 {
-				continue
-			}
-			if _, freeErr := abi.free(context.Background(), uint64(buffer.pointer), uint64(buffer.length)); freeErr != nil {
-				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("free shared-core buffer %d/%d: %w", buffer.pointer, buffer.length, freeErr))
-			}
-		}
-		if cleanupErr != nil {
+		if cleanupErr := freeOwnedBuffers(abi, owned); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 			result = nil
 		}
@@ -263,18 +254,46 @@ func callABI(ctx context.Context, abi abiCalls, operation string, input []byte) 
 	if len(values) != 1 {
 		return nil, fmt.Errorf("shared core returned %d values, want 1", len(values))
 	}
-	resultPointer := uint32(values[0])
-	resultLength := uint32(values[0] >> 32)
-	if resultPointer != 0 && resultLength != 0 {
-		owned = append(owned, ownedBuffer{resultPointer, resultLength})
+	resultBuffer := ownedBuffer{pointer: uint32(values[0]), length: uint32(values[0] >> 32)}
+	if resultBuffer.pointer != 0 && resultBuffer.length != 0 {
+		owned = append(owned, resultBuffer)
 	}
-	if resultPointer == 0 || resultLength == 0 {
+	return copyABIResult(abi, resultBuffer)
+}
+
+func freeOwnedBuffers(abi abiCalls, owned []ownedBuffer) error {
+	var cleanupErr error
+	for index := len(owned) - 1; index >= 0; index-- {
+		buffer := owned[index]
+		if buffer.pointer == 0 || buffer.length == 0 {
+			continue
+		}
+		if err := freeBuffer(abi, buffer); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("free shared-core buffer %d/%d: %w", buffer.pointer, buffer.length, err))
+		}
+	}
+	return cleanupErr
+}
+
+func freeBuffer(abi abiCalls, buffer ownedBuffer) error {
+	values, err := abi.free(context.Background(), uint64(buffer.pointer), uint64(buffer.length))
+	if err != nil {
+		return err
+	}
+	if len(values) != 1 || values[0] != 1 {
+		return fmt.Errorf("shared core rejected free with status %v", values)
+	}
+	return nil
+}
+
+func copyABIResult(abi abiCalls, buffer ownedBuffer) ([]byte, error) {
+	if buffer.pointer == 0 || buffer.length == 0 {
 		return nil, errors.New("shared core returned an empty result buffer")
 	}
-	if resultLength > maxOutputBytes {
+	if buffer.length > maxOutputBytes {
 		return nil, errors.New("shared core output is too large")
 	}
-	view, ok := abi.read(resultPointer, resultLength)
+	view, ok := abi.read(buffer.pointer, buffer.length)
 	if !ok {
 		return nil, errors.New("shared core result is outside linear memory")
 	}
@@ -294,7 +313,7 @@ func allocateAndWrite(ctx context.Context, abi abiCalls, value []byte) (pointer 
 		return 0, errors.New("shared core allocator returned a null pointer")
 	}
 	if len(value) > 0 && !abi.write(pointer, value) {
-		_, cleanupErr := abi.free(context.Background(), uint64(pointer), uint64(len(value)))
+		cleanupErr := freeBuffer(abi, ownedBuffer{pointer: pointer, length: uint32(len(value))})
 		writeErr := errors.New("shared core input is outside linear memory")
 		if cleanupErr != nil {
 			return 0, errors.Join(writeErr, fmt.Errorf("free failed allocation %d/%d: %w", pointer, len(value), cleanupErr))

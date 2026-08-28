@@ -40,12 +40,13 @@ type Server struct {
 }
 
 type principal struct {
-	UserID    string
-	Profile   store.Profile
-	SessionID string
-	DeviceID  string
-	Method    string
-	CSRFHash  []byte
+	UserID     string
+	Profile    store.Profile
+	SessionID  string
+	DeviceID   string
+	Method     string
+	CSRFHash   []byte
+	Generation int64
 }
 
 type authenticatedHandler func(http.ResponseWriter, *http.Request, principal)
@@ -220,12 +221,13 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 		return principal{}, store.ErrUnauthorized
 	}
 	return principal{
-		UserID:    userID,
-		Profile:   info.Profile,
-		SessionID: info.SessionID,
-		DeviceID:  info.DeviceID,
-		Method:    method,
-		CSRFHash:  info.CSRFHash,
+		UserID:     userID,
+		Profile:    info.Profile,
+		SessionID:  info.SessionID,
+		DeviceID:   info.DeviceID,
+		Method:     method,
+		CSRFHash:   info.CSRFHash,
+		Generation: info.Generation,
 	}, nil
 }
 
@@ -344,5 +346,6 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 }
 
 func isUnauthorized(err error) bool {
-	return errors.Is(err, store.ErrUnauthorized) || errors.Is(err, store.ErrNotFound) || errors.Is(err, authn.ErrInvalidToken)
+	return errors.Is(err, store.ErrUnauthorized) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrAccountDeleted) ||
+		errors.Is(err, store.ErrAccountGenerationChanged) || errors.Is(err, authn.ErrInvalidToken)
 }

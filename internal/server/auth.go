@@ -39,26 +39,77 @@ type googleClaims struct {
 	AuthorizedParty string `json:"azp"`
 }
 
+type oauthStateResult struct {
+	state     authn.OAuthState
+	sealed    string
+	expiresAt time.Time
+}
+
+type webSessionResult struct {
+	sessionToken string
+	csrfToken    string
+	expiresAt    time.Time
+}
+
+type nativeSessionResult struct {
+	accessToken   string
+	refreshToken  string
+	accessExpiry  time.Time
+	refreshExpiry time.Time
+}
+
+type authOperationFailure struct {
+	operation string
+	err       error
+}
+
+type googleAuthenticationFailure struct {
+	status     int
+	logMessage string
+	err        error
+}
+
 func (s *Server) handleGoogleStart(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.WebAuthEnabled() {
 		http.Error(w, "Google authentication unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	returnTo := safeReturnPath(r.URL.Query().Get("return"))
+	result, failure := s.createOAuthState(safeReturnPath(r.URL.Query().Get("return")))
+	if failure != nil {
+		s.internalError(w, failure.operation, failure.err)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authn.OAuthStateCookie,
+		Value:    result.sealed,
+		Path:     "/auth/google",
+		Expires:  result.expiresAt,
+		MaxAge:   int(authn.OAuthStateLifetime.Seconds()),
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	authorizationURL := s.oauthConfig.AuthCodeURL(
+		result.state.State,
+		oauth2.S256ChallengeOption(result.state.CodeVerifier),
+		oauth2.SetAuthURLParam("nonce", result.state.Nonce),
+		oauth2.SetAuthURLParam("prompt", "select_account"),
+	)
+	http.Redirect(w, r, authorizationURL, http.StatusFound)
+}
+
+func (s *Server) createOAuthState(returnTo string) (oauthStateResult, *authOperationFailure) {
 	stateValue, err := authn.RandomString(32)
 	if err != nil {
-		s.internalError(w, "generate OAuth state", err)
-		return
+		return oauthStateResult{}, &authOperationFailure{"generate OAuth state", err}
 	}
 	nonce, err := authn.RandomString(32)
 	if err != nil {
-		s.internalError(w, "generate OAuth nonce", err)
-		return
+		return oauthStateResult{}, &authOperationFailure{"generate OAuth nonce", err}
 	}
 	verifier, err := authn.RandomString(32)
 	if err != nil {
-		s.internalError(w, "generate PKCE verifier", err)
-		return
+		return oauthStateResult{}, &authOperationFailure{"generate PKCE verifier", err}
 	}
 	expiresAt := time.Now().Add(authn.OAuthStateLifetime)
 	state := authn.OAuthState{
@@ -70,26 +121,9 @@ func (s *Server) handleGoogleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	sealed, err := s.codec.Seal("oauth-state", state)
 	if err != nil {
-		s.internalError(w, "seal OAuth state", err)
-		return
+		return oauthStateResult{}, &authOperationFailure{"seal OAuth state", err}
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     authn.OAuthStateCookie,
-		Value:    sealed,
-		Path:     "/auth/google",
-		Expires:  expiresAt,
-		MaxAge:   int(authn.OAuthStateLifetime.Seconds()),
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	authorizationURL := s.oauthConfig.AuthCodeURL(
-		stateValue,
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("nonce", nonce),
-		oauth2.SetAuthURLParam("prompt", "select_account"),
-	)
-	http.Redirect(w, r, authorizationURL, http.StatusFound)
+	return oauthStateResult{state: state, sealed: sealed, expiresAt: expiresAt}, nil
 }
 
 func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
@@ -104,70 +138,91 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, err := s.codec.OpenOAuthState(cookie.Value, time.Now())
-	if err != nil || !authn.EqualString(state.State, r.URL.Query().Get("state")) || r.URL.Query().Get("code") == "" {
+	code := r.URL.Query().Get("code")
+	if err != nil || !authn.EqualString(state.State, r.URL.Query().Get("state")) || code == "" {
 		http.Error(w, "Invalid authentication state", http.StatusBadRequest)
 		return
 	}
 	googleContext, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	oauthToken, err := s.oauthConfig.Exchange(googleContext, r.URL.Query().Get("code"), oauth2.VerifierOption(state.CodeVerifier))
-	if err != nil {
-		s.logger.Warn("Google OAuth exchange failed", "error", err)
-		http.Error(w, "Authentication failed", http.StatusBadGateway)
+	identity, googleFailure := s.exchangeAndVerifyGoogle(googleContext, code, state)
+	if googleFailure != nil {
+		if googleFailure.logMessage != "" {
+			s.logger.Warn(googleFailure.logMessage, "error", googleFailure.err)
+		}
+		http.Error(w, "Authentication failed", googleFailure.status)
 		return
+	}
+	session, failure := s.persistWebAccount(r.Context(), identity)
+	if failure != nil {
+		s.internalError(w, failure.operation, failure.err)
+		return
+	}
+	setSessionCookie(w, session.sessionToken, session.expiresAt)
+	setCSRFCookie(w, session.csrfToken, session.expiresAt)
+	http.Redirect(w, r, state.ReturnTo, http.StatusSeeOther)
+}
+
+func (s *Server) exchangeAndVerifyGoogle(ctx context.Context, code string, state authn.OAuthState) (googleIdentity, *googleAuthenticationFailure) {
+	oauthToken, err := s.oauthConfig.Exchange(ctx, code, oauth2.VerifierOption(state.CodeVerifier))
+	if err != nil {
+		return googleIdentity{}, &googleAuthenticationFailure{
+			status: http.StatusBadGateway, logMessage: "Google OAuth exchange failed", err: err,
+		}
 	}
 	rawIDToken, ok := oauthToken.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		http.Error(w, "Authentication failed", http.StatusBadGateway)
-		return
+		return googleIdentity{}, &googleAuthenticationFailure{status: http.StatusBadGateway}
 	}
-	identity, err := s.verifyGoogleIDToken(googleContext, rawIDToken, s.webVerifier, state.Nonce, map[string]struct{}{s.cfg.GoogleWebClientID: {}})
+	identity, err := s.verifyGoogleIDToken(
+		ctx,
+		rawIDToken,
+		s.webVerifier,
+		state.Nonce,
+		map[string]struct{}{s.cfg.GoogleWebClientID: {}},
+	)
 	if err != nil {
-		s.logger.Warn("Google ID token verification failed", "error", err)
-		http.Error(w, "Authentication failed", http.StatusUnauthorized)
-		return
+		return googleIdentity{}, &googleAuthenticationFailure{
+			status: http.StatusUnauthorized, logMessage: "Google ID token verification failed", err: err,
+		}
 	}
+	return identity, nil
+}
+
+func (s *Server) persistWebAccount(ctx context.Context, identity googleIdentity) (webSessionResult, *authOperationFailure) {
 	userID := authn.UserID(s.cfg.AppSecret, identity.Issuer, identity.Subject)
 	unlock := s.store.LockUser(userID)
 	defer unlock()
-	db, err := s.store.OpenUser(r.Context(), userID)
+	db, err := s.store.OpenUser(ctx, userID)
 	if err != nil {
-		s.internalError(w, "open user account", err)
-		return
+		return webSessionResult{}, &authOperationFailure{"open user account", err}
 	}
 	defer db.Close()
 	profile := store.Profile{ID: userID, Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, Name: identity.Name, AvatarURL: identity.AvatarURL}
-	if err := store.UpsertProfile(r.Context(), db, profile, time.Now()); err != nil {
-		s.internalError(w, "update user profile", err)
-		return
+	if err := store.UpsertProfile(ctx, db, profile, time.Now()); err != nil {
+		return webSessionResult{}, &authOperationFailure{"update user profile", err}
 	}
 	sessionToken, sessionHash, err := authn.NewOpaqueToken(userID)
 	if err != nil {
-		s.internalError(w, "generate web session", err)
-		return
+		return webSessionResult{}, &authOperationFailure{"generate web session", err}
 	}
 	csrfToken, err := authn.RandomString(32)
 	if err != nil {
-		s.internalError(w, "generate CSRF token", err)
-		return
+		return webSessionResult{}, &authOperationFailure{"generate CSRF token", err}
 	}
 	sessionID, err := authn.RandomString(32)
 	if err != nil {
-		s.internalError(w, "generate session id", err)
-		return
+		return webSessionResult{}, &authOperationFailure{"generate session id", err}
 	}
 	now := time.Now()
 	expiresAt := now.Add(webSessionLifetime)
 	csrfHash := authn.HashString(csrfToken)
-	if err := store.CreateSession(r.Context(), db, store.Session{
+	if err := store.CreateSession(ctx, db, store.Session{
 		ID: sessionID, Kind: "web", Platform: "web", CSRFHash: csrfHash[:], CreatedAt: now, ExpiresAt: expiresAt,
 	}, []store.TokenRecord{{Hash: sessionHash, Kind: "web", CreatedAt: now, ExpiresAt: expiresAt}}); err != nil {
-		s.internalError(w, "create web session", err)
-		return
+		return webSessionResult{}, &authOperationFailure{"create web session", err}
 	}
-	setSessionCookie(w, sessionToken, expiresAt)
-	setCSRFCookie(w, csrfToken, expiresAt)
-	http.Redirect(w, r, state.ReturnTo, http.StatusSeeOther)
+	return webSessionResult{sessionToken: sessionToken, csrfToken: csrfToken, expiresAt: expiresAt}, nil
 }
 
 func (s *Server) handleNativeChallenge(w http.ResponseWriter, _ *http.Request) {
@@ -222,30 +277,38 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid Google token")
 		return
 	}
+	session, failure := s.persistNativeAccount(r.Context(), identity, request.DeviceID, request.Platform)
+	if failure != nil {
+		s.internalAPIError(w, failure.operation, failure.err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nativeTokenResponse(session.accessToken, session.refreshToken, session.accessExpiry, session.refreshExpiry))
+}
+
+func (s *Server) persistNativeAccount(ctx context.Context, identity googleIdentity, deviceID, platform string) (nativeSessionResult, *authOperationFailure) {
 	userID := authn.UserID(s.cfg.AppSecret, identity.Issuer, identity.Subject)
 	unlock := s.store.LockUser(userID)
 	defer unlock()
-	db, err := s.store.OpenUser(r.Context(), userID)
+	db, err := s.store.OpenUser(ctx, userID)
 	if err != nil {
-		s.internalAPIError(w, "open native user account", err)
-		return
+		return nativeSessionResult{}, &authOperationFailure{"open native user account", err}
 	}
 	defer db.Close()
 	profile := store.Profile{ID: userID, Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, Name: identity.Name, AvatarURL: identity.AvatarURL}
-	if err := store.UpsertProfile(r.Context(), db, profile, time.Now()); err != nil {
-		s.internalAPIError(w, "update native user profile", err)
-		return
+	if err := store.UpsertProfile(ctx, db, profile, time.Now()); err != nil {
+		return nativeSessionResult{}, &authOperationFailure{"update native user profile", err}
 	}
-	accessToken, refreshToken, session, tokens, err := newNativeSession(userID, request.DeviceID, request.Platform, time.Now())
+	accessToken, refreshToken, session, tokens, err := newNativeSession(userID, deviceID, platform, time.Now())
 	if err != nil {
-		s.internalAPIError(w, "generate native session", err)
-		return
+		return nativeSessionResult{}, &authOperationFailure{"generate native session", err}
 	}
-	if err := store.CreateSession(r.Context(), db, session, tokens); err != nil {
-		s.internalAPIError(w, "create native session", err)
-		return
+	if err := store.CreateSession(ctx, db, session, tokens); err != nil {
+		return nativeSessionResult{}, &authOperationFailure{"create native session", err}
 	}
-	writeJSON(w, http.StatusOK, nativeTokenResponse(accessToken, refreshToken, tokens[0].ExpiresAt, tokens[1].ExpiresAt))
+	return nativeSessionResult{
+		accessToken: accessToken, refreshToken: refreshToken,
+		accessExpiry: tokens[0].ExpiresAt, refreshExpiry: tokens[1].ExpiresAt,
+	}, nil
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +347,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	refresh := store.TokenRecord{Hash: refreshHash, Kind: "refresh", CreatedAt: now, ExpiresAt: now.Add(refreshTokenLifetime)}
 	if err := store.RotateRefresh(r.Context(), db, oldHash, access, refresh, now); err != nil {
 		if errors.Is(err, store.ErrRefreshReuse) {
-			s.logger.Warn("refresh token reuse revoked session family", "user_id", userID)
+			s.logger.Warn("refresh token reuse revoked session family")
 		}
 		if isUnauthorized(err) || errors.Is(err, store.ErrRefreshReuse) {
 			writeAPIError(w, http.StatusUnauthorized, "invalid refresh token")

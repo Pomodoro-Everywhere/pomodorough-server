@@ -32,6 +32,7 @@ func TestMigrateVersionOneAddsTaskSchema(t *testing.T) {
 		`SELECT id FROM task_operations LIMIT 0`,
 		`SELECT id FROM duration_operations LIMIT 0`,
 		`SELECT id FROM selected_task_operations LIMIT 0`,
+		`SELECT generation FROM account_metadata WHERE singleton = 1`,
 	} {
 		rows, err := db.QueryContext(ctx, query)
 		if err != nil {

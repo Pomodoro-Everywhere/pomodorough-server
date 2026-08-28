@@ -30,47 +30,47 @@ func TestDecodeJSONAcceptsJSONMediaTypes(t *testing.T) {
 
 func TestRevisionHubFansOutIsolatesAndCoalesces(t *testing.T) {
 	hub := newRevisionHub()
-	first, unsubscribeFirst := hub.subscribe("user-a")
-	second, unsubscribeSecond := hub.subscribe("user-a")
-	other, unsubscribeOther := hub.subscribe("user-b")
+	first, unsubscribeFirst := hub.subscribe("user-a", 1)
+	second, unsubscribeSecond := hub.subscribe("user-a", 1)
+	other, unsubscribeOther := hub.subscribe("user-b", 1)
 	t.Cleanup(unsubscribeFirst)
 	t.Cleanup(unsubscribeSecond)
 	t.Cleanup(unsubscribeOther)
 
-	hub.publish("user-a", 1)
+	hub.publish("user-a", 1, 1)
 	receiveRevision(t, first, 1)
 	receiveRevision(t, second, 1)
 	assertNoRevision(t, other)
 
-	hub.publish("user-a", 2)
-	hub.publish("user-a", 3)
+	hub.publish("user-a", 1, 2)
+	hub.publish("user-a", 1, 3)
 	receiveRevision(t, first, 3)
 	receiveRevision(t, second, 3)
 }
 
 func TestRevisionHubNeverPublishesRegressingRevision(t *testing.T) {
 	hub := newRevisionHub()
-	revisions, unsubscribe := hub.subscribe("user-a")
+	revisions, unsubscribe := hub.subscribe("user-a", 1)
 	t.Cleanup(unsubscribe)
 
-	hub.publish("user-a", 5)
-	hub.publish("user-a", 4)
+	hub.publish("user-a", 1, 5)
+	hub.publish("user-a", 1, 4)
 	receiveRevision(t, revisions, 5)
 	assertNoRevision(t, revisions)
 
-	hub.publish("user-a", 6)
+	hub.publish("user-a", 1, 6)
 	receiveRevision(t, revisions, 6)
 }
 
 func TestRevisionHubUnsubscribeKeepsOtherSubscribers(t *testing.T) {
 	hub := newRevisionHub()
-	removed, unsubscribeRemoved := hub.subscribe("user-a")
-	remaining, unsubscribeRemaining := hub.subscribe("user-a")
+	removed, unsubscribeRemoved := hub.subscribe("user-a", 1)
+	remaining, unsubscribeRemaining := hub.subscribe("user-a", 1)
 	t.Cleanup(unsubscribeRemaining)
 
 	unsubscribeRemoved()
 	unsubscribeRemoved()
-	hub.publish("user-a", 4)
+	hub.publish("user-a", 1, 4)
 	assertNoRevision(t, removed)
 	receiveRevision(t, remaining, 4)
 }
@@ -168,6 +168,20 @@ func TestParseBootstrapResolutionAcceptsMaximumOperationHistory(t *testing.T) {
 	}
 	if len(result.DurationOperations) != 4096 || result.DurationOperations[4095].ID != "duration-operation-4095" {
 		t.Fatalf("parsed bootstrap operation count=%d", len(result.DurationOperations))
+	}
+}
+
+func TestClientIPTrustsOnlyAValidForwardedAddressFromLoopback(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/", nil)
+	request.RemoteAddr = "127.0.0.1:45000"
+	request.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.4")
+	if got := clientIP(request); got != "203.0.113.9" {
+		t.Fatalf("clientIP behind loopback proxy = %q, want 203.0.113.9", got)
+	}
+
+	request.RemoteAddr = "198.51.100.7:45000"
+	if got := clientIP(request); got != "198.51.100.7" {
+		t.Fatalf("clientIP from non-proxy peer = %q, want 198.51.100.7", got)
 	}
 }
 

@@ -107,34 +107,11 @@ func Provision(ctx context.Context, request Request) (Credentials, error) {
 
 	sessionExpiresAt := now.Add(request.TTL)
 	accessExpiresAt := now.Add(min(request.TTL, accessTokenLifetime))
-	sessions := make([]store.SessionTokens, 0, len(request.Devices))
-	credentials := Credentials{Issuer: Issuer, Subject: request.Subject, UserID: userID, Clients: make([]ClientCredentials, 0, len(request.Devices))}
-	for _, device := range request.Devices {
-		accessToken, accessHash, err := authn.NewOpaqueToken(userID)
-		if err != nil {
-			return Credentials{}, fmt.Errorf("generate %s access token: %w", device.Name, err)
-		}
-		refreshToken, refreshHash, err := authn.NewOpaqueToken(userID)
-		if err != nil {
-			return Credentials{}, fmt.Errorf("generate %s refresh token: %w", device.Name, err)
-		}
-		sessionID, err := authn.RandomString(32)
-		if err != nil {
-			return Credentials{}, fmt.Errorf("generate %s session ID: %w", device.Name, err)
-		}
-		sessions = append(sessions, store.SessionTokens{
-			Session: store.Session{ID: sessionID, Kind: "native", DeviceID: device.DeviceID, Platform: device.Platform, CreatedAt: now, ExpiresAt: sessionExpiresAt},
-			Tokens: []store.TokenRecord{
-				{Hash: accessHash, Kind: "access", CreatedAt: now, ExpiresAt: accessExpiresAt},
-				{Hash: refreshHash, Kind: "refresh", CreatedAt: now, ExpiresAt: sessionExpiresAt},
-			},
-		})
-		credentials.Clients = append(credentials.Clients, ClientCredentials{
-			Name: device.Name, DeviceID: device.DeviceID, Platform: device.Platform,
-			AccessToken: accessToken, AccessTokenExpiresAt: accessExpiresAt.UTC().Format(time.RFC3339),
-			RefreshToken: refreshToken, RefreshTokenExpiresAt: sessionExpiresAt.UTC().Format(time.RFC3339),
-		})
+	sessions, clients, err := provisionDeviceSessions(userID, request.Devices, now, accessExpiresAt, sessionExpiresAt)
+	if err != nil {
+		return Credentials{}, err
 	}
+	credentials := Credentials{Issuer: Issuer, Subject: request.Subject, UserID: userID, Clients: clients}
 	profile := store.Profile{
 		ID: userID, Issuer: Issuer, Subject: request.Subject,
 		Email: "integration-" + strings.ToLower(userID) + "@integration.invalid", Name: "Integration Test User",
@@ -143,6 +120,38 @@ func Provision(ctx context.Context, request Request) (Credentials, error) {
 		return Credentials{}, fmt.Errorf("provision integration user: %w", err)
 	}
 	return credentials, nil
+}
+
+func provisionDeviceSessions(userID string, devices []Device, now, accessExpiresAt, sessionExpiresAt time.Time) ([]store.SessionTokens, []ClientCredentials, error) {
+	sessions := make([]store.SessionTokens, 0, len(devices))
+	clients := make([]ClientCredentials, 0, len(devices))
+	for _, device := range devices {
+		accessToken, accessHash, err := authn.NewOpaqueToken(userID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate %s access token: %w", device.Name, err)
+		}
+		refreshToken, refreshHash, err := authn.NewOpaqueToken(userID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate %s refresh token: %w", device.Name, err)
+		}
+		sessionID, err := authn.RandomString(32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate %s session ID: %w", device.Name, err)
+		}
+		sessions = append(sessions, store.SessionTokens{
+			Session: store.Session{ID: sessionID, Kind: "native", DeviceID: device.DeviceID, Platform: device.Platform, CreatedAt: now, ExpiresAt: sessionExpiresAt},
+			Tokens: []store.TokenRecord{
+				{Hash: accessHash, Kind: "access", CreatedAt: now, ExpiresAt: accessExpiresAt},
+				{Hash: refreshHash, Kind: "refresh", CreatedAt: now, ExpiresAt: sessionExpiresAt},
+			},
+		})
+		clients = append(clients, ClientCredentials{
+			Name: device.Name, DeviceID: device.DeviceID, Platform: device.Platform,
+			AccessToken: accessToken, AccessTokenExpiresAt: accessExpiresAt.UTC().Format(time.RFC3339),
+			RefreshToken: refreshToken, RefreshTokenExpiresAt: sessionExpiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return sessions, clients, nil
 }
 
 func prepareDataDir(dataDir string) error {

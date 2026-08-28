@@ -10,7 +10,14 @@ const webDirectory = __dirname;
 const workerSource = fs.readFileSync(path.join(webDirectory, "sw.js"), "utf8");
 const landingSource = fs.readFileSync(path.join(webDirectory, "index.html"), "utf8");
 const appSource = fs.readFileSync(path.join(webDirectory, "app.html"), "utf8");
-const appScriptSource = fs.readFileSync(path.join(webDirectory, "app.js"), "utf8");
+const applicationScriptFiles = [
+  "app.js", "app-state.js", "app-storage.js", "app-actions.js", "app-sync.js",
+  "app-bootstrap.js", "app-session.js", "app-view.js"
+];
+const appCompositionSource = fs.readFileSync(path.join(webDirectory, "app.js"), "utf8");
+const appStorageSource = fs.readFileSync(path.join(webDirectory, "app-storage.js"), "utf8");
+const appScriptSource = applicationScriptFiles
+  .map((file) => fs.readFileSync(path.join(webDirectory, file), "utf8")).join("\n");
 const appStyleSource = fs.readFileSync(path.join(webDirectory, "app.css"), "utf8");
 const landingScriptSource = fs.readFileSync(path.join(webDirectory, "landing.js"), "utf8");
 const manifest = JSON.parse(fs.readFileSync(path.join(webDirectory, "manifest.webmanifest"), "utf8"));
@@ -83,12 +90,12 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
   };
 }
 
-test("every shipped privacy link uses the unauthenticated public Pages policy", () => {
-  const publicPolicy = "https://pomodoro-everywhere.github.io/pomodorough-server/privacy/";
+test("every shipped privacy link uses the contractual application URL", () => {
+  const privacyPolicy = "https://pomodorough.egigoka.me/privacy";
   for (const source of [appSource, landingSource]) {
     const links = [...source.matchAll(/href="([^"]*privacy[^"]*)"/g)].map((match) => match[1]);
     assert.ok(links.length > 0);
-    assert.deepEqual(new Set(links), new Set([publicPolicy]));
+    assert.deepEqual(new Set(links), new Set([privacyPolicy]));
   }
 });
 
@@ -97,24 +104,35 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
     assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
   }
-  assert.match(appSource, /\/app\.js\?v=32/);
-  assert.match(workerSource, /\/app\.js\?v=32/);
+  assert.match(appSource, /\/app\.js\?v=35/);
+  assert.match(workerSource, /\/app\.js\?v=35/);
   assert.match(appSource, /\/shared-core-metadata\.js\?v=1/);
-  assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
   assert.match(appSource, /\/shared-core\.js\?v=6/);
+  assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
   assert.match(workerSource, /\/shared-core\.js\?v=6/);
-  assert.match(workerSource, /CORE_METADATA\.wasmURL/);
+  assert.doesNotMatch(workerSource, /aec9688661f39b92f21de8a26231419f0a2839ab7629bd158af5a46d49632ddf/);
   assert.match(appScriptSource, /sharedCoreHost\.SharedCore\.load/);
-  assert.match(appScriptSource, /task\.identity\.v1/);
+  assert.match(appCompositionSource,
+    /syncStorage\.setSharedCore\(await call\(application, "loadSharedCore"\)\)/);
+  assert.ok(
+    appCompositionSource.indexOf('syncStorage.setSharedCore(await call(application, "loadSharedCore"))')
+      < appCompositionSource.indexOf('await call(application, "loadLocalState")')
+  );
+  assert.match(appScriptSource, /\.taskIdentity\(/);
   assert.match(appSource, /\/sync-core\.js\?v=25/);
   assert.match(workerSource, /\/sync-core\.js\?v=25/);
-  assert.match(appSource, /\/sync-storage\.js\?v=26/);
-  assert.match(workerSource, /\/sync-storage\.js\?v=26/);
+  assert.match(appSource, /\/sync-storage\.js\?v=27/);
+  assert.match(workerSource, /\/sync-storage\.js\?v=27/);
   assert.match(appSource, /\/i18n\.js\?v=2/);
   for (const asset of ["/i18n.js?v=2", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v45-/);
+  for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
+    const asset = `/${file}?v=1`;
+    assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
+    assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
+  }
+  assert.match(workerSource, /pomodorough-shell-v49-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);
@@ -145,9 +163,9 @@ test("account controls do not render the account name", () => {
 });
 
 test("selected-task sync upgrades IndexedDB with a dedicated pending store", () => {
-  assert.match(appScriptSource, /const DB_VERSION = 5;/);
-  assert.match(appScriptSource, /const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";/);
-  assert.match(appScriptSource, /createObjectStore\(SELECTED_TASK_PENDING_STORE, \{ keyPath: "id" \}\)/);
+  assert.match(appStorageSource, /const DB_VERSION = 5;/);
+  assert.match(appStorageSource, /const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";/);
+  assert.match(appStorageSource, /\[SELECTED_TASK_PENDING_STORE, "id"\]/);
 });
 
 test("manifest and service worker stay scoped to app route", () => {
@@ -157,8 +175,8 @@ test("manifest and service worker stay scoped to app route", () => {
   );
   assert.match(appSource, /<link rel="manifest" href="\/manifest\.webmanifest" crossorigin="use-credentials">/);
   assert.match(landingSource, /href="\/app"[^>]*>Use Web app<\/a>/);
-  assert.match(appScriptSource, /serviceWorker\.register\("\/sw\.js", \{ scope: "\/app" \}\)/);
-  assert.doesNotMatch(appScriptSource, /getRegistration\("\/"\)|unregister\(\)/);
+  assert.match(appCompositionSource, /serviceWorker\.register\("\/sw\.js", \{ scope: "\/app" \}\)/);
+  assert.doesNotMatch(appCompositionSource, /getRegistration\("\/"\)|unregister\(\)/);
   assert.doesNotMatch(landingScriptSource, /getRegistration\("\/"\)|unregister\(\)/);
 });
 

@@ -203,10 +203,9 @@ gh attestation verify pomodorough-X.Y.Z-linux-amd64.tar.gz \
 
 On macOS, use `shasum -a 256 -c SHA256SUMS` for the checksum step.
 
-The public privacy policy is published independently of the authenticated service at
-<https://pomodoro-everywhere.github.io/pomodorough-server/privacy/>. The same
-policy is served by the application at `/privacy` and `/privacy.html` after a
-server deployment. `scripts/check_privacy_policy.py` prevents the two copies
+The contractual public privacy policy is served by the application at
+<https://pomodorough.egigoka.me/privacy> (and `/privacy.html`). A GitHub Pages
+mirror remains independently available. `scripts/check_privacy_policy.py` prevents the two copies
 from drifting.
 
 Runtime account databases live below `DATA_DIR/users`. Back them up with a

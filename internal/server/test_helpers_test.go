@@ -32,6 +32,19 @@ type serverFixture struct {
 	deviceID     string
 }
 
+func serverTestContext(t *testing.T) (context.Context, context.CancelFunc) {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return context.WithCancel(t.Context())
+	}
+	reserve := time.Until(deadline) / 20
+	if reserve > 5*time.Second {
+		reserve = 5 * time.Second
+	}
+	return context.WithDeadline(t.Context(), deadline.Add(-reserve))
+}
+
 func newServerFixture(t *testing.T) serverFixture {
 	t.Helper()
 	userStore, err := store.New(t.TempDir())

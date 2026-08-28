@@ -30,7 +30,7 @@ func TestHTTPDeleteAccountRequiresExactConfirmationAndPreservesDataOnFailure(t *
 
 func TestHTTPDeleteAccountErasesDataRevokesSessionsAndClearsWebCookies(t *testing.T) {
 	fixture := newServerFixture(t)
-	updates, unsubscribe := fixture.application.hub.subscribe(fixture.userID)
+	updates, unsubscribe := fixture.application.hub.subscribe(fixture.userID, 1, "web-session", "")
 	defer unsubscribe()
 	request, response := newJSONRequest(t, http.MethodDelete, "https://pomodorough.egigoka.me/api/v1/account", map[string]string{"confirmation": "DELETE"})
 	addWebAuthentication(request, fixture)

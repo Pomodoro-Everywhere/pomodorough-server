@@ -11,6 +11,7 @@ func TestLoadValidConfiguration(t *testing.T) {
 	setConfigEnvironment(t)
 	t.Setenv("LISTEN_ADDR", " 0.0.0.0:9000 ")
 	t.Setenv("DATA_DIR", "var/data")
+	t.Setenv("DELETION_LEDGER_DIR", "var/deletion-ledger")
 	t.Setenv("WEB_ROOT", "public")
 	t.Setenv("PUBLIC_URL", "https://example.com/")
 	t.Setenv("GOOGLE_WEB_CLIENT_ID", " web-client ")
@@ -29,7 +30,12 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddr != "0.0.0.0:9000" || cfg.DataDir != dataDir || cfg.WebRoot != webRoot {
+	deletionLedgerDir, err := filepath.Abs("var/deletion-ledger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ListenAddr != "0.0.0.0:9000" || cfg.DataDir != dataDir ||
+		cfg.DeletionLedgerDir != deletionLedgerDir || cfg.WebRoot != webRoot {
 		t.Fatalf("resolved paths or address mismatch: %#v", cfg)
 	}
 	if cfg.PublicURL != "https://example.com" {
@@ -56,7 +62,9 @@ func TestLoadUsesDefaultsForBlankOptionalValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddr != "127.0.0.1:8790" || cfg.DataDir != "/var/lib/pomodorough" || cfg.WebRoot != "/etc/pomodorough/web" {
+	if cfg.ListenAddr != "127.0.0.1:8790" || cfg.DataDir != "/var/lib/pomodorough" ||
+		cfg.DeletionLedgerDir != "/var/lib/pomodorough-deletion-ledger" ||
+		cfg.WebRoot != "/etc/pomodorough/web" {
 		t.Fatalf("defaults mismatch: %#v", cfg)
 	}
 	if cfg.PublicURL != defaultPublicURL {
@@ -71,7 +79,7 @@ func setConfigEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("APP_SECRET", strings.Repeat("s", 32))
 	for _, name := range []string{
-		"LISTEN_ADDR", "DATA_DIR", "WEB_ROOT", "PUBLIC_URL", "GOOGLE_WEB_CLIENT_ID",
+		"LISTEN_ADDR", "DATA_DIR", "DELETION_LEDGER_DIR", "WEB_ROOT", "PUBLIC_URL", "GOOGLE_WEB_CLIENT_ID",
 		"GOOGLE_WEB_CLIENT_SECRET", "GOOGLE_NATIVE_CLIENT_IDS",
 	} {
 		t.Setenv(name, "")

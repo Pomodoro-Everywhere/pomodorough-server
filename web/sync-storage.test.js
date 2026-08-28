@@ -7,7 +7,261 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { indexedDB } = require("fake-indexeddb");
 const sync = require("./sync-core.js");
+const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
 const storage = require("./sync-storage.js");
+const { SharedCore } = require("./shared-core.js");
+const sharedCoreBytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
+let sharedCorePromise = null;
+
+function authoritativeCore() {
+  globalThis.crypto ||= crypto.webcrypto;
+  sharedCorePromise ||= SharedCore.fromBytes(sharedCoreBytes);
+  return sharedCorePromise;
+}
+
+test.before(async () => {
+  storage.setSharedCore(await authoritativeCore());
+});
+
+test("typed projection adapter matches pinned shared core when legacy JavaScript drifts on clock ties", async () => {
+  const coreInstance = await authoritativeCore();
+  const identity = coreInstance.taskIdentity({ title: "Clock tie task" });
+  const clock = {
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 0
+  };
+  const queues = {
+    commands: [],
+    taskOperations: [
+      { ...clock, id: "operation-a", deviceId: "device-z", taskId: identity.id, type: "upsert", title: identity.title },
+      { ...clock, id: "operation-z", deviceId: "device-a", taskId: identity.id, type: "delete", title: "" }
+    ],
+    durationOperations: [
+      { ...clock, id: "duration-a", deviceId: "device-z", phase: "focus", durationMs: 1_800_000 },
+      { ...clock, id: "duration-z", deviceId: "device-a", phase: "focus", durationMs: 2_100_000 }
+    ],
+    autoStartOperations: [
+      { ...clock, id: "auto-a", deviceId: "device-z", enabled: true },
+      { ...clock, id: "auto-z", deviceId: "device-a", enabled: false }
+    ],
+    selectedTaskOperations: [
+      { ...clock, id: "selected-a", deviceId: "device-z", taskId: identity.id },
+      { ...clock, id: "selected-z", deviceId: "device-a", taskId: null }
+    ]
+  };
+  const base = snapshot(3);
+  const projectionInput = {
+    base: {
+      canonicalTimer: base.canonicalTimer,
+      history: base.history,
+      tasks: base.tasks,
+      durationsMs: base.durationsMs,
+      autoStartBreaks: base.autoStartBreaks,
+      selectedTaskId: base.selectedTaskId
+    },
+    pending: queues,
+    now: "2026-07-22T12:02:00.000Z"
+  };
+  const authoritative = coreInstance.projectSynchronizedState(projectionInput);
+  const legacy = {
+    tasks: legacyDecisionCompat.applyTaskOperations(base.tasks, queues.taskOperations),
+    durationsMs: legacyDecisionCompat.applyDurationOperations(base.durationsMs, queues.durationOperations),
+    autoStartBreaks: legacyDecisionCompat.applyAutoStartOperations(base.autoStartBreaks, queues.autoStartOperations),
+    selectedTaskId: legacyDecisionCompat.applySelectedTaskOperations(
+      base.selectedTaskId,
+      queues.selectedTaskOperations
+    )
+  };
+  const projected = storage.projectState({
+    snapshot: base,
+    queues,
+    nowMs: Date.parse(projectionInput.now),
+    sharedCore: coreInstance
+  });
+  const synchronizedState = ({ tasks, durationsMs, autoStartBreaks, selectedTaskId }) => ({
+    tasks,
+    durationsMs,
+    autoStartBreaks,
+    selectedTaskId
+  });
+
+  assert.notDeepEqual(legacy, synchronizedState(authoritative));
+  assert.deepEqual(synchronizedState(projected), synchronizedState(authoritative));
+});
+
+test("typed bootstrap adapter matches pinned shared core when legacy JavaScript drifts on incomplete history", async () => {
+  const input = {
+    localOwnerId: null,
+    currentUserId: "user-1",
+    localHistory: [{ id: "history-without-status" }],
+    remoteHistory: [],
+    hasLocalState: false,
+    hasRemoteState: false
+  };
+  const coreInstance = await authoritativeCore();
+  const authoritative = coreInstance.planBootstrap(input);
+
+  assert.notDeepEqual(legacyDecisionCompat.decideBootstrap(input), authoritative);
+  assert.deepEqual(storage.bootstrapPlan({ ...input, sharedCore: coreInstance }), authoritative);
+});
+
+test("projection.apply.v2 matches covered native reducers across synchronized domains", async () => {
+  const coreInstance = await authoritativeCore();
+  const identity = coreInstance.taskIdentity({ title: "Projected task" });
+  const base = snapshot(3);
+  const start = {
+    id: "projection-start",
+    deviceId: "device-a",
+    deviceSequence: 1,
+    timerId: "projection-timer",
+    type: "start",
+    phase: "focus",
+    plannedDurationMs: 1_500_000,
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 0,
+    observedElapsedMs: 0,
+    taskId: identity.id
+  };
+  const task = {
+    id: "projection-task",
+    deviceId: "device-a",
+    taskId: identity.id,
+    type: "upsert",
+    title: identity.title,
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 1
+  };
+  const duration = {
+    id: "projection-duration",
+    deviceId: "device-a",
+    phase: "focus",
+    durationMs: 1_800_000,
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 2
+  };
+  const autoStart = {
+    id: "projection-auto-start",
+    deviceId: "device-a",
+    enabled: true,
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 3
+  };
+  const selectedTask = {
+    id: "projection-selected-task",
+    deviceId: "device-a",
+    taskId: identity.id,
+    occurredAt: "2026-07-22T12:01:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 4
+  };
+  const queues = {
+    commands: [start],
+    taskOperations: [task],
+    durationOperations: [duration],
+    autoStartOperations: [autoStart],
+    selectedTaskOperations: [selectedTask]
+  };
+
+  const projected = storage.projectState({
+    snapshot: base,
+    queues,
+    nowMs: Date.parse("2026-07-22T12:02:00Z"),
+    sharedCore: coreInstance
+  });
+  const authoritative = coreInstance.projectSynchronizedState({
+    base: {
+      canonicalTimer: base.canonicalTimer,
+      history: base.history,
+      tasks: base.tasks,
+      durationsMs: base.durationsMs,
+      autoStartBreaks: base.autoStartBreaks,
+      selectedTaskId: base.selectedTaskId
+    },
+    pending: queues,
+    now: "2026-07-22T12:02:00.000Z"
+  });
+
+  assert.deepEqual(projected, authoritative);
+});
+
+test("bootstrap and reconciliation decisions come from the pinned shared core", async () => {
+  const coreInstance = await authoritativeCore();
+  const plan = storage.bootstrapPlan({
+    localOwnerId: null,
+    currentUserId: "user-1",
+    localHistory: [],
+    remoteHistory: [],
+    hasLocalState: true,
+    hasRemoteState: false,
+    sharedCore: coreInstance
+  });
+  assert.deepEqual(plan, {
+    mode: "auto",
+    strategy: "merge",
+    reason: "local_state_only"
+  });
+
+  const base = snapshot(4);
+  const serverHlcWallMs = Date.parse(base.serverTime);
+  const response = {
+    ...base,
+    acknowledgements: [],
+    taskAcknowledgements: [],
+    durationAcknowledgements: [],
+    autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: [],
+    serverHlcWallMs,
+    serverHlcCounter: 0
+  };
+  const reconciled = storage.reconcileState({
+    queues: {
+      commands: [],
+      taskOperations: [],
+      durationOperations: [],
+      autoStartOperations: [],
+      selectedTaskOperations: []
+    },
+    sent: {
+      commands: [],
+      taskOperations: [],
+      durationOperations: [],
+      autoStartOperations: [],
+      selectedTaskOperations: []
+    },
+    response,
+    deviceId: "device-1",
+    sharedCore: coreInstance
+  });
+
+  assert.equal(reconciled.revision, 4);
+  assert.deepEqual(reconciled.queues, {
+    commands: [],
+    taskOperations: [],
+    durationOperations: [],
+    autoStartOperations: [],
+    selectedTaskOperations: []
+  });
+  assert.deepEqual(reconciled.projection, {
+    canonicalTimer: null,
+    history: [],
+    tasks: [],
+    durationsMs: base.durationsMs,
+    autoStartBreaks: false,
+    selectedTaskId: null,
+    timerOutcomes: {},
+    winningOperationIds: {
+      tasks: {},
+      durations: {},
+      autoStart: null,
+      selectedTask: null
+    }
+  });
+});
 const uuidFixtureBytes = fs.readFileSync(
   path.join(__dirname, "../internal/timer/testdata/uuidv7-v1.json")
 );
@@ -164,6 +418,18 @@ async function readMeta(database, key) {
   return record?.value;
 }
 
+async function readDurableState(database) {
+  const stores = [
+    "meta", "pending", "pendingTasks", "pendingDurations", "pendingAutoStarts", "pendingSelectedTasks"
+  ];
+  const transaction = database.transaction(stores, "readonly");
+  const entries = await Promise.all(stores.map(async (name) => [
+    name,
+    await storage.requestResult(transaction.objectStore(name).getAll())
+  ]));
+  return Object.fromEntries(entries);
+}
+
 function fixedEntropy(hex) {
   const source = Uint8Array.from(Buffer.from(hex.padStart(20, "0"), "hex"));
   return (bytes) => {
@@ -188,6 +454,19 @@ async function acquire(database, token = "tab-1", nowMs = 1_000, leaseMs = 1_000
 
 async function capture(database, input = resolutionInput(), token = "tab-1") {
   return storage.captureResolution(database, input, { gateToken: token, replaceExisting: false });
+}
+
+function reconciliationResponse(canonical, acknowledgements = []) {
+  return {
+    ...canonical,
+    acknowledgements,
+    taskAcknowledgements: [],
+    durationAcknowledgements: [],
+    autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: [],
+    serverHlcWallMs: Date.parse(canonical.serverTime),
+    serverHlcCounter: 0
+  };
 }
 
 test("UUIDv7 generator matches RFC 9562 fixture", () => {
@@ -624,6 +903,60 @@ test("invalid sync clock tuple leaves canonical state and queues unchanged", asy
   assert.deepEqual(persisted.commands, [queued]);
 });
 
+test("malformed reconciliation core aborts with zero durable effects", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const queues = {
+    commands: [command("rollback-command", 1)],
+    taskOperations: [taskOperation("rollback-task")],
+    durationOperations: [durationOperation("rollback-duration")],
+    autoStartOperations: [autoStartOperation("rollback-auto")],
+    selectedTaskOperations: [selectedTaskOperation("rollback-selected", null)]
+  };
+  const clockOffset = {
+    offsetMs: 5, uncertaintyMs: 10, sampledAtWallMs: 1_000,
+    requestSequence: 4, receivedAtWallMs: 1_010
+  };
+  await seedMeta(instance.database, {
+    snapshot: snapshot(1), hlc: { wallMs: 100, counter: 2 }, deviceSequence: 7,
+    [storage.UUID7_KEY]: { timestampMs: 100, random: "0000000000000000001" },
+    settings: { selectedPhase: "focus", marker: "before" },
+    timerOwner: { timerId: "rollback-timer", deviceId: "device-1", tabId: "tab-1", leaseExpiresAtMs: 9_999 },
+    clockOffset, clockRequestSequence: 4
+  });
+  await seedQueues(instance.database, queues);
+  const before = await readDurableState(instance.database);
+  const sent = sync.buildSyncBatch(queues);
+  const incoming = snapshot(2);
+  const response = reconciliationResponse(incoming, [
+    { commandId: queues.commands[0].id, outcome: "applied", reason: "" }
+  ]);
+  response.taskAcknowledgements = [{ operationId: queues.taskOperations[0].id, outcome: "applied", reason: "" }];
+  response.durationAcknowledgements = [{ operationId: queues.durationOperations[0].id, outcome: "applied", reason: "" }];
+  response.autoStartAcknowledgements = [{ operationId: queues.autoStartOperations[0].id, outcome: "applied", reason: "" }];
+  response.selectedTaskAcknowledgements = [{
+    operationId: queues.selectedTaskOperations[0].id, outcome: "applied", reason: ""
+  }];
+
+  await assert.rejects(storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1", snapshot: incoming, hlc: { wallMs: 200, counter: 0 },
+    clockOffset: { ...clockOffset, requestSequence: 5, receivedAtWallMs: 1_020 },
+    settings: { selectedPhase: "long_break", marker: "after" },
+    queueIds: {
+      commands: queues.commands.map((item) => item.id),
+      taskOperations: queues.taskOperations.map((item) => item.id),
+      durationOperations: queues.durationOperations.map((item) => item.id),
+      autoStartOperations: queues.autoStartOperations.map((item) => item.id),
+      selectedTaskOperations: queues.selectedTaskOperations.map((item) => item.id)
+    },
+    reconciliation: {
+      sent, response, deviceId: "device-1",
+      sharedCore: { reconcileSynchronizedState: () => ({ malformed: true }) }
+    }
+  }), /invalid reconciliation/i);
+  assert.deepEqual(await readDurableState(instance.database), before);
+});
+
 test("ambiguous legacy false omits bootstrap field and preserves canonical true", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
@@ -796,6 +1129,78 @@ test("UUIDv7 mutation allocation persists across domains, restart, and clock rol
   assert.equal(await readMeta(instance.database, storage.UUID7_KEY), selectedTask.id);
 });
 
+test("projection failure rolls back every synchronized mutation domain", async () => {
+  const cases = [
+    {
+      storeName: "pending",
+      withDeviceSequence: true,
+      build: ({ id, wallMs, counter, deviceSequence }) => command(id, deviceSequence, wallMs, counter)
+    },
+    {
+      storeName: "pendingTasks",
+      withDeviceSequence: false,
+      build: ({ id, wallMs, counter }) => ({
+        ...taskOperation(id, wallMs, counter),
+        deviceId: "device-1"
+      })
+    },
+    {
+      storeName: "pendingDurations",
+      withDeviceSequence: false,
+      build: ({ id, wallMs, counter }) => ({
+        ...durationOperation(id),
+        deviceId: "device-1",
+        hlcWallMs: wallMs,
+        hlcCounter: counter
+      })
+    },
+    {
+      storeName: "pendingAutoStarts",
+      withDeviceSequence: false,
+      build: ({ id, wallMs, counter }) => ({
+        ...autoStartOperation(id, true, wallMs, counter),
+        deviceId: "device-1"
+      })
+    },
+    {
+      storeName: "pendingSelectedTasks",
+      withDeviceSequence: false,
+      build: ({ id, wallMs, counter }) => ({
+        ...selectedTaskOperation(id, null, wallMs, counter),
+        deviceId: "device-1"
+      })
+    }
+  ];
+
+  for (const item of cases) {
+    const instance = await fixture();
+    try {
+      await seedMeta(instance.database, {
+        snapshot: snapshot(0),
+        deviceSequence: 4,
+        hlc: { wallMs: 100, counter: 2 },
+        [storage.UUID7_KEY]: storage.uuid7FromParts(100, 7n)
+      });
+      const beforeQueues = await storage.readQueues(instance.database);
+      const beforeCanonical = await storage.readCanonicalState(instance.database);
+
+      await assert.rejects(storage.allocateMutation(instance.database, {
+        ...item,
+        nowMs: 200,
+        withUuidV7: true,
+        sharedCore: { projectSynchronizedState() { throw new Error("projection unavailable"); } }
+      }), /projection unavailable/);
+
+      assert.deepEqual(await storage.readQueues(instance.database), beforeQueues);
+      assert.deepEqual(await storage.readCanonicalState(instance.database), beforeCanonical);
+      assert.equal(await readMeta(instance.database, "deviceSequence"), 4);
+      assert.equal(await readMeta(instance.database, storage.UUID7_KEY), storage.uuid7FromParts(100, 7n));
+    } finally {
+      await instance.close();
+    }
+  }
+});
+
 test("UUIDv7 allocator reconstructs missing state without rewriting UUIDv4 queues", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
@@ -883,6 +1288,177 @@ test("UUIDv7 stale or exhausted state aborts queue, HLC, and sequence writes", a
   }
 });
 
+test("authoritative timer projection permits a newer pause to reactivate canonical completion", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const canonical = snapshot(1);
+  canonical.canonicalTimer = {
+    id: "reactivated-focus",
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 1_500_000,
+    elapsedAtAnchorMs: 1_500_000,
+    anchorAt: "2026-07-22T12:25:00Z"
+  };
+  const pause = {
+    id: "pause-new",
+    deviceId: "device-owner",
+    deviceSequence: 1,
+    timerId: "reactivated-focus",
+    type: "pause",
+    phase: "focus",
+    plannedDurationMs: 1_500_000,
+    occurredAt: "2026-07-22T12:26:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 0,
+    observedElapsedMs: 1_400_000
+  };
+  await seedMeta(instance.database, {
+    snapshot: canonical,
+    deviceSequence: 1,
+    hlc: { wallMs: 1_000, counter: 0 }
+  });
+  await seedQueues(instance.database, { commands: [pause] });
+
+  const result = await storage.finishTimer(instance.database, {
+    timerId: "reactivated-focus",
+    phase: "focus",
+    deviceId: "device-owner",
+    tabId: "tab-owner",
+    leaseMs: 1_000,
+    manual: true,
+    requireOwner: false,
+    nowMs: 2_000,
+    observedElapsedMs: 1_500_000,
+    withUuidV7: true,
+    sharedCore: await authoritativeCore()
+  });
+
+  assert.equal(result.transitioned, true);
+  assert.deepEqual(result.commands.map((item) => item.type), ["finish"]);
+  assert.deepEqual(
+    (await storage.readQueues(instance.database)).commands.map((item) => item.id).sort(),
+    ["pause-new", result.commands[0].id].sort()
+  );
+});
+
+test("authoritative timer projection permits cancel and clear after reactivation", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const canonical = snapshot(1);
+  canonical.canonicalTimer = {
+    id: "reactivated-focus",
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 1_500_000,
+    elapsedAtAnchorMs: 1_500_000,
+    anchorAt: "2026-07-22T12:25:00Z"
+  };
+  const pause = {
+    id: "pause-new",
+    deviceId: "device-owner",
+    deviceSequence: 1,
+    timerId: "reactivated-focus",
+    type: "pause",
+    phase: "focus",
+    plannedDurationMs: 1_500_000,
+    occurredAt: "2026-07-22T12:26:00Z",
+    hlcWallMs: 1_000,
+    hlcCounter: 0,
+    observedElapsedMs: 1_400_000
+  };
+  await seedMeta(instance.database, {
+    snapshot: canonical,
+    deviceSequence: 1,
+    hlc: { wallMs: 1_000, counter: 0 }
+  });
+  await seedQueues(instance.database, { commands: [pause] });
+
+  const result = await storage.cancelAndClearTimer(instance.database, {
+    timerId: "reactivated-focus",
+    phase: "focus",
+    deviceId: "device-owner",
+    nowMs: 2_000,
+    observedElapsedMs: 1_400_000,
+    withUuidV7: true,
+    sharedCore: await authoritativeCore()
+  });
+
+  assert.equal(result.transitioned, true);
+  assert.deepEqual(result.commands.map((item) => item.type), ["cancel", "clear"]);
+});
+
+test("durable timer projection failure aborts before queue clock or UUID mutation", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  await seedMeta(instance.database, {
+    snapshot: runningFocusSnapshot(),
+    deviceSequence: 7,
+    hlc: { wallMs: 100, counter: 2 },
+    [storage.UUID7_KEY]: { timestampMs: 100, random: "0000000000000000001" }
+  });
+  const beforeQueues = await storage.readQueues(instance.database);
+  const beforeState = await storage.readCanonicalState(instance.database);
+
+  await assert.rejects(storage.finishTimer(instance.database, {
+    timerId: "owned-focus",
+    phase: "focus",
+    deviceId: "device-owner",
+    tabId: "tab-owner",
+    leaseMs: 1_000,
+    manual: true,
+    requireOwner: false,
+    nowMs: 500,
+    observedElapsedMs: 1_500_000,
+    withUuidV7: true,
+    sharedCore: { projectSynchronizedState() { throw new Error("injected core failure"); } }
+  }), /injected core failure/);
+
+  assert.deepEqual(await storage.readQueues(instance.database), beforeQueues);
+  assert.deepEqual(await storage.readCanonicalState(instance.database), beforeState);
+  assert.equal(await readMeta(instance.database, "deviceSequence"), 7);
+  assert.deepEqual(await readMeta(instance.database, storage.UUID7_KEY), {
+    timestampMs: 100,
+    random: "0000000000000000001"
+  });
+});
+
+test("two tabs racing Finish persist exactly one transition", async (t) => {
+  const instance = await fixture();
+  const second = await instance.secondConnection();
+  t.after(() => {
+    second.close();
+    return instance.close();
+  });
+  await seedMeta(instance.database, {
+    snapshot: runningFocusSnapshot(),
+    deviceSequence: 0,
+    hlc: { wallMs: 100, counter: 0 }
+  });
+  const input = {
+    timerId: "owned-focus",
+    phase: "focus",
+    deviceId: "device-owner",
+    tabId: "tab-owner",
+    leaseMs: 1_000,
+    manual: true,
+    requireOwner: false,
+    nowMs: 500,
+    observedElapsedMs: 1_500_000,
+    withUuidV7: true,
+    sharedCore: await authoritativeCore()
+  };
+
+  const outcomes = await Promise.all([
+    storage.finishTimer(instance.database, input),
+    storage.finishTimer(second, input)
+  ]);
+
+  assert.deepEqual(outcomes.map((outcome) => outcome.transitioned).sort(), [false, true]);
+  const commands = (await storage.readQueues(instance.database)).commands;
+  assert.equal(commands.filter((command) => command.type === "finish").length, 1);
+});
+
 test("UUIDv7 finish and generated break reserve one atomic consecutive batch", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
@@ -906,8 +1482,10 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
     leaseMs: 1_000,
     manual: false,
     requireOwner: true,
-    nowMs: 500,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    localNowMs: 500,
     observedElapsedMs: 1_500_000,
+    autoStartBreaks: true,
     withUuidV7: true,
     entropy: fixedEntropy("09"),
     breakPhase: "short_break",
@@ -917,9 +1495,13 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
   });
 
   const parts = result.commands.map((item) => storage.uuid7Parts(item.id));
-  assert.deepEqual(parts.map((item) => item.timestampMs), [500, 500]);
+  assert.deepEqual(parts.map((item) => item.timestampMs), [
+    Date.parse("2026-07-22T12:25:00Z"), Date.parse("2026-07-22T12:25:00Z")
+  ]);
   assert.deepEqual(parts.map((item) => item.randomValue), [9n, 10n]);
   assert.equal(result.commands[1].dependsOnCommandId, result.commands[0].id);
+  assert.equal(result.selectedPhaseDurationMs, 300_000);
+  assert.equal(result.commands[1].plannedDurationMs, result.selectedPhaseDurationMs);
   assert.equal(await readMeta(instance.database, storage.UUID7_KEY), result.commands[1].id);
   assert.deepEqual(await readMeta(instance.database, "settings"), {
     selectedPhase: "short_break"
@@ -1106,8 +1688,10 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
       leaseMs: 1_000,
       manual: false,
       requireOwner: true,
-      nowMs,
+      nowMs: Date.parse("2026-07-22T12:25:00Z"),
+      localNowMs: nowMs,
       observedElapsedMs: 1_500_000,
+      autoStartBreaks: true,
       finishCommandId: `finish-${suffix}`,
       breakPhase: "short_break",
       breakDurationMs: 300_000,
@@ -1325,8 +1909,10 @@ test("automatic completion atomically claims upgraded same-device timer after re
     leaseMs: 1_000,
     manual: false,
     requireOwner: true,
-    nowMs: 1_000,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    localNowMs: 1_000,
     observedElapsedMs: 1_500_000,
+    autoStartBreaks: true,
     finishCommandId: "finish-restart-race",
     breakPhase: "short_break",
     breakDurationMs: 300_000,
@@ -1360,8 +1946,10 @@ test("manual non-owner finish atomically claims focus and creates provisional br
     leaseMs: 1_000,
     manual: true,
     requireOwner: false,
-    nowMs: 500,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    localNowMs: 500,
     observedElapsedMs: 500,
+    autoStartBreaks: true,
     finishCommandId: "finish-manual-claim",
     breakPhase: "short_break",
     breakDurationMs: 300_000,
@@ -1405,8 +1993,10 @@ test("generated break survives lost response and promotes only after applied fin
     leaseMs: 1_000,
     manual: false,
     requireOwner: true,
-    nowMs: 500,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    localNowMs: 500,
     observedElapsedMs: 1_500_000,
+    autoStartBreaks: true,
     finishCommandId: "finish-dependent-source",
     breakPhase: "short_break",
     breakDurationMs: 300_000,
@@ -1422,14 +2012,7 @@ test("generated break survives lost response and promotes only after applied fin
 
   const acknowledgements = [{ commandId: "finish-dependent-source", outcome: "applied", reason: "" }];
   const canonical = snapshot(1, "user-1", "2026-07-22T12:31:00Z");
-  canonical.canonicalTimer = {
-    id: "owned-focus",
-    phase: "focus",
-    status: "completed",
-    plannedDurationMs: 1_500_000,
-    elapsedAtAnchorMs: 1_500_000,
-    anchorAt: "2026-07-22T12:25:00Z"
-  };
+  canonical.canonicalTimer = null;
   canonical.history = [{
     id: "history-finish-dependent-source",
     timerId: "owned-focus",
@@ -1439,7 +2022,8 @@ test("generated break survives lost response and promotes only after applied fin
     plannedDurationMs: 1_500_000,
     completedAt: "2026-07-22T12:25:00Z"
   }];
-  const updates = sync.generatedBreakUpdates(reloaded.commands, acknowledgements, canonical);
+  const sent = sync.buildSyncBatch(reloaded);
+  const response = reconciliationResponse(canonical, acknowledgements);
   await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
     snapshot: canonical,
@@ -1448,9 +2032,10 @@ test("generated break survives lost response and promotes only after applied fin
       commands: ["finish-dependent-source"],
       taskOperations: [],
       durationOperations: [],
-      autoStartOperations: []
+      autoStartOperations: [],
+      selectedTaskOperations: []
     },
-    ...updates
+    reconciliation: { sent, response, deviceId: "device-owner" }
   });
   const promoted = (await storage.readQueues(instance.database)).commands;
   assert.deepEqual(promoted.map((item) => item.id), ["break-dependent-start"]);
@@ -1538,23 +2123,15 @@ test("provisional chain matrix survives restart and response loss", async () => 
                   completedAt: "2026-07-22T12:25:00Z"
                 }
               ];
-              canonical.canonicalTimer = {
-                id: source.timerId,
-                phase: "focus",
-                status: "completed",
-                plannedDurationMs: 1_500_000,
-                elapsedAtAnchorMs: 1_500_000,
-                anchorAt: "2026-07-22T12:25:00Z"
-              };
+              canonical.canonicalTimer = null;
               const acknowledgements = [{ commandId: source.id, outcome, reason: "" }];
-              let updates = sync.generatedBreakUpdates(pending, acknowledgements, canonical);
+              const sent = sync.buildSyncBatch({ commands: pending });
+              const response = reconciliationResponse(canonical, acknowledgements);
               if (responseLoss) {
-                const firstUpdates = JSON.stringify(updates);
                 instance.database.close();
                 instance.database = await openDatabase(instance.name);
                 pending = (await storage.readQueues(instance.database)).commands;
-                updates = sync.generatedBreakUpdates(pending, acknowledgements, canonical);
-                assert.equal(JSON.stringify(updates), firstUpdates, label);
+                assert.deepEqual(sync.buildSyncBatch({ commands: pending }), sent, label);
               }
               await storage.applySyncResponse(instance.database, {
                 expectedUserId: "user-1",
@@ -1564,9 +2141,10 @@ test("provisional chain matrix survives restart and response loss", async () => 
                   commands: [source.id],
                   taskOperations: [],
                   durationOperations: [],
-                  autoStartOperations: []
+                  autoStartOperations: [],
+                  selectedTaskOperations: []
                 },
-                ...updates
+                reconciliation: { sent, response, deviceId: "device-1" }
               });
               instance.database.close();
               instance.database = await openDatabase(instance.name);
@@ -1596,6 +2174,144 @@ test("provisional chain matrix survives restart and response loss", async () => 
       }
     }
   }
+});
+
+test("sync response planner rereads peer dependency chains at transaction time", async (t) => {
+  const instance = await fixture();
+  const peer = await instance.secondConnection();
+  t.after(() => {
+    peer.close();
+    return instance.close();
+  });
+  const sourceWallMs = Date.parse("2026-07-22T12:25:00Z");
+  const source = {
+    ...command("finish-source", 1, sourceWallMs),
+    timerId: "focus-source",
+    type: "finish"
+  };
+  const rejectedSource = {
+    ...command("finish-rejected", 2, sourceWallMs, 1),
+    timerId: "focus-rejected",
+    type: "finish"
+  };
+  const generatedStart = {
+    ...command("break-start", 3, sourceWallMs, 2),
+    timerId: "break-timer",
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: source.id,
+    generatedBreak: true
+  };
+  const rejectedStart = {
+    ...command("break-rejected", 4, sourceWallMs, 3),
+    timerId: "break-rejected-timer",
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: rejectedSource.id,
+    generatedBreak: true
+  };
+  await seedMeta(instance.database, {
+    snapshot: snapshot(0),
+    hlc: { wallMs: 100, counter: 0 }
+  });
+  await seedQueues(instance.database, {
+    commands: [source, rejectedSource, generatedStart, rejectedStart]
+  });
+  const captured = await storage.readSyncState(instance.database);
+  const sent = sync.buildSyncBatch(captured);
+  assert.deepEqual(sent.commands.map((item) => item.id), [source.id, rejectedSource.id]);
+
+  const survivingPeerCommands = ["pause", "resume"].map((type, index) => ({
+    ...command(`peer-${type}`, index + 5, Date.parse(`2026-07-22T12:3${index + 1}:00Z`)),
+    timerId: generatedStart.timerId,
+    type,
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: source.id
+  }));
+  const droppedPeerCommands = ["pause", "resume"].map((type, index) => ({
+    ...command(`peer-rejected-${type}`, index + 7, Date.parse(`2026-07-22T12:3${index + 3}:00Z`)),
+    timerId: rejectedStart.timerId,
+    type,
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: rejectedSource.id
+  }));
+  await seedQueues(peer, { commands: [...survivingPeerCommands, ...droppedPeerCommands] });
+
+  const canonical = snapshot(1);
+  canonical.history = [{
+    id: "history-finish-source",
+    timerId: source.timerId,
+    commandId: source.id,
+    phase: "focus",
+    status: "completed",
+    plannedDurationMs: 1_500_000,
+    completedAt: "2026-07-22T12:25:00Z"
+  }];
+  const response = {
+    ...canonical,
+    acknowledgements: [
+      { commandId: source.id, outcome: "applied", reason: "" },
+      { commandId: rejectedSource.id, outcome: "rejected", reason: "conflict" }
+    ],
+    taskAcknowledgements: [],
+    durationAcknowledgements: [],
+    autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: [],
+    serverHlcWallMs: Date.parse(canonical.serverTime),
+    serverHlcCounter: 0
+  };
+  const capturedRebase = storage.reconcileState({
+    queues: captured,
+    sent,
+    response,
+    deviceId: "device-1"
+  });
+  const observedTransactionCommands = [];
+  const coreInstance = await authoritativeCore();
+  const trackingCore = {
+    reconcileSynchronizedState(input) {
+      observedTransactionCommands.push(input.local.commands.map((item) => item.id));
+      return coreInstance.reconcileSynchronizedState(input);
+    },
+    projectSynchronizedState: (input) => coreInstance.projectSynchronizedState(input)
+  };
+
+  await storage.applySyncResponse(instance.database, {
+    expectedUserId: "user-1",
+    snapshot: canonical,
+    hlc: { wallMs: 500, counter: 0 },
+    queueIds: {
+      commands: [source.id, rejectedSource.id],
+      taskOperations: [],
+      durationOperations: [],
+      autoStartOperations: [],
+      selectedTaskOperations: []
+    },
+    retainedQueues: capturedRebase.queues,
+    dropCommandIds: capturedRebase.droppedTimerOperationIds,
+    dropTimerIds: capturedRebase.droppedTimerIds,
+    reconciliation: { sent, response, deviceId: "device-1", sharedCore: trackingCore }
+  });
+
+  const surviving = (await storage.readQueues(instance.database)).commands
+    .sort(sync.compareTimerCommands);
+  assert.deepEqual(surviving.map((item) => item.id), [
+    generatedStart.id,
+    ...survivingPeerCommands.map((item) => item.id)
+  ]);
+  assert.ok(surviving.every((item) => !Object.hasOwn(item, "dependsOnCommandId")));
+  assert.deepEqual(sync.buildSyncBatch({ commands: surviving }).commands.map((item) => item.id), [
+    generatedStart.id,
+    ...survivingPeerCommands.map((item) => item.id)
+  ]);
+  assert.equal(observedTransactionCommands.length, 1);
+  assert.deepEqual([...observedTransactionCommands[0]].sort(), [
+    source.id, rejectedSource.id, generatedStart.id, rejectedStart.id,
+    ...survivingPeerCommands.map((item) => item.id),
+    ...droppedPeerCommands.map((item) => item.id)
+  ].sort());
 });
 
 test("normal sync survives every restart checkpoint", async (t) => {
@@ -1666,8 +2382,10 @@ test("ignored finish drops provisional break and rebases to newer canonical time
     leaseMs: 1_000,
     manual: false,
     requireOwner: true,
-    nowMs: 500,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    localNowMs: 500,
     observedElapsedMs: 1_500_000,
+    autoStartBreaks: true,
     finishCommandId: "finish-ignored-source",
     breakPhase: "long_break",
     breakDurationMs: 900_000,
@@ -1685,6 +2403,10 @@ test("ignored finish drops provisional break and rebases to newer canonical time
     elapsedAtAnchorMs: 0,
     anchorAt: "2026-07-22T12:30:00Z"
   };
+  const sent = sync.buildSyncBatch({ commands: pending });
+  const response = reconciliationResponse(canonical, acknowledgements);
+  assert.deepEqual(sent.commands.map((item) => item.id), ["finish-ignored-source"]);
+  assert.doesNotThrow(() => sync.validateAcknowledgements(response, sent));
   await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
     snapshot: canonical,
@@ -1693,9 +2415,10 @@ test("ignored finish drops provisional break and rebases to newer canonical time
       commands: ["finish-ignored-source"],
       taskOperations: [],
       durationOperations: [],
-      autoStartOperations: []
+      autoStartOperations: [],
+      selectedTaskOperations: []
     },
-    ...sync.generatedBreakUpdates(pending, acknowledgements, canonical)
+    reconciliation: { sent, response, deviceId: "device-owner" }
   });
   assert.deepEqual((await storage.readQueues(instance.database)).commands, []);
   assert.equal((await storage.readCanonicalState(instance.database)).snapshot.canonicalTimer.id, "remote-newer");
@@ -1730,7 +2453,7 @@ test("offline cached owner can append locally before a different account discard
   });
   assert.deepEqual((await storage.readQueues(instance.database)).commands.map((item) => item.id).sort(), ["cached", "offline"]);
 
-  assert.deepEqual(sync.decideBootstrap({
+  assert.deepEqual(storage.bootstrapPlan({
     localOwnerId: "user-old",
     currentUserId: "user-new",
     localHistory: [],
@@ -1899,6 +2622,120 @@ test("resolution apply atomically stores exact canonical state and preserves unc
   assert.deepEqual(await storage.readBootstrapState(instance.database), { gate: null, resolution: null });
 });
 
+test("keep-remote reconciliation excludes captured rows and preserves later multi-domain rows", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const capturedQueues = {
+    commands: [command("captured", 1)],
+    taskOperations: [taskOperation("captured-task")],
+    durationOperations: [durationOperation("captured-duration")],
+    autoStartOperations: [autoStartOperation("captured-auto-start")],
+    selectedTaskOperations: [selectedTaskOperation("captured-selected-task", "task-captured-task")]
+  };
+  await seedQueues(instance.database, capturedQueues);
+  await acquire(instance.database);
+  const pending = await capture(instance.database, resolutionInput("keep_remote"));
+  const laterTaskIdentity = (await authoritativeCore()).taskIdentity({ title: "Later task" });
+  const laterQueues = {
+    commands: [command("later", 2, 2)],
+    taskOperations: [{
+      ...taskOperation("later-task", 2),
+      deviceId: "device-1",
+      taskId: laterTaskIdentity.id,
+      title: laterTaskIdentity.title
+    }],
+    durationOperations: [{ ...durationOperation("later-duration"), deviceId: "device-1", hlcWallMs: 2 }],
+    autoStartOperations: [{ ...autoStartOperation("later-auto-start", false, 2), deviceId: "device-1" }],
+    selectedTaskOperations: [{ ...selectedTaskOperation("later-selected-task", null, 2), deviceId: "device-1" }]
+  };
+  await seedQueues(instance.database, laterQueues);
+  const localQueues = await storage.readQueues(instance.database);
+  const canonical = snapshot(4);
+  const response = {
+    ...canonical,
+    acknowledgements: [], taskAcknowledgements: [], durationAcknowledgements: [],
+    autoStartAcknowledgements: [], selectedTaskAcknowledgements: [],
+    serverHlcWallMs: Date.parse(canonical.serverTime), serverHlcCounter: 0
+  };
+  const inMemory = storage.reconcileResolutionState({
+    queues: localQueues,
+    pendingResolution: pending,
+    response,
+    deviceId: "device-1"
+  });
+  const identifiers = (queues) => Object.fromEntries(Object.entries(queues).map(
+    ([field, items]) => [field, items.map((item) => item.id)]
+  ));
+
+  assert.deepEqual(identifiers(inMemory.queues), identifiers(laterQueues));
+  await storage.applyResolution(instance.database, pending, {
+    snapshot: canonical,
+    hlc: { wallMs: Date.parse(canonical.serverTime), counter: 0 },
+    reconciliation: { sent: pending.payload, response, deviceId: "device-1" }
+  });
+  assert.deepEqual(await storage.readQueues(instance.database), inMemory.queues);
+});
+
+test("resolution apply reconciles peer dependency inserted after capture", async (t) => {
+  const instance = await fixture();
+  const peer = await instance.secondConnection();
+  t.after(() => {
+    peer.close();
+    return instance.close();
+  });
+  const sourceWallMs = Date.parse("2026-07-22T12:25:00Z");
+  const source = {
+    ...command("bootstrap-finish", 1, sourceWallMs),
+    timerId: "bootstrap-focus",
+    type: "finish"
+  };
+  const generatedStart = {
+    ...command("bootstrap-break", 2, sourceWallMs, 1),
+    timerId: "bootstrap-break-timer",
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: source.id,
+    generatedBreak: true
+  };
+  await seedQueues(instance.database, { commands: [source, generatedStart] });
+  await acquire(instance.database);
+  const pending = await capture(instance.database, resolutionInput("merge"));
+  assert.deepEqual(pending.payload.commands.map((item) => item.id), [source.id]);
+  const peerPause = {
+    ...command("peer-break-pause", 3, sourceWallMs, 2),
+    timerId: generatedStart.timerId,
+    type: "pause",
+    phase: "short_break",
+    plannedDurationMs: 300_000,
+    dependsOnCommandId: source.id
+  };
+  await seedQueues(peer, { commands: [peerPause] });
+  const canonical = snapshot(4);
+  canonical.history = [{
+    id: "bootstrap-focus-history", timerId: source.timerId, commandId: source.id,
+    phase: "focus", status: "completed", plannedDurationMs: 1_500_000,
+    completedAt: "2026-07-22T12:25:00Z"
+  }];
+  const response = {
+    ...canonical,
+    acknowledgements: [{ commandId: source.id, outcome: "applied", reason: "" }],
+    taskAcknowledgements: [], durationAcknowledgements: [], autoStartAcknowledgements: [],
+    selectedTaskAcknowledgements: [],
+    serverHlcWallMs: Date.parse(canonical.serverTime), serverHlcCounter: 0
+  };
+
+  await storage.applyResolution(instance.database, pending, {
+    snapshot: canonical,
+    hlc: { wallMs: sourceWallMs, counter: 0 },
+    reconciliation: { sent: pending.payload, response, deviceId: "device-1" }
+  });
+
+  const commands = (await storage.readQueues(instance.database)).commands.sort(sync.compareTimerCommands);
+  assert.deepEqual(commands.map((item) => item.id), [generatedStart.id, peerPause.id]);
+  assert.ok(commands.every((item) => !Object.hasOwn(item, "dependsOnCommandId")));
+  assert.deepEqual(sync.buildSyncBatch({ commands }).commands.map((item) => item.id), [generatedStart.id, peerPause.id]);
+});
+
 test("merge resolution atomically commits combined canonical history and tasks", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
@@ -2008,7 +2845,7 @@ test("waiting tab sees peer-applied owner and queues before planning", async (t)
   assert.equal(persisted.snapshot.user.id, "user-1");
   assert.deepEqual(persisted.commands, []);
   assert.deepEqual(persisted.taskOperations, []);
-  assert.deepEqual(sync.decideBootstrap({
+  assert.deepEqual(storage.bootstrapPlan({
     localOwnerId: persisted.snapshot.user.id,
     currentUserId: "user-1"
   }), { mode: "normal_sync", reason: "same_owner" });
@@ -2351,4 +3188,33 @@ test("malformed normal sync 200 preserves queue and canonical snapshot", async (
   assert.equal((await storage.readCanonicalState(instance.database)).snapshot.revision, 3);
   assert.deepEqual((await storage.readQueues(instance.database)).commands.map((item) => item.id), ["sent"]);
   assert.deepEqual((await storage.readQueues(instance.database)).autoStartOperations.map((item) => item.id), ["sent-auto-start"]);
+});
+
+test("timer ownership release is identity-bound and expires only the matching lease", async (t) => {
+  const instance = await fixture();
+  t.after(() => instance.close());
+  const owner = {
+    timerId: "owned-focus",
+    deviceId: "device-owner",
+    tabId: "tab-owner",
+    leaseExpiresAtMs: 9_000
+  };
+  await seedMeta(instance.database, { timerOwner: owner });
+
+  await storage.releaseTimerOwnership(instance.database, {
+    deviceId: "device-other", tabId: "tab-owner", nowMs: 2_000
+  });
+  assert.deepEqual(await readMeta(instance.database, "timerOwner"), owner);
+  await storage.releaseTimerOwnership(instance.database, {
+    deviceId: "device-owner", tabId: "tab-other", nowMs: 2_000
+  });
+  assert.deepEqual(await readMeta(instance.database, "timerOwner"), owner);
+
+  await storage.releaseTimerOwnership(instance.database, {
+    deviceId: "device-owner", tabId: "tab-owner", nowMs: 2_000
+  });
+  assert.deepEqual(await readMeta(instance.database, "timerOwner"), {
+    ...owner,
+    leaseExpiresAtMs: 2_000
+  });
 });

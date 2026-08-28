@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote
 
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+RETIRED_GITHUB_NAMESPACE = re.compile(
+    r"https?://github\.com/egigoka(?:/|$)", re.IGNORECASE
+)
 IGNORED_PREFIXES = ("http://", "https://", "mailto:", "#", "data:")
 IGNORED_PARTS = {".git", "node_modules", "dist", "build"}
 
 
-def markdown_files(root: Path):
-    for path in root.rglob("*.md"):
+def markdown_files(root: Path, tracked: set[Path]):
+    for path in sorted(path for path in tracked if path.suffix.lower() == ".md"):
         if not any(part in IGNORED_PARTS for part in path.relative_to(root).parts):
             yield path
 
@@ -28,12 +32,28 @@ def link_target(raw: str) -> str:
     return unquote(target.split("#", 1)[0])
 
 
+def tracked_paths(root: Path) -> set[Path]:
+    output = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return {(root / path).resolve() for path in output.split("\0") if path}
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
+    tracked = tracked_paths(root)
     failures: list[str] = []
     checked = 0
-    for document in markdown_files(root):
+    for document in markdown_files(root, tracked):
         text = document.read_text(encoding="utf-8")
+        for match in RETIRED_GITHUB_NAMESPACE.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            failures.append(
+                f"{document.relative_to(root)}:{line}: retired GitHub namespace: {match.group(0)}"
+            )
         for match in LINK.finditer(text):
             raw = match.group(1)
             if raw.startswith(IGNORED_PREFIXES):
@@ -51,6 +71,12 @@ def main() -> int:
             if not resolved.exists():
                 line = text.count("\n", 0, match.start()) + 1
                 failures.append(f"{document.relative_to(root)}:{line}: missing link target: {raw}")
+                continue
+            if resolved not in tracked and not (
+                resolved.is_dir() and any(resolved in path.parents for path in tracked)
+            ):
+                line = text.count("\n", 0, match.start()) + 1
+                failures.append(f"{document.relative_to(root)}:{line}: untracked link target: {raw}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1

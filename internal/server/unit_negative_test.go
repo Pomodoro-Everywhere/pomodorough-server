@@ -243,6 +243,29 @@ func TestParseBootstrapResolutionRejectsKeepRemoteOperations(t *testing.T) {
 	}
 }
 
+func TestClientIPRejectsSpoofedOrMalformedForwarding(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		forwarded  string
+		want       string
+	}{
+		{name: "invalid first hop", remoteAddr: "127.0.0.1:45000", forwarded: "attacker, 203.0.113.9", want: "127.0.0.1"},
+		{name: "non-loopback cannot forward", remoteAddr: "198.51.100.7:45000", forwarded: "203.0.113.9", want: "198.51.100.7"},
+		{name: "malformed remote address", remoteAddr: "not-an-ip", forwarded: "203.0.113.9", want: "not-an-ip"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/", nil)
+			request.RemoteAddr = test.remoteAddr
+			request.Header.Set("X-Forwarded-For", test.forwarded)
+			if got := clientIP(request); got != test.want {
+				t.Fatalf("clientIP = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestValidPlatformRejectsInvalidShape(t *testing.T) {
 	for _, platform := range []string{"", "i", "has space", strings.Repeat("x", 33)} {
 		if validPlatform(platform) {

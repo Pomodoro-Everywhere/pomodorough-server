@@ -15,7 +15,7 @@ TimeoutStartSec=30
 TimeoutStopSec=20
 
 DynamicUser=true
-StateDirectory=pomodorough
+StateDirectory=pomodorough pomodorough-deletion-ledger
 StateDirectoryMode=0700
 UMask=0077
 

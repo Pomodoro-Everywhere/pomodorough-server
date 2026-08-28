@@ -61,13 +61,19 @@ func metricRoute(method, pattern string) string {
 func (m *requestMetrics) writePrometheus(w io.Writer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	requestKeys := make([]requestMetricKey, 0, len(m.requests))
-	for key := range m.requests {
-		requestKeys = append(requestKeys, key)
+	if err := m.writeRequestMetrics(w); err != nil {
+		return err
 	}
-	sort.Slice(requestKeys, func(i, j int) bool {
-		left, right := requestKeys[i], requestKeys[j]
+	return m.writeDurationMetrics(w)
+}
+
+func (m *requestMetrics) writeRequestMetrics(w io.Writer) error {
+	keys := make([]requestMetricKey, 0, len(m.requests))
+	for key := range m.requests {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := keys[i], keys[j]
 		if left.method != right.method {
 			return left.method < right.method
 		}
@@ -79,27 +85,30 @@ func (m *requestMetrics) writePrometheus(w io.Writer) error {
 	if _, err := io.WriteString(w, "# TYPE pomodorough_http_requests_total counter\n"); err != nil {
 		return err
 	}
-	for _, key := range requestKeys {
+	for _, key := range keys {
 		if _, err := fmt.Fprintf(w, "pomodorough_http_requests_total{method=%s,route=%s,status=%s} %d\n",
 			strconv.Quote(key.method), strconv.Quote(key.route), strconv.Quote(strconv.Itoa(key.status)), m.requests[key]); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
-	durationKeys := make([]durationMetricKey, 0, len(m.durationCounts))
+func (m *requestMetrics) writeDurationMetrics(w io.Writer) error {
+	keys := make([]durationMetricKey, 0, len(m.durationCounts))
 	for key := range m.durationCounts {
-		durationKeys = append(durationKeys, key)
+		keys = append(keys, key)
 	}
-	sort.Slice(durationKeys, func(i, j int) bool {
-		if durationKeys[i].method != durationKeys[j].method {
-			return durationKeys[i].method < durationKeys[j].method
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].method != keys[j].method {
+			return keys[i].method < keys[j].method
 		}
-		return durationKeys[i].route < durationKeys[j].route
+		return keys[i].route < keys[j].route
 	})
 	if _, err := io.WriteString(w, "# TYPE pomodorough_http_request_duration_seconds summary\n"); err != nil {
 		return err
 	}
-	for _, key := range durationKeys {
+	for _, key := range keys {
 		labels := fmt.Sprintf("method=%s,route=%s", strconv.Quote(key.method), strconv.Quote(key.route))
 		if _, err := fmt.Fprintf(w, "pomodorough_http_request_duration_seconds_count{%s} %d\n", labels, m.durationCounts[key]); err != nil {
 			return err

@@ -33,48 +33,64 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	requestPath := path.Clean("/" + r.URL.Path)
-	relative, public := publicWebFile(requestPath)
-	entrypoint := relative == "index.html"
-	if !public {
-		if _, err := s.authenticateWeb(r); err != nil {
-			returnTo := r.URL.RequestURI()
-			if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-				returnTo = "/app"
-			}
-			http.Redirect(w, r, "/auth/google/start?return="+url.QueryEscape(returnTo), http.StatusFound)
-			return
-		}
-		if requestPath == "/app" {
-			relative = "app.html"
-			entrypoint = true
-		} else {
-			relative = strings.TrimPrefix(requestPath, "/")
-		}
+	relative, public, ok := s.resolveWebRequest(w, r, requestPath)
+	if !ok {
+		return
 	}
-
-	file, info, err := s.openWebFile(relative)
-	if err != nil && !public && strings.HasPrefix(requestPath, "/app/") && path.Ext(relative) == "" {
-		file, info, err = s.openWebFile("app.html")
-		if err != nil {
-			s.logger.Error("open SPA entrypoint", "error", err)
-			http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		relative = "app.html"
-		entrypoint = true
-	} else if err != nil {
-		if entrypoint {
-			s.logger.Error("open web entrypoint", "path", relative, "error", err)
-			http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		http.NotFound(w, r)
+	file, info, relative, ok := s.openRequestedWebFile(w, r, requestPath, relative, public)
+	if !ok {
 		return
 	}
 	defer file.Close()
+	setStaticHeaders(w, relative)
+	http.ServeContent(w, r, filepath.Base(relative), info.ModTime(), file)
+}
 
+func (s *Server) resolveWebRequest(w http.ResponseWriter, r *http.Request, requestPath string) (string, bool, bool) {
+	relative, public := publicWebFile(requestPath)
+	if public {
+		return relative, true, true
+	}
+	if _, err := s.authenticateWeb(r); err != nil {
+		returnTo := r.URL.RequestURI()
+		if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+			returnTo = "/app"
+		}
+		http.Redirect(w, r, "/auth/google/start?return="+url.QueryEscape(returnTo), http.StatusFound)
+		return "", false, false
+	}
+	if requestPath == "/app" {
+		return "app.html", false, true
+	}
+	return strings.TrimPrefix(requestPath, "/"), false, true
+}
+
+func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, requestPath, relative string, public bool) (*os.File, os.FileInfo, string, bool) {
+	file, info, err := s.openWebFile(relative)
+	entrypoint := relative == "index.html" || relative == "app.html"
+	if err != nil && !public && strings.HasPrefix(requestPath, "/app/") && path.Ext(relative) == "" {
+		file, info, err = s.openWebFile("app.html")
+		if err == nil {
+			return file, info, "app.html", true
+		}
+		s.logger.Error("open SPA entrypoint", "error", err)
+		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
+		return nil, nil, "", false
+	}
+	if err == nil {
+		return file, info, relative, true
+	}
+	if entrypoint {
+		s.logger.Error("open web entrypoint", "path", relative, "error", err)
+		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
+	} else {
+		http.NotFound(w, r)
+	}
+	return nil, nil, "", false
+}
+
+func setStaticHeaders(w http.ResponseWriter, relative string) {
 	extension := strings.ToLower(filepath.Ext(relative))
 	contentType := mime.TypeByExtension(extension)
 	if contentType == "" {
@@ -92,7 +108,6 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Cache-Control", "public, max-age=300")
 	}
-	http.ServeContent(w, r, base, info.ModTime(), file)
 }
 
 func publicWebFile(requestPath string) (string, bool) {

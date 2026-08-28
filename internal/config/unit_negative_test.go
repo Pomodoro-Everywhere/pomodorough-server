@@ -48,3 +48,16 @@ func TestAuthenticationRequiresCompleteConfiguration(t *testing.T) {
 		t.Fatal("NativeAuthEnabled() = true without client IDs")
 	}
 }
+
+func TestLoadRejectsDeletionLedgerInsideDataDirectory(t *testing.T) {
+	for _, value := range []string{"data", "data/deletions"} {
+		t.Run(value, func(t *testing.T) {
+			setConfigEnvironment(t)
+			t.Setenv("DATA_DIR", "data")
+			t.Setenv("DELETION_LEDGER_DIR", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted DELETION_LEDGER_DIR %q inside DATA_DIR", value)
+			}
+		})
+	}
+}

@@ -13,9 +13,19 @@
   <script src="/shared-core-metadata.js?v=1" defer></script>
   <script src="/shared-core.js?v=6" defer></script>
   <script src="/sync-core.js?v=25" defer></script>
-  <script src="/sync-storage.js?v=26" defer></script>
+  <script src="/sync-authority.js?v=1" defer></script>
+  <script src="/sync-storage-uuid.js?v=1" defer></script>
+  <script src="/sync-storage.js?v=27" defer></script>
   <script src="/i18n.js?v=2" defer></script>
-  <script src="/app.js?v=32" defer></script>
+  <script src="/app-runtime.js?v=1" defer></script>
+  <script src="/app-state.js?v=1" defer></script>
+  <script src="/app-storage.js?v=1" defer></script>
+  <script src="/app-actions.js?v=1" defer></script>
+  <script src="/app-sync.js?v=1" defer></script>
+  <script src="/app-bootstrap.js?v=1" defer></script>
+  <script src="/app-session.js?v=1" defer></script>
+  <script src="/app-view.js?v=1" defer></script>
+  <script src="/app.js?v=35" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
@@ -40,7 +50,7 @@
       </div>
       <div id="profile" class="profile" hidden>
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <a class="text-button" href="https://pomodoro-everywhere.github.io/pomodorough-server/privacy/" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
+        <a class="text-button" href="https://pomodorough.egigoka.me/privacy" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
         <button id="logoutButton" class="text-button" type="button" data-i18n="account.signOut">Sign out</button>
         <button id="deleteAccountButton" class="text-button action-danger" type="button" data-i18n="account.delete">Delete account</button>
       </div>
@@ -103,8 +113,8 @@
 
     <aside id="conflictPanel" class="conflict-panel" hidden>
       <div>
-        <strong data-i18n="conflict.title">Timer continued elsewhere</strong>
-        <span id="conflictReason" data-i18n="conflict.reason">Newer account state arrived during sync.</span>
+        <strong data-i18n="conflict.title">Sync needs attention</strong>
+        <span id="conflictReason" data-i18n="conflict.reason">A synchronized change was rejected.</span>
       </div>
       <button id="conflictDismiss" class="text-button" type="button" data-i18n="action.dismiss">Dismiss</button>
     </aside>
@@ -283,7 +293,7 @@
 
   <footer class="site-footer">
     <span data-i18n="footer.local">Local clock / shared account</span>
-    <a href="https://pomodoro-everywhere.github.io/pomodorough-server/privacy/" data-i18n="account.privacy">Privacy</a>
+    <a href="https://pomodorough.egigoka.me/privacy" data-i18n="account.privacy">Privacy</a>
     <span><span data-i18n="footer.device">Device</span> <b id="deviceMark">----</b></span>
   </footer>
 </body>
