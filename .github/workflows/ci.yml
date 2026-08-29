@@ -37,6 +37,7 @@ jobs:
             cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked
           )
           rebuilt=shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
+          python3 shared-core/scripts/canonicalize_wasm_artifact.py "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \

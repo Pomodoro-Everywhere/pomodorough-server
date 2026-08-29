@@ -251,6 +251,7 @@ func TestServerCIRebuildsPinnedCoreArtifact(t *testing.T) {
 		"ref: " + commit,
 		"cd shared-core",
 		"cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked",
+		"shared-core/scripts/canonicalize_wasm_artifact.py",
 		"shared-core/scripts/verify_wasm_artifact.py",
 		"scripts/verify_shared_core_provenance.py",
 		`"$rebuilt"`,
@@ -271,6 +272,7 @@ func TestServerReleaseRebuildsPinnedCoreArtifact(t *testing.T) {
 	for _, required := range []string{
 		"repository: Pomodoro-Everywhere/pomodorough-core",
 		"Rebuild and verify embedded shared core",
+		"shared-core/scripts/canonicalize_wasm_artifact.py",
 		"scripts/verify_shared_core_provenance.py",
 		"internal/sharedcore/pomodorough_core.wasm",
 		"web/pomodorough_core.wasm",
