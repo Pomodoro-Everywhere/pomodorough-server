@@ -307,7 +307,7 @@ test("shared WASM core exposes its pinned version", async () => {
   const core = await loadCore();
   assert.deepEqual(core.call("core.version", {}), {
     schemaVersion: 1,
-    coreVersion: "0.1.7"
+    coreVersion: "0.6.0"
   });
 });
 
