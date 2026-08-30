@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const actionModule = require("./app-actions.js");
 const bootstrapModule = require("./app-bootstrap.js");
@@ -14,12 +15,12 @@ function baseState(overrides = {}) {
     bootstrapPlan: null, bootstrapPreview: { revision: 3, history: [] }, bootstrapStrategy: null,
     bootstrapSubmitting: false, conflict: null, csrfToken: "csrf", deviceId: "device-1",
     deviceSequence: 0, durationsMs: { focus: 1_500_000, short_break: 300_000 }, history: [],
-    hlcCounter: 0, hlcWallMs: 0, localOwnerId: "user-1", pending: [],
+    hlcCounter: 0, hlcWallMs: 0, localOwnerId: incarnationFixture.ownerId("user-1"), pending: [],
     pendingAutoStartOperations: [], pendingDurationOperations: [], pendingSelectedTaskOperations: [],
     pendingTaskOperations: [], ready: true, retrying: false, selectedPhase: "focus",
     selectedTaskId: null, sessionIdentityValidated: true, syncing: false, tasks: [],
     timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1000 },
-    user: { id: "user-1" }, ...overrides
+    user: incarnationFixture.accountUser("user-1"), ...overrides
   };
 }
 
@@ -36,6 +37,7 @@ function actionFixture(overrides = {}) {
     ...overrides.host
   };
   const syncStorage = {
+    AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
     cancelAndClearTimer: async () => ({ transitioned: false }),
     finishAppliedPlan: (input) => ({
       selectedPhase: input.phase === "focus" ? "short_break" : "focus"
@@ -44,7 +46,9 @@ function actionFixture(overrides = {}) {
     renewTimerOwnership: async () => {}, ...overrides.syncStorage
   };
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     controlsBlocked: () => false, clone: structuredClone, database: () => ({}),
+    assertExpectedAccount: (expectedUserId) => assert.equal(incarnationFixture.sync.accountOwnerId(state.user), expectedUserId),
     elapsedFor: () => 1000, phaseConfig: () => ({ focus: {}, short_break: {}, long_break: {} }),
     phaseLabel: (phase) => phase, settingsValue: () => ({}), tabId: () => "tab-1",
     trustedNow: (value = 1000) => value, rebuildOptimisticState: () => calls.push("rebuild"),
@@ -58,7 +62,7 @@ function actionFixture(overrides = {}) {
     persistCommand: async () => { throw new Error("command write failed"); },
     sharedTaskIdentity: async (title) => ({ id: title, title }), ...overrides.use
   };
-  const actions = actionModule.create({ state, external: { host, syncStorage }, use });
+  const actions = actionModule.create({ state, external: { host, syncStorage, syncCore: incarnationFixture.sync }, use });
   return { actions, calls, host, state, timers, use };
 }
 
@@ -118,6 +122,7 @@ function bootstrapFixture(overrides = {}) {
   class BootstrapGateError extends Error {}
   class ResolutionLimitError extends Error {}
   const syncCore = {
+    ...incarnationFixture.sync,
     canExposeOwnerState: () => true, canSubmitResolution: (_mode, confirmed) => confirmed,
     hasLocalState: (local) => local.history.length > 0, hasRemoteState: (remote) => remote.history.length > 0,
     isResolutionStrategy: (strategy) => ["keep_local", "keep_remote"].includes(strategy),
@@ -129,6 +134,7 @@ function bootstrapFixture(overrides = {}) {
     }, ...overrides.syncCore
   };
   const syncStorage = {
+    AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
     BootstrapGateError, ResolutionLimitError, allocateClockRequestSequence: async () => 1,
     applyResolution: async () => ({ applied: true }), bootstrapPlan: ({ hasLocalState, hasRemoteState }) =>
       hasLocalState && hasRemoteState ? { mode: "choose" } : { mode: "automatic", strategy: hasLocalState ? "keep_local" : "keep_remote" },
@@ -136,12 +142,13 @@ function bootstrapFixture(overrides = {}) {
     clearBootstrapGate: async () => calls.push("clearGate"), invalidateForeignResolution: async () => ({ acquired: true, resolution: null }),
     migrateLegacyAutoStart: async () => ({ operation: "auto" }), migrateLegacySelectedTask: async () => ({ operation: "task" }),
     normalizeLegacyDurationOperations: async () => ({ resolution: null }), readBootstrapState: async () => ({ gate: null, resolution: null }),
-    readSyncState: async () => ({ snapshot: { user: { id: "other-user" } } }),
+    readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("other-user") } }),
     reconcileResolutionState: ({ queues }) => ({ revision: 4, baseTimer: null, baseHistory: [], baseTasks: [],
       baseDurationsMs: state.durationsMs, baseAutoStartBreaks: false, baseSelectedTaskId: null, queues }),
     saveClockOffset: async (_db, offset) => offset, validatePendingForSend: async () => {}, ...overrides.syncStorage
   };
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     acquireBootstrapGate: async () => ({ acquired: true }), clone: structuredClone, database: () => ({}),
     defaultDurationsMs: () => state.durationsMs, emptyTimer: (phase, duration) => ({ phase, plannedDurationMs: duration }),
     hasPendingOperations: () => false, mergeServerHlc: () => ({ wallMs: 0, counter: 0 }), normalizeDurationsMs: (value) => value,
@@ -157,7 +164,7 @@ function bootstrapFixture(overrides = {}) {
   };
   const host = {
     console: { warn: (...args) => calls.push(["warn", ...args]) }, crypto: { randomUUID: () => "request-1" },
-    fetch: async () => ({ ok: true, status: 200, json: async () => state.bootstrapPreview }),
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ ...state.bootstrapPreview, accountIncarnation: state.user.accountIncarnation }) }),
     navigator: { onLine: true }, setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
     ...overrides.host
   };
@@ -187,17 +194,17 @@ test("invalid persisted bootstrap requests revalidate identity or resume exact o
   await foreign.actions.recoverInvalidBootstrapSubmission();
   assert.ok(foreign.calls.includes("revalidate"));
 
-  const own = bootstrapFixture({ syncStorage: { readBootstrapState: async () => ({ resolution: { userId: "user-1", payload: { strategy: "keep_remote" } } }) } });
+  const own = bootstrapFixture({ syncStorage: { readBootstrapState: async () => ({ resolution: { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } } }) } });
   await own.actions.recoverInvalidBootstrapSubmission();
   assert.equal(own.state.bootstrapGateOwned, false);
   own.timers[0].callback();
   await Promise.resolve();
-  assert.equal(own.state.bootstrapPending.userId, "user-1");
+  assert.equal(own.state.bootstrapPending.userId, incarnationFixture.ownerId("user-1"));
 });
 
 test("bootstrap transport handles authentication, both conflict classes, and server failure", async () => {
   const fixture = bootstrapFixture();
-  const pending = { userId: "user-1", payload: { strategy: "keep_remote" } };
+  const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
   fixture.use.postMutation = async () => ({ response: { status: 401 }, timing: {} });
   await fixture.actions.sendBootstrapResolution(pending);
   assert.ok(fixture.calls.includes("login"));
@@ -210,7 +217,7 @@ test("bootstrap transport handles authentication, both conflict classes, and ser
 });
 
 test("bootstrap preparation resumes matching persisted state and defers a live foreign gate", async () => {
-  const matching = bootstrapFixture({ syncStorage: { readSyncState: async () => ({ snapshot: { user: { id: "user-1" } } }) } });
+  const matching = bootstrapFixture({ syncStorage: { readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("user-1") } }) } });
   assert.equal(await matching.actions.acquireBootstrapPreparationGate(), true);
   assert.equal(matching.state.bootstrapBlocked, false);
   assert.ok(matching.calls.includes("clearGate"));
@@ -292,10 +299,12 @@ function viewFixture(overrides = {}) {
     setTimeout(callback) { callback(); return 1; }
   };
   const syncCore = {
+    ...incarnationFixture.sync,
     bootstrapDialogView: () => ({ open: false }), completedHistoryCount: (history = []) => history.length,
     confirmationFor: () => ({ title: "Confirm", message: "Apply this choice?", confirmLabel: "Apply" })
   };
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     activeCompletionAlertTimerId: () => null, addTask: async () => true, cancelAndClearTimer: () => calls.push("cancel"),
     chooseBootstrapStrategy: (...args) => calls.push(["choose", ...args]), clampNumber: (value, min, max) => Math.max(min, Math.min(max, Number(value))),
     clearLocalData: async () => calls.push("clear"), closeRevisionStreamForIdentityChange: () => calls.push("close"),
@@ -416,7 +425,7 @@ test("bootstrap submission boundaries preserve persisted intent and expose recov
 });
 
 test("bootstrap retries and preparation distinguish stale identity, live gates, and resumable state", async () => {
-  const pending = { userId: "user-1", payload: { strategy: "keep_remote" } };
+  const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
   const gated = bootstrapFixture({ state: { bootstrapPending: pending, bootstrapSubmitting: true } });
   await gated.actions.submitBootstrapResolution();
   gated.state.bootstrapSubmitting = false;
@@ -550,7 +559,7 @@ test("view event failures and timer states fail safely while the full renderer s
 });
 
 test("bootstrap conflict retry rotates requests and handles invalid or oversized persisted choices", async () => {
-  const pending = { userId: "user-1", payload: { strategy: "keep_remote" } };
+  const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
   const invalid = bootstrapFixture({ state: {
     bootstrapPending: pending, bootstrapConflict: true, bootstrapStrategy: "unknown"
   } });

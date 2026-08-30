@@ -1185,6 +1185,7 @@ test("projection failure rolls back every synchronized mutation domain", async (
       const beforeCanonical = await storage.readCanonicalState(instance.database);
 
       await assert.rejects(storage.allocateMutation(instance.database, {
+        expectedUserId: "user-1",
         ...item,
         nowMs: 200,
         withUuidV7: true,
@@ -1321,6 +1322,7 @@ test("authoritative timer projection permits a newer pause to reactivate canonic
   await seedQueues(instance.database, { commands: [pause] });
 
   const result = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "reactivated-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1375,6 +1377,7 @@ test("authoritative timer projection permits cancel and clear after reactivation
   await seedQueues(instance.database, { commands: [pause] });
 
   const result = await storage.cancelAndClearTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "reactivated-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1401,6 +1404,7 @@ test("durable timer projection failure aborts before queue clock or UUID mutatio
   const beforeState = await storage.readCanonicalState(instance.database);
 
   await assert.rejects(storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1436,6 +1440,7 @@ test("two tabs racing Finish persist exactly one transition", async (t) => {
     hlc: { wallMs: 100, counter: 0 }
   });
   const input = {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1463,7 +1468,7 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
   const instance = await fixture();
   t.after(() => instance.close());
   await seedMeta(instance.database, {
-    snapshot: runningFocusSnapshot(),
+    snapshot: { ...runningFocusSnapshot(), autoStartBreaks: true },
     deviceSequence: 0,
     hlc: { wallMs: 100, counter: 0 },
     timerOwner: {
@@ -1475,6 +1480,7 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
   });
 
   const result = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1540,6 +1546,7 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
   await seedQueues(instance.database, { commands: [start] });
 
   const result = await storage.cancelAndClearTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "generated-break",
     phase: "short_break",
     deviceId: "device-owner",
@@ -1567,6 +1574,7 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
     .sort((left, right) => left.deviceSequence - right.deviceSequence);
   assert.deepEqual(persisted.map((item) => item.type), ["start", "cancel", "clear"]);
   assert.deepEqual(await storage.cancelAndClearTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "generated-break",
     phase: "short_break",
     deviceId: "device-owner",
@@ -1641,6 +1649,7 @@ test("mutation allocation rejects unsafe sequence and counter atomically", async
 
 test("focus ownership lease blocks live peers and allows same-device restart reclaim", async (t) => {
   const instance = await fixture();
+  await seedQueues(instance.database, { autoStartOperations: [autoStartOperation("p222-lease-auto-start", true)] });
   const staleTab = await instance.secondConnection();
   t.after(() => {
     staleTab.close();
@@ -1652,6 +1661,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
     hlc: { wallMs: 100, counter: 0 }
   });
   const started = await storage.allocateMutation(instance.database, {
+    expectedUserId: "user-1",
     storeName: "pending",
     nowMs: 100,
     withDeviceSequence: true,
@@ -1671,6 +1681,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     deviceId: "device-owner",
     tabId: "tab-owner",
@@ -1681,6 +1692,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
   const completion = (database, deviceId, tabId, nowMs, suffix) => storage.finishTimer(
     database,
     {
+      expectedUserId: "user-1",
       timerId: "owned-focus",
       phase: "focus",
       deviceId,
@@ -1755,6 +1767,7 @@ test("sync install migrates missing owner only from same-device canonical start 
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "upgraded-focus",
     deviceId: "device-owner",
     tabId: "tab-reopened",
@@ -1762,6 +1775,7 @@ test("sync install migrates missing owner only from same-device canonical start 
     leaseMs: 1_000
   }), false);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "upgraded-focus",
     deviceId: "device-owner",
     tabId: "tab-reopened",
@@ -1797,6 +1811,7 @@ test("bootstrap install never migrates missing owner from remote canonical start
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "remote-focus",
     deviceId: "device-observer",
     tabId: "tab-observer-reopened",
@@ -1804,6 +1819,7 @@ test("bootstrap install never migrates missing owner from remote canonical start
     leaseMs: 1_000
   }), false);
   const outcome = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "remote-focus",
     phase: "focus",
     deviceId: "device-observer",
@@ -1856,6 +1872,7 @@ test("acknowledged local start is not retained ownership evidence for remote can
 
   assert.deepEqual((await storage.readQueues(instance.database)).commands, []);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "remote-focus",
     deviceId: "device-observer",
     tabId: "tab-observer",
@@ -1879,6 +1896,7 @@ test("explicit remote start evidence overrides retained same-ID local command", 
   await seedQueues(instance.database, { commands: [localStart] });
 
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "shared-focus",
     deviceId: "device-observer",
     tabId: "tab-observer",
@@ -1890,6 +1908,7 @@ test("explicit remote start evidence overrides retained same-ID local command", 
 test("automatic completion atomically claims upgraded same-device timer after restart", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
+  await seedQueues(instance.database, { autoStartOperations: [autoStartOperation("p222-restart-auto-start", true)] });
   const upgraded = runningFocusSnapshot(1, "restart-race-focus");
   upgraded.canonicalTimer.startedByDeviceId = "device-owner";
   await seedMeta(instance.database, {
@@ -1902,6 +1921,7 @@ test("automatic completion atomically claims upgraded same-device timer after re
   instance.database = await openDatabase(instance.name);
 
   const outcome = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "restart-race-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -1927,6 +1947,7 @@ test("automatic completion atomically claims upgraded same-device timer after re
 test("manual non-owner finish atomically claims focus and creates provisional break", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
+  await seedQueues(instance.database, { autoStartOperations: [autoStartOperation("p222-manual-auto-start", true)] });
   await seedMeta(instance.database, {
     snapshot: runningFocusSnapshot(),
     deviceSequence: 0,
@@ -1939,6 +1960,7 @@ test("manual non-owner finish atomically claims focus and creates provisional br
     }
   });
   const result = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-observer",
@@ -1960,6 +1982,7 @@ test("manual non-owner finish atomically claims focus and creates provisional br
   assert.equal(result.commands[1].dependsOnCommandId, "finish-manual-claim");
   assert.equal(result.commands[1].generatedBreak, true);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "break-timer-manual-claim",
     deviceId: "device-observer",
     tabId: "tab-observer",
@@ -1975,7 +1998,7 @@ test("generated break survives lost response and promotes only after applied fin
   const instance = await fixture();
   t.after(() => instance.close());
   await seedMeta(instance.database, {
-    snapshot: runningFocusSnapshot(),
+    snapshot: { ...runningFocusSnapshot(), autoStartBreaks: true },
     deviceSequence: 0,
     hlc: { wallMs: 100, counter: 0 },
     timerOwner: {
@@ -1986,6 +2009,7 @@ test("generated break survives lost response and promotes only after applied fin
     }
   });
   const result = await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -2375,6 +2399,7 @@ test("ignored finish drops provisional break and rebases to newer canonical time
     }
   });
   await storage.finishTimer(instance.database, {
+    expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
     deviceId: "device-owner",
@@ -2423,6 +2448,7 @@ test("ignored finish drops provisional break and rebases to newer canonical time
   assert.deepEqual((await storage.readQueues(instance.database)).commands, []);
   assert.equal((await storage.readCanonicalState(instance.database)).snapshot.canonicalTimer.id, "remote-newer");
   assert.equal(await storage.renewTimerOwnership(instance.database, {
+    expectedUserId: "user-1",
     timerId: "break-ignored-timer",
     deviceId: "device-owner",
     tabId: "tab-owner",
@@ -2446,6 +2472,7 @@ test("offline cached owner can append locally before a different account discard
   await storage.clearBootstrapGate(instance.database, "offline-tab");
 
   await storage.allocateMutation(instance.database, {
+    expectedUserId: "user-old",
     storeName: "pending",
     nowMs: 101,
     withDeviceSequence: true,

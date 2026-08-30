@@ -85,6 +85,7 @@
   function initialBootstrapState() {
     return {
       bootstrapBlocked: true, bootstrapPreview: null, bootstrapPlan: null,
+      bootstrapOwnershipConfirmation: false, bootstrapOwnershipApproved: false,
       bootstrapStrategy: null, bootstrapPending: null, bootstrapSubmitting: false,
       bootstrapConflict: false, bootstrapError: null, bootstrapLimitError: null,
       bootstrapGatePersisted: false, bootstrapGateOwned: false, bootstrapFocusTarget: null
@@ -94,6 +95,7 @@
   function createState(host = globalThis) {
     return {
       ready: false, authenticated: false, sessionIdentityValidated: false,
+      logoutRecoveryRequired: false, logoutRecoveryBusy: false,
       offlineOwnerMode: false, user: null, csrfToken: null, deviceId: null,
       deviceSequence: 0, hlcWallMs: 0, hlcCounter: 0, clockOffset: null,
       activeScreen: "timer", syncing: false, retrying: false, conflict: null,
@@ -109,14 +111,14 @@
   const manifest = Object.freeze({
     name: "state",
     externals: ["host", "sharedCoreHost", "syncCore", "syncStorage"],
-    requires: ["activeCompletionAlertTimerId", "stopCompletionAlert"],
+    requires: ["activeCompletionAlertTimerId", "stopCompletionAlert", "queueSessionRevalidation"],
     provides: [
       "clone", "emptyTimer", "controlsBlocked", "normalizeTimer", "loadSharedCore",
       "sharedTaskIdentity", "positiveNumber", "clampNumber", "selectedDurationMs",
       "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
       "compareTimerCommands", "trustedNow", "monotonicNow", "elapsedFor", "projectOwnerState",
       "rebuildOptimisticState", "ownerStateValue", "resetOwnerState", "quarantineOwnerState",
-      "restoreOwnerState", "tr", "phaseLabel", "phaseShortLabel", "timerStatusLabel",
+      "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "tr", "phaseLabel", "phaseShortLabel", "timerStatusLabel",
       "setI18nForTest", "phaseConfig", "defaultDurationsMs", "tabId"
     ],
     emits: [],
@@ -236,8 +238,8 @@
   }
 
   class OwnerStateProjector {
-    constructor(state, syncCore, syncStorage, use, clock) {
-      Object.assign(this, { state, syncCore, syncStorage, use, clock });
+    constructor(state, syncCore, syncStorage, use, clock, host) {
+      Object.assign(this, { state, syncCore, syncStorage, use, clock, host });
     }
 
     actions() {
@@ -245,18 +247,18 @@
         "emptyTimer", "controlsBlocked", "normalizeTimer", "selectedDurationMs",
         "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
         "projectOwnerState", "rebuildOptimisticState", "ownerStateValue", "resetOwnerState",
-        "quarantineOwnerState", "restoreOwnerState", "phaseConfig", "defaultDurationsMs", "tabId"
+        "quarantineOwnerState", "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "phaseConfig", "defaultDurationsMs", "tabId"
       ]);
     }
 
     controlsBlocked() {
-      return !this.state.ready || this.needsBootstrap();
+      return !this.state.ready || this.state.logoutRecoveryRequired || this.needsBootstrap();
     }
 
     needsBootstrap() {
       return this.syncCore.requiresBootstrapResolution({
         blocked: this.state.bootstrapBlocked, persistedGate: this.state.bootstrapGatePersisted,
-        pending: this.state.bootstrapPending, currentUserId: this.state.user?.id,
+        pending: this.state.bootstrapPending, currentUserId: this.syncCore.accountOwnerId(this.state.user),
         localOwnerId: this.state.localOwnerId
       });
     }
@@ -372,6 +374,39 @@
       if (user) this.state.user = user;
     }
 
+    quarantineAccountMismatch() {
+      this.state.bootstrapBlocked = true;
+      this.state.sessionIdentityValidated = false;
+      this.state.offlineOwnerMode = false;
+      this.state.bootstrapGateOwned = false;
+      this.use.stopCompletionAlert();
+      this.quarantineOwnerState(true);
+      this.use.queueSessionRevalidation();
+    }
+
+    captureAccountContext() {
+      const ownerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+      const localOwnerId = this.state.localOwnerId;
+      const marker = () => {
+        try { return JSON.stringify([this.host.localStorage?.getItem("pomodoroughPendingLogout"),
+          this.host.localStorage?.getItem("pomodoroughPendingLogoutOwner")]); }
+        catch { return "unavailable"; }
+      };
+      const logoutMarker = marker();
+      return { ownerId, localOwnerId, expectedUserId: localOwnerId || null, currentUserId: ownerId, assertCurrent: () => {
+        if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) !== ownerId
+          || this.state.localOwnerId !== localOwnerId || marker() !== logoutMarker) {
+          throw new this.syncStorage.AccountOwnershipError();
+        }
+      } };
+    }
+
+    assertExpectedAccount(expectedUserId) {
+      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) === expectedUserId) return;
+      this.quarantineAccountMismatch();
+      throw new this.syncStorage.AccountOwnershipError();
+    }
+
     restoreOwnerState(local) {
       const fields = [
         "revision", "selectedPhase", "baseSelectedTaskId", "selectedTaskId",
@@ -390,7 +425,7 @@
 
   function create({ state, external, use }) {
     const clock = new TrustedClock(state, external.host, external.syncCore);
-    const owner = new OwnerStateProjector(state, external.syncCore, external.syncStorage, use, clock);
+    const owner = new OwnerStateProjector(state, external.syncCore, external.syncStorage, use, clock, external.host);
     const language = new LanguageCatalog();
     const sharedTasks = new SharedTaskCore(external.sharedCoreHost);
     return {

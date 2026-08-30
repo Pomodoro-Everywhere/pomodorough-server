@@ -29,6 +29,10 @@
   "account.logout.cleanupFailed": "‏⟦Sïgnëd-öût löcàl dàtà cöûld nöt bë clëàrëd: {error}⟧‏",
   "account.logout.failed": "‏⟦Sïgn öût fàïlëd ({status}).⟧‏",
   "account.logout.revocationPending": "‏⟦Pëndïng sïgn-öût cöûld nöt bë rëvökëd yët.⟧‏",
+  "account.logout.recoveryTitle": "‏⟦Fïnïsh pëndïng sïgn-öût⟧‏",
+  "account.logout.recoverySummary": "‏⟦Fïnïsh sïgn-öût bëförë ûsïng löcàl dàtà. Cönnëct ànd sïgn ïn tö thë àccöûnt thàt öwns thë pëndïng dàtà, thën rëtry. Å dïffërënt àccöûnt cànnöt clëàr ït.⟧‏",
+  "account.logout.recoveryRetry": "‏⟦Rëtry sïgn-öût clëànûp⟧‏",
+  "account.logout.recoverySignIn": "‏⟦Sïgn ïn tö rëcövër⟧‏",
   "account.delete.httpFailed": "‏⟦Åccöûnt dëlëtïön fàïlëd ({status}).⟧‏",
   "sync.label": "‏⟦Lïnë stàtûs⟧‏",
   "sync.checking": "‏⟦Chëckïng lïnë⟧‏",
@@ -202,5 +206,6 @@
   "notice.taskSaveFailed": "‏⟦Tàsk chàngë cöûld nöt bë sàvëd.⟧‏",
   "notice.timerSaveFailed": "‏⟦Tïmër àctïön cöûld nöt bë sàvëd.⟧‏",
   "notice.phaseSaveFailed": "‏⟦Phàsë chöïcë cöûld nöt bë sàvëd.⟧‏",
-  "notice.taskAddFailed": "‏⟦Tàsk cöûld nöt bë àddëd.⟧‏"
+  "notice.taskAddFailed": "‏⟦Tàsk cöûld nöt bë àddëd.⟧‏",
+  "bootstrap.ownershipChanged": "‏⟦Account ownership changed or predates incarnation validation. Retained work cannot be uploaded to this account. Keep remote explicitly discards retained local work; cancel leaves it untouched.⟧‏"
 }

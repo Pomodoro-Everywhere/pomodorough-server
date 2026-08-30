@@ -118,6 +118,37 @@
       && !input.pending;
   }
 
+  function validAccountIncarnation(value) {
+    return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  }
+
+  function accountOwnerId(user) {
+    if (user == null) return null;
+    if (typeof user.id !== "string" || !user.id) throw new TypeError("Invalid account identity.");
+    if (!Object.prototype.hasOwnProperty.call(user, "accountIncarnation")) return user.id;
+    if (!validAccountIncarnation(user.accountIncarnation)) throw new TypeError("Invalid account incarnation.");
+    return `account:v1:${user.accountIncarnation}`;
+  }
+
+  function authenticatedOwnerId(user) {
+    if (!validAccountIncarnation(user?.accountIncarnation)) {
+      throw new Error("Account incarnation unavailable. Reconnect before reconciling retained local work.");
+    }
+    return accountOwnerId(user);
+  }
+
+  function accountHeaders(ownerId) {
+    if (typeof ownerId !== "string" || !ownerId.startsWith("account:v1:")
+      || !validAccountIncarnation(ownerId.slice(11))) throw new Error("Validated account incarnation required.");
+    return { "X-Pomodorough-Account-Incarnation": ownerId.slice(11) };
+  }
+
+  function assertResponseAccount(payload, expectedOwnerId) {
+    if (accountOwnerId({ id: "response", accountIncarnation: payload?.accountIncarnation }) !== expectedOwnerId) {
+      throw new Error("Response account incarnation changed. Retained local work was not applied.");
+    }
+  }
+
   function pendingMatchesUser(pending, userId) {
     return Boolean(pending && userId && pending.userId === userId);
   }
@@ -545,6 +576,7 @@
         method: "POST",
         credentials: "same-origin",
         headers: {
+          ...input.headers,
           "Content-Type": "application/json",
           "X-CSRF-Token": csrfToken
         },
@@ -565,6 +597,11 @@
   }
 
   return Object.freeze({
+    accountOwnerId,
+    authenticatedOwnerId,
+    validAccountIncarnation,
+    accountHeaders,
+    assertResponseAccount,
     autoStartRequestOperation,
     bootstrapDialogView,
     buildResolutionPayload,

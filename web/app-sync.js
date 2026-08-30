@@ -20,6 +20,7 @@
     name: "sync",
     externals: ["host", "syncCore", "syncStorage"],
     requires: [
+      "captureAccountContext",
       "clone", "normalizeTimer", "emptyTimer", "selectedDurationMs", "normalizeDurationsMs",
       "selectedPhaseAfterCommandAcknowledgements", "snapshotValue", "settingsValue", "tabId",
       "reloadPersistedState", "database", "setInFlightDurationOperationIds", "stopCompletionAlert",
@@ -133,8 +134,12 @@
     }
 
     async acceptSyncResponse(payload, sent, expectedUserId, timing) {
+      const context = this.use.captureAccountContext();
+      if (context.ownerId !== expectedUserId) throw new this.syncStorage.AccountOwnershipError();
+      this.syncCore.assertResponseAccount(payload, expectedUserId);
       const validated = this.syncCore.validateCanonicalResponse(payload, sent);
       await this.waitForUnlockedAction();
+      context.assertCurrent();
       this.state.actionLocked = true;
       try {
         const rebased = this.syncStorage.reconcileState({
@@ -148,7 +153,9 @@
         });
         const next = this.syncResponseState(payload, rebased, validated, timing);
         const input = this.syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next);
+        input.assertCurrent = context.assertCurrent;
         const outcome = await this.syncStorage.applySyncResponse(this.use.database(), input);
+        context.assertCurrent();
         await this.use.reloadPersistedState();
         if (outcome.applied) this.state.selectedPhase = next.selectedPhase;
         if (outcome.applied && next.conflicts.length) {
@@ -202,8 +209,11 @@
     }
 
     async refreshAllPendingOperations() {
-      await this.syncStorage.normalizeLegacyDurationOperations(this.use.database());
-      const queues = await this.syncStorage.readQueues(this.use.database());
+      const context = this.use.captureAccountContext();
+      await this.syncStorage.normalizeLegacyDurationOperations(this.use.database(), context);
+      const queues = await this.syncStorage.readSyncState(this.use.database());
+      context.assertCurrent();
+      this.syncStorage.assertAccountOwnership(queues.snapshot, context.ownerId);
       this.state.pending = (queues.commands || []).sort(this.syncCore.compareTimerCommands);
       this.state.pendingTaskOperations = queues.taskOperations || [];
       this.state.pendingDurationOperations = (queues.durationOperations || []).sort(this.use.compareDurationOperations);
@@ -213,6 +223,7 @@
     }
 
     async syncPreflight(force) {
+      const context = this.use.captureAccountContext();
       if (!this.state.ready || this.needsBootstrapResolution() || !this.state.sessionIdentityValidated
         || !this.state.authenticated || !this.state.csrfToken || !this.host.navigator.onLine) {
         this.use.renderSyncStatus();
@@ -220,6 +231,7 @@
       }
       try {
         const bootstrapState = await this.syncStorage.readBootstrapState(this.use.database());
+        context.assertCurrent();
         if (bootstrapState.gate || bootstrapState.resolution) {
           this.blockSyncForBootstrap(bootstrapState);
           return false;
@@ -233,6 +245,7 @@
       }
       try {
         await this.refreshAllPendingOperations();
+        context.assertCurrent();
       } catch (error) {
         this.state.retrying = true;
         this.use.renderSyncStatus();
@@ -267,24 +280,29 @@
     }
 
     async performSync() {
+      const context = this.use.captureAccountContext();
       this.state.syncing = true;
       this.state.retrying = false;
       this.use.renderSyncStatus();
       try {
-        const expectedUserId = this.state.user.id;
+        const expectedUserId = this.syncCore.accountOwnerId(this.state.user);
         const sent = this.currentSyncBatch();
         this.use.setInFlightDurationOperationIds(sent.durationOperations.map((operation) => operation.id));
         const { response, timing } = await this.use.postMutation(
           "/api/v1/sync", this.syncRequestBody(sent), expectedUserId
         );
+        context.assertCurrent();
         if (response.status === 401) {
           this.use.redirectToLogin();
           return;
         }
+        if (response.status === 409) throw new this.syncStorage.AccountOwnershipError();
         if (!response.ok) throw new Error(this.use.tr(
           "sync.failed", { status: response.status }, `Sync failed (${response.status}).`
         ));
-        await this.reconciler.acceptSyncResponse(await response.json(), sent, expectedUserId, timing);
+        const payload = await response.json();
+        context.assertCurrent();
+        await this.reconciler.acceptSyncResponse(payload, sent, expectedUserId, timing);
         if (this.hasPendingOperations()) this.syncAgain = true;
         this.retryDelayMs = 1000;
         this.state.retrying = false;
@@ -331,7 +349,7 @@
     needsBootstrapResolution() {
       return this.syncCore.requiresBootstrapResolution({
         blocked: this.state.bootstrapBlocked, persistedGate: this.state.bootstrapGatePersisted,
-        pending: this.state.bootstrapPending, currentUserId: this.state.user?.id,
+        pending: this.state.bootstrapPending, currentUserId: this.syncCore.accountOwnerId(this.state.user),
         localOwnerId: this.state.localOwnerId
       });
     }

@@ -15,6 +15,8 @@
   const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";
   const BOOTSTRAP_LEASE_MS = 5 * 60_000;
   const TIMER_OWNER_LEASE_MS = 60_000;
+  const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
+  const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
   const ALL_STORES = Object.freeze([
     META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE,
     AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE
@@ -27,14 +29,20 @@
     }));
   }
 
+  function storageFailure(error, use) {
+    if (error.name === "AccountOwnershipError") use.quarantineAccountMismatch();
+    throw error;
+  }
+
   const manifest = Object.freeze({
     name: "storage",
     externals: ["host", "syncCore", "syncStorage"],
     requires: [
+      "captureAccountContext",
       "clone", "emptyTimer", "normalizeTimer", "normalizeDurationsMs", "selectedDurationMs",
       "selectedTaskIdForNextFocus", "compareDurationOperations", "compareTimerCommands",
       "clampNumber", "trustedNow", "elapsedFor", "rebuildOptimisticState",
-      "quarantineOwnerState", "projectOwnerState", "tr", "phaseConfig",
+      "quarantineOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "projectOwnerState", "tr", "phaseConfig",
       "defaultDurationsMs", "tabId"
     ],
     provides: [
@@ -45,22 +53,22 @@
       "refreshMigratedPreferences", "persistSettings", "persistCommand", "persistTaskOperation",
       "persistAutoStartOperation", "persistSelectedTaskOperation", "persistDurationOperation",
       "reloadPersistedState", "clearLocalData", "database", "setDatabaseForTest",
-      "setInFlightDurationOperationIds"
+      "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity"
     ],
     emits: [],
     listens: []
   });
 
   class DatabaseConnection {
-    constructor(host, use) {
-      Object.assign(this, { host, use });
+    constructor(state, external, use) {
+      Object.assign(this, { state, use }, external);
       this.db = null;
     }
 
     actions() {
       return bindActions(this, [
         "openDatabase", "requestResult", "transactionDone", "clearLocalData",
-        "database", "setDatabaseForTest"
+        "database", "setDatabaseForTest", "cleanupIdentity", "assertCleanupIdentity"
       ]);
     }
 
@@ -107,22 +115,89 @@
       });
     }
 
-    async clearLocalData() {
-      if (this.db) {
-        const transaction = this.db.transaction(ALL_STORES, "readwrite");
-        for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
-        await this.transactionDone(transaction);
-        this.db.close();
+    pendingLogoutRecovery() {
+      try {
+        if (this.host.localStorage.getItem(PENDING_LOGOUT_KEY) !== "1") return null;
+        const record = this.host.localStorage.getItem(PENDING_LOGOUT_OWNER_KEY);
+        const userId = JSON.parse(record)?.userId;
+        return typeof userId === "string" && userId ? { record, userId } : null;
+      } catch {
+        return null;
       }
+    }
+
+    cleanupIdentity() {
+      const userId = this.syncCore.accountOwnerId(this.state.user) || null;
+      const localOwnerId = this.state.localOwnerId || null;
+      const recovery = this.pendingLogoutRecovery();
+      return { userId, localOwnerId, recovery, markerState: this.logoutMarkerState(),
+        expectedUserId: recovery?.userId || localOwnerId || userId };
+    }
+
+    logoutMarkerState() {
+      try {
+        return JSON.stringify([
+          this.host.localStorage.getItem(PENDING_LOGOUT_KEY),
+          this.host.localStorage.getItem(PENDING_LOGOUT_OWNER_KEY)
+        ]);
+      } catch {
+        return null;
+      }
+    }
+
+    assertCleanupIdentity(identity) {
+      if ((this.syncCore.accountOwnerId(this.state.user) || null) !== identity.userId
+        || (this.state.localOwnerId || null) !== identity.localOwnerId
+        || identity.userId && identity.userId !== identity.expectedUserId
+        || identity.localOwnerId && identity.localOwnerId !== identity.expectedUserId
+        || this.logoutMarkerState() !== identity.markerState
+        || identity.recovery && this.pendingLogoutRecovery()?.record !== identity.recovery.record) {
+        throw new this.syncStorage.AccountOwnershipError();
+      }
+    }
+
+    confirmCleanupAlreadyComplete(identity) {
+      return this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction, _outcome, abort) => {
+        this.assertCleanupIdentity(identity);
+        const meta = transaction.objectStore(META_STORE);
+        const requests = [
+          meta.get("snapshot"), meta.get("bootstrapResolution"),
+          ...ALL_STORES.slice(1).map((name) => transaction.objectStore(name).count())
+        ];
+        for (const request of requests) {
+          request.onsuccess = () => {
+            if (request.result) abort(new this.syncStorage.AccountOwnershipError());
+          };
+        }
+      }, { expectedUserId: null, currentUserId: identity.expectedUserId, allowBootstrap: true,
+        assertCurrent: () => this.assertCleanupIdentity(identity) });
+    }
+
+    async clearAuthorizedLocalData(identity) {
+      if (!this.db) this.db = await this.openDatabase();
+      await this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction) => {
+        this.assertCleanupIdentity(identity);
+        for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
+      }, { expectedUserId: identity.expectedUserId, currentUserId: identity.expectedUserId,
+        assertCurrent: () => this.assertCleanupIdentity(identity), allowBootstrap: true }).catch((error) => {
+        if (error.name !== "AccountOwnershipError" || !(identity.recovery || identity.authenticatedUserId)) throw error;
+        return this.confirmCleanupAlreadyComplete(identity);
+      }).catch((error) => storageFailure(error, this.use));
+      this.db.close();
       this.db = null;
-      await new Promise((resolve, reject) => {
-        const request = this.host.indexedDB.deleteDatabase(DB_NAME);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-        request.onblocked = () => reject(new Error(this.use.tr(
-          "storage.accountDataInUse", {}, "Another Pomodorough tab is still using local account data."
-        )));
-      });
+    }
+
+    async clearLocalData(identity = this.cleanupIdentity()) {
+      if (!this.cleanup) {
+        this.cleanup = this.clearAuthorizedLocalData(identity).finally(() => {
+          this.cleanup = null;
+        });
+      } else {
+        await this.cleanup;
+        return this.clearLocalData(identity);
+      }
+      await this.cleanup;
+      this.assertCleanupIdentity(identity);
     }
 
     database() { return this.db; }
@@ -163,47 +238,49 @@
     }
 
     async migrateDurationQueueFromSettings() {
-      const transaction = this.connection.database().transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
-      const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
-      const request = metaStore.get("settings");
-      request.onsuccess = () => {
-        const record = request.result;
-        const pending = record?.value?.pendingDurationOperations;
-        if (!Array.isArray(pending)) return;
-        for (const operation of pending) {
-          durationStore.put(Number(operation?.hlcWallMs) === 0 && Number(operation?.hlcCounter) === 0
-            ? { ...operation, occurredAt: new Date(0).toISOString() } : operation);
-        }
-        const { pendingDurationOperations, ...settings } = record.value;
-        metaStore.put({ key: "settings", value: settings });
-      };
-      await this.connection.transactionDone(transaction);
+      const context = this.use.captureAccountContext();
+      await this.syncStorage.guardedMutation(this.connection.database(), [DURATION_PENDING_STORE], (transaction) => {
+        const metaStore = transaction.objectStore(META_STORE);
+        const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+        const request = metaStore.get("settings");
+        request.onsuccess = () => {
+          const record = request.result;
+          const pending = record?.value?.pendingDurationOperations;
+          if (!Array.isArray(pending)) return;
+          for (const operation of pending) {
+            durationStore.put(Number(operation?.hlcWallMs) === 0 && Number(operation?.hlcCounter) === 0
+              ? { ...operation, occurredAt: new Date(0).toISOString() } : operation);
+          }
+          const { pendingDurationOperations, ...settings } = record.value;
+          metaStore.put({ key: "settings", value: settings });
+        };
+      }, { ...context, allowBootstrap: true });
     }
 
     async bootstrapLegacyDurations() {
-      const transaction = this.connection.database().transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
-      const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
-      const request = metaStore.get("settings");
-      request.onsuccess = () => {
-        const settings = request.result?.value || {};
-        if (settings.durationSyncBootstrapped === true) return;
-        for (const phase of Object.keys(this.use.phaseConfig())) {
-          if (settings.durations?.[phase] == null) continue;
-          const durationMs = Math.round(this.use.clampNumber(settings.durations[phase], 1, 180)) * 60_000;
-          if (durationMs === this.use.defaultDurationsMs()[phase]) continue;
-          durationStore.put({
-            id: this.host.crypto.randomUUID(), ownerId: "bootstrap", phase, durationMs,
-            occurredAt: new Date(0).toISOString(), hlcWallMs: 0, hlcCounter: 0
+      const context = this.use.captureAccountContext();
+      await this.syncStorage.guardedMutation(this.connection.database(), [DURATION_PENDING_STORE], (transaction) => {
+        const metaStore = transaction.objectStore(META_STORE);
+        const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
+        const request = metaStore.get("settings");
+        request.onsuccess = () => {
+          const settings = request.result?.value || {};
+          if (settings.durationSyncBootstrapped === true) return;
+          for (const phase of Object.keys(this.use.phaseConfig())) {
+            if (settings.durations?.[phase] == null) continue;
+            const durationMs = Math.round(this.use.clampNumber(settings.durations[phase], 1, 180)) * 60_000;
+            if (durationMs === this.use.defaultDurationsMs()[phase]) continue;
+            durationStore.put({
+              id: this.host.crypto.randomUUID(), ownerId: "bootstrap", phase, durationMs,
+              occurredAt: new Date(0).toISOString(), hlcWallMs: 0, hlcCounter: 0
+            });
+          }
+          const { durations, ...localSettings } = settings;
+          metaStore.put({
+            key: "settings", value: { ...localSettings, durationSyncBootstrapped: true }
           });
-        }
-        const { durations, ...localSettings } = settings;
-        metaStore.put({
-          key: "settings", value: { ...localSettings, durationSyncBootstrapped: true }
-        });
-      };
-      await this.connection.transactionDone(transaction);
+        };
+      }, { ...context, allowBootstrap: true });
     }
 
     async readPendingDurationOperations() {
@@ -254,7 +331,7 @@
       this.state.baseAutoStartBreaks = snapshot.autoStartBreaks === true;
       this.state.baseSelectedTaskId = snapshot.selectedTaskId ?? null;
       this.state.user = snapshot.user || null;
-      this.state.localOwnerId = snapshot.user?.id || null;
+      this.state.localOwnerId = this.syncCore.accountOwnerId(snapshot.user) || null;
     }
 
     restoreLocalRecords(records, normalizedLegacyDurations) {
@@ -284,17 +361,19 @@
 
     async persistNewLocalIdentity(records) {
       if (records.deviceId?.value) return;
-      const transaction = this.connection.database().transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      store.put({ key: "deviceId", value: this.state.deviceId });
-      store.put({ key: "deviceSequence", value: this.state.deviceSequence });
-      store.put({ key: "hlc", value: { wallMs: this.state.hlcWallMs, counter: this.state.hlcCounter } });
-      store.put({ key: "settings", value: this.settingsValue() });
-      await this.connection.transactionDone(transaction);
+      const context = this.use.captureAccountContext();
+      await this.syncStorage.guardedMutation(this.connection.database(), [], (transaction) => {
+        const store = transaction.objectStore(META_STORE);
+        store.put({ key: "deviceId", value: this.state.deviceId });
+        store.put({ key: "deviceSequence", value: this.state.deviceSequence });
+        store.put({ key: "hlc", value: { wallMs: this.state.hlcWallMs, counter: this.state.hlcCounter } });
+        store.put({ key: "settings", value: this.settingsValue() });
+      }, { ...context, allowBootstrap: true });
     }
 
     acquireBootstrapGate() {
       return this.syncStorage.acquireBootstrapGateWithLegacyAutoStart(this.connection.database(), {
+        ...this.use.captureAccountContext(),
         token: this.use.tabId(), nowMs: Date.now(), leaseMs: BOOTSTRAP_LEASE_MS,
         legacyAutoStartOperationId: this.host.crypto.randomUUID(),
         legacySelectedTaskOperationId: this.host.crypto.randomUUID()
@@ -303,6 +382,9 @@
 
     async loadLocalState() {
       this.connection.setDatabaseForTest(await this.connection.openDatabase());
+      const initial = await this.syncStorage.readSyncState(this.connection.database());
+      this.state.localOwnerId = this.syncCore.accountOwnerId(initial.snapshot?.user);
+      const context = this.use.captureAccountContext();
       const lease = await this.acquireBootstrapGate();
       this.state.bootstrapGatePersisted = true;
       this.state.bootstrapGateOwned = lease.acquired;
@@ -312,10 +394,14 @@
         await this.migrateDurationQueueFromSettings();
         await this.bootstrapLegacyDurations();
       }
-      const normalized = await this.syncStorage.normalizeLegacyDurationOperations(database, this.state.bootstrapGateOwned ? {
-        gateToken: this.use.tabId(), replacementRequestId: this.host.crypto.randomUUID()
-      } : undefined);
+      const normalized = this.state.bootstrapGateOwned ? await this.syncStorage.normalizeLegacyDurationOperations(database, {
+        ...context, ...(this.state.bootstrapGateOwned ? {
+          gateToken: this.use.tabId(), replacementRequestId: this.host.crypto.randomUUID()
+        } : {})
+      }) : { resolution: bootstrapState.resolution };
       const records = await this.readLocalRecords();
+      context.assertCurrent();
+      this.syncStorage.assertAccountOwnership(records.snapshot?.value, context.expectedUserId);
       this.restoreLocalRecords(records, normalized);
       await this.persistNewLocalIdentity(records);
       this.use.rebuildOptimisticState();
@@ -324,7 +410,10 @@
 
     async refreshMigratedPreferences(gate) {
       if (!gate?.legacyAutoStartMigration?.migrated && !gate?.legacySelectedTaskMigration?.migrated) return;
-      const queues = await this.syncStorage.readQueues(this.connection.database());
+      const context = this.use.captureAccountContext();
+      const queues = await this.syncStorage.readSyncState(this.connection.database());
+      context.assertCurrent();
+      this.syncStorage.assertAccountOwnership(queues.snapshot, context.expectedUserId);
       const local = this.state.quarantinedLocal || this.state;
       local.pendingAutoStartOperations = queues.autoStartOperations || [];
       local.pendingSelectedTaskOperations = queues.selectedTaskOperations || [];
@@ -333,18 +422,30 @@
     }
 
     async persistSettings() {
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+      const context = this.use.captureAccountContext();
+      const settings = this.settingsValue();
       while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
       await this.syncStorage.guardedMutation(this.connection.database(), [], (transaction) => {
-        transaction.objectStore(META_STORE).put({ key: "settings", value: this.settingsValue() });
-      });
+        transaction.objectStore(META_STORE).put({ key: "settings", value: settings });
+      }, { ...context, expectedUserId }).catch((error) => storageFailure(error, this.use));
     }
 
     async reloadPersistedState(persisted = null) {
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+      const context = this.use.captureAccountContext();
       const syncState = persisted || await this.syncStorage.readSyncState(this.connection.database());
       if (!syncState.snapshot) throw new Error(this.use.tr(
         "sync.snapshotUnavailable", {}, "Canonical timer snapshot is unavailable."
       ));
       const snapshot = syncState.snapshot;
+      try {
+        context.assertCurrent();
+        this.use.assertExpectedAccount(expectedUserId);
+        this.syncStorage.assertAccountOwnership(snapshot, expectedUserId);
+      } catch (error) {
+        storageFailure(error, this.use);
+      }
       this.state.revision = Number(snapshot.revision) || 0;
       this.state.baseDurationsMs = this.use.normalizeDurationsMs(snapshot.durationsMs);
       this.state.durationsMs = this.use.clone(this.state.baseDurationsMs);
@@ -354,7 +455,7 @@
         : this.use.emptyTimer(this.state.selectedPhase, this.state.baseDurationsMs[this.state.selectedPhase]);
       this.state.baseHistory = Array.isArray(snapshot.history) ? snapshot.history : [];
       this.state.baseTasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-      this.state.localOwnerId = snapshot.user?.id || this.state.localOwnerId;
+      this.state.localOwnerId = this.syncCore.accountOwnerId(snapshot.user) || this.state.localOwnerId;
       this.state.hlcWallMs = Number(syncState.hlc?.wallMs) || this.state.hlcWallMs;
       this.state.hlcCounter = Number(syncState.hlc?.counter) || 0;
       this.state.clockOffset = syncState.clockOffset || this.state.clockOffset;
@@ -414,7 +515,9 @@
     async persistCommand(type, options = {}) {
       const localNow = Date.now();
       const context = this.timerCommandContext(type, options, localNow);
-      const command = await this.syncStorage.allocateMutation(this.connection.database(), {
+      const command = await this.allocateOperation({
+        ...this.use.captureAccountContext(),
+        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
         storeName: PENDING_STORE, requireProjection: true, nowMs: context.now,
         withDeviceSequence: true, withUuidV7: true,
         timerOwner: context.starting ? {
@@ -428,15 +531,24 @@
       return command;
     }
 
-    mutationOptions(storeName, build) {
+    mutationOptions(storeName, build, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       return {
-        storeName, requireProjection: true, nowMs: this.use.trustedNow(),
+        ...this.use.captureAccountContext(), storeName, expectedUserId, requireProjection: true, nowMs: this.use.trustedNow(),
         withDeviceSequence: false, withUuidV7: true, build
       };
     }
 
-    async persistTaskOperation(type, task) {
-      const operation = await this.syncStorage.allocateMutation(this.connection.database(), this.mutationOptions(
+    async allocateOperation(options) {
+      const expectedUserId = options.expectedUserId;
+      const operation = await this.syncStorage.allocateMutation(this.connection.database(), options)
+        .catch((error) => storageFailure(error, this.use));
+      try { options.assertCurrent?.(); } catch (error) { storageFailure(error, this.use); }
+      this.use.assertExpectedAccount(expectedUserId);
+      return operation;
+    }
+
+    async persistTaskOperation(type, task, expectedUserId) {
+      const operation = await this.allocateOperation(this.mutationOptions(
         TASK_PENDING_STORE, ({ id, wallMs, counter }) => {
           const value = {
             id, deviceId: this.state.deviceId, taskId: task.id, type,
@@ -444,29 +556,29 @@
           };
           if (type === "upsert") value.title = task.title;
           return value;
-        }
+        }, expectedUserId
       ));
       this.recordOperationHlc(operation);
       return operation;
     }
 
-    async persistAutoStartOperation(enabled) {
-      const operation = await this.syncStorage.allocateMutation(this.connection.database(), this.mutationOptions(
+    async persistAutoStartOperation(enabled, expectedUserId) {
+      const operation = await this.allocateOperation(this.mutationOptions(
         AUTO_START_PENDING_STORE, ({ id, wallMs, counter }) => ({
           id, deviceId: this.state.deviceId, enabled, occurredAt: new Date(wallMs).toISOString(),
           hlcWallMs: wallMs, hlcCounter: counter
-        })
+        }), expectedUserId
       ));
       this.recordOperationHlc(operation);
       return operation;
     }
 
-    async persistSelectedTaskOperation(taskId) {
-      const operation = await this.syncStorage.allocateMutation(this.connection.database(), this.mutationOptions(
+    async persistSelectedTaskOperation(taskId, expectedUserId) {
+      const operation = await this.allocateOperation(this.mutationOptions(
         SELECTED_TASK_PENDING_STORE, ({ id, wallMs, counter }) => ({
           id, deviceId: this.state.deviceId, taskId, occurredAt: new Date(wallMs).toISOString(),
           hlcWallMs: wallMs, hlcCounter: counter
-        })
+        }), expectedUserId
       ));
       this.recordOperationHlc(operation);
       return operation;
@@ -485,8 +597,15 @@
       options.supersede = (existing) => existing.phase === phase
         && existing.ownerId === this.use.tabId() && !this.inFlightDurationOperationIds.has(existing.id);
       const database = this.connection.database();
-      const operation = await this.syncStorage.allocateMutation(database, options);
-      const queues = await this.syncStorage.readQueues(database);
+      const operation = await this.allocateOperation(options);
+      const queues = await this.syncStorage.readSyncState(database);
+      try {
+        options.assertCurrent();
+        this.use.assertExpectedAccount(options.expectedUserId);
+        this.syncStorage.assertAccountOwnership(queues.snapshot, options.expectedUserId);
+      } catch (error) {
+        storageFailure(error, this.use);
+      }
       this.recordOperationHlc(operation);
       return {
         operation,
@@ -500,7 +619,7 @@
   }
 
   function create({ state, external, use }) {
-    const connection = new DatabaseConnection(external.host, use);
+    const connection = new DatabaseConnection(state, external, use);
     const localState = new LocalStateRepository(state, external, use, connection);
     const mutations = new MutationRepository(state, external, use, connection);
     return { ...connection.actions(), ...localState.actions(), ...mutations.actions() };

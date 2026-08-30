@@ -18,7 +18,7 @@ test("HTML and dynamic application resource references exist in English catalog"
   const html = fs.readFileSync(path.join(webDirectory, "app.html"), "utf8");
   const referenced = new Set([
     ...html.matchAll(/data-i18n(?:-aria-label|-placeholder)?="([^"]+)"/g),
-    ...applicationScript.matchAll(/\btr\("([^"]+)"/g)
+    ...applicationScript.matchAll(/\btr\(\s*"([^"]+)"/g)
   ].map((match) => match[1]));
   for (const key of referenced) assert.ok(Object.hasOwn(english, key), `missing English resource ${key}`);
   assert.ok(referenced.size >= 60, "practical controls and dynamic state should use resources");

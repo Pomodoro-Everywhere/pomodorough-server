@@ -40,13 +40,14 @@
 
   const manifest = Object.freeze({
     name: "actions",
-    externals: ["host", "syncStorage"],
+    externals: ["host", "syncCore", "syncStorage"],
     requires: [
       "controlsBlocked", "persistDurationOperation", "persistAutoStartOperation",
       "persistSelectedTaskOperation", "persistTaskOperation", "persistCommand", "database",
       "settingsValue", "rebuildOptimisticState", "sharedTaskIdentity", "clone", "trustedNow",
       "elapsedFor", "tr", "phaseLabel", "phaseConfig", "tabId", "render", "renderDurations",
-      "renderTaskSelector", "renderTimer", "renderSyncStatus", "showNotice", "scheduleSync"
+      "renderTaskSelector", "renderTimer", "renderSyncStatus", "showNotice", "scheduleSync",
+      "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext"
     ],
     provides: [
       "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
@@ -178,7 +179,7 @@
       while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
     }
 
-    async issueAutoStartOperation(enabled) {
+    async issueAutoStartOperation(enabled, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked()) return false;
       await this.waitForUnlockedAction();
       if (this.use.controlsBlocked() || this.state.autoStartBreaks === enabled) {
@@ -187,7 +188,7 @@
       }
       this.state.actionLocked = true;
       try {
-        const operation = await this.use.persistAutoStartOperation(enabled);
+        const operation = await this.use.persistAutoStartOperation(enabled, expectedUserId);
         this.state.pendingAutoStartOperations.push(operation);
         this.use.rebuildOptimisticState();
         this.use.renderDurations();
@@ -205,7 +206,7 @@
       }
     }
 
-    async issueSelectedTaskOperation(taskId) {
+    async issueSelectedTaskOperation(taskId, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked()) return false;
       await this.waitForUnlockedAction();
       if (this.use.controlsBlocked() || this.state.selectedTaskId === taskId) {
@@ -214,7 +215,7 @@
       }
       this.state.actionLocked = true;
       try {
-        const operation = await this.use.persistSelectedTaskOperation(taskId);
+        const operation = await this.use.persistSelectedTaskOperation(taskId, expectedUserId);
         this.state.pendingSelectedTaskOperations.push(operation);
         this.use.rebuildOptimisticState();
         this.use.renderTaskSelector();
@@ -232,11 +233,11 @@
       }
     }
 
-    async issueTaskOperation(type, task) {
+    async issueTaskOperation(type, task, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked() || this.state.actionLocked) return false;
       this.state.actionLocked = true;
       try {
-        const operation = await this.use.persistTaskOperation(type, task);
+        const operation = await this.use.persistTaskOperation(type, task, expectedUserId);
         this.state.pendingTaskOperations.push(operation);
         this.use.rebuildOptimisticState();
         this.use.render();
@@ -253,6 +254,7 @@
     }
 
     async addTask(title) {
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
       let identity;
       try {
         identity = await this.use.sharedTaskIdentity(String(title || ""));
@@ -269,14 +271,14 @@
       const { id, title: normalized } = identity;
       const existing = this.state.tasks.find((task) => task.id === id);
       if (existing) {
-        const selected = await this.issueSelectedTaskOperation(existing.id);
+        const selected = await this.issueSelectedTaskOperation(existing.id, expectedUserId);
         if (selected) this.use.showNotice(this.use.tr(
           "notice.taskExists", {}, "Task already exists and is now selected."
         ));
         return true;
       }
-      const saved = await this.issueTaskOperation("upsert", { id, title: normalized });
-      if (saved) await this.issueSelectedTaskOperation(id);
+      const saved = await this.issueTaskOperation("upsert", { id, title: normalized }, expectedUserId);
+      if (saved) await this.issueSelectedTaskOperation(id, expectedUserId);
       return saved;
     }
 
@@ -305,15 +307,20 @@
     }
 
     async cancelAndClearTimer() {
+      const context = this.use.captureAccountContext();
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
       if (this.use.controlsBlocked() || this.state.actionLocked) return false;
       const timer = this.use.clone(this.state.timer);
       const now = this.use.trustedNow();
       this.state.actionLocked = true;
       try {
         const outcome = await this.syncStorage.cancelAndClearTimer(this.use.database(), {
+          ...context, expectedUserId,
           timerId: timer.id, phase: timer.phase, deviceId: this.state.deviceId, nowMs: now,
           observedElapsedMs: Math.round(this.use.elapsedFor(timer, now)), withUuidV7: true
         });
+        context.assertCurrent();
+        this.use.assertExpectedAccount(expectedUserId);
         if (!outcome.transitioned) return false;
         this.state.pending.push(...outcome.commands);
         this.timerLifecycle.recordLastCommand(outcome.commands);
@@ -322,6 +329,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));
@@ -357,8 +365,9 @@
       ]);
     }
 
-    finishTimerRequest(timer, automatic, localNow, now) {
+    finishTimerRequest(timer, automatic, localNow, now, expectedUserId) {
       return {
+        ...this.use.captureAccountContext(), expectedUserId,
         timerId: timer.id, phase: timer.phase, deviceId: this.state.deviceId, tabId: this.use.tabId(),
         requestedTimer: timer,
         leaseMs: TIMER_OWNER_LEASE_MS, manual: !automatic,
@@ -446,15 +455,17 @@
       this.use.scheduleSync(0);
     }
 
-    async finishTimer(automatic = false) {
+    async finishTimer(automatic = false, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked() || this.state.actionLocked) return false;
       const timer = this.use.clone(this.state.timer);
       const localNow = Date.now();
       this.state.actionLocked = true;
       try {
         const now = this.use.trustedNow(localNow);
-        const request = this.finishTimerRequest(timer, automatic, localNow, now);
+        const request = this.finishTimerRequest(timer, automatic, localNow, now, expectedUserId);
         const outcome = await this.syncStorage.finishTimer(this.use.database(), request);
+        request.assertCurrent();
+        this.use.assertExpectedAccount(expectedUserId);
         if (!outcome.transitioned) {
           if (automatic && outcome.reason === "not_owner") {
             this.scheduleCompletionRetry(timer.id, outcome);
@@ -467,6 +478,7 @@
         this.acceptFinishedTimer(timer, validated.commands);
         return true;
       } catch (error) {
+        if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));
@@ -568,17 +580,19 @@
     }
 
     scheduleCompletionRetry(timerId, outcome) {
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
       const delay = this.completionRetryDelay(outcome);
       if (delay === null) return;
       this.host.clearTimeout(this.completionRetryTimer);
       this.completionRetryTimer = this.host.setTimeout(() => {
         this.completionRetryTimer = null;
-        if (!this.releaseCompletionRetry(timerId)) return;
+        if (!this.releaseCompletionRetry(timerId, expectedUserId)) return;
         this.use.renderTimer();
       }, delay);
     }
 
-    releaseCompletionRetry(timerId) {
+    releaseCompletionRetry(timerId, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
+      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) !== expectedUserId) return false;
       if (this.state.timer.id !== timerId || this.state.timer.status !== "running") return false;
       this.completionQueuedFor = null;
       return true;
@@ -601,9 +615,14 @@
       if (!database || !this.state.ready || !this.state.deviceId || !this.state.timer.id
         || !["running", "paused"].includes(this.state.timer.status)) return;
       this.syncStorage.renewTimerOwnership(database, {
+        ...this.use.captureAccountContext(),
+        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
         timerId: this.state.timer.id, deviceId: this.state.deviceId, tabId: this.use.tabId(),
         nowMs: Date.now(), leaseMs: TIMER_OWNER_LEASE_MS
-      }).catch(() => {});
+      }).catch((error) => {
+        if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
+        else this.host.console.warn("Timer ownership renewal failed:", error);
+      });
     }
 
     activeCompletionAlertTimerId() { return this.completionAlertTimerID; }

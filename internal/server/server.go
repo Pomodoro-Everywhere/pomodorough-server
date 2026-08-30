@@ -140,6 +140,9 @@ func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 			s.writeRateLimit(w, r, "account", retryAfter)
 			return
 		}
+		if !validAccountIncarnation(w, r, identity) {
+			return
+		}
 		next(w, r, identity)
 	})
 }

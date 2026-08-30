@@ -67,6 +67,13 @@
       <h2 id="bootstrapTitle" data-i18n="bootstrap.title">Choose synchronized state</h2>
       <p id="bootstrapSummary" data-i18n="bootstrap.summary">Comparing device and account data.</p>
 
+      <section id="logoutRecovery" hidden>
+        <div class="bootstrap-actions">
+          <button id="logoutRecoveryRetry" class="bootstrap-retry" type="button" data-i18n="account.logout.recoveryRetry">Retry sign-out cleanup</button>
+          <button id="logoutRecoverySignIn" class="bootstrap-signout" type="button" data-i18n="account.logout.recoverySignIn">Sign in to recover</button>
+        </div>
+      </section>
+
       <div id="bootstrapChoices" class="bootstrap-choices">
         <button type="button" data-bootstrap-strategy="replace_remote">
           <strong data-i18n="bootstrap.keepLocal">Keep Local</strong>

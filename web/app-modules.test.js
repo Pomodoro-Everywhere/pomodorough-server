@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -23,10 +24,12 @@ test("browser responsibility modules form one validated dependency graph", () =>
     sharedCoreHost: {}, translations: {}
   };
   const builder = runtimeHost.createRuntime({ state: {}, externals });
+  builder.install({ manifest: { name: "startup", provides: ["resumeStartup"] },
+    create: () => ({ resumeStartup: async () => true }) });
   for (const browserModule of browserModules) builder.install(browserModule);
   const graph = builder.finalize().describe();
   assert.deepEqual(graph.map(({ name }) => name), [
-    "state", "storage", "actions", "sync", "bootstrap", "session", "view"
+    "startup", "state", "storage", "actions", "sync", "bootstrap", "session", "view"
   ]);
   const providers = new Map();
   for (const manifest of graph) {
@@ -106,7 +109,7 @@ test("composition facade contains wiring while deep modules own side effects and
   assert.match(bootstrap, /this\.syncStorage\.validatePendingForSend\(/);
   assert.match(session, /new this\.host\.EventSource\("\/api\/v1\/stream"\)/);
   assert.match(session, /"\/api\/v1\/(?:me|account|auth\/logout)"/);
-  assert.match(session, /async clearPendingLogoutData\(\)/);
+  assert.match(session, /async clearPendingLogoutData\(identity\)/);
   assert.match(session, /async initializeSession\(\)/);
   assert.match(view, /document\.createElement\(/);
   assert.match(view, /renderDeviceMark\(\)/);
@@ -163,10 +166,10 @@ test("revision stream reuses one bound callback and isolates streams per runtime
     close() { this.closed = true; }
   }
   const createActions = (emit) => browserModules[5].create({
-    state: { sessionIdentityValidated: true, authenticated: true, user: { id: "user-1" } },
+    state: { sessionIdentityValidated: true, authenticated: true, user: incarnationFixture.accountUser("user-1") },
     external: {
       host: { EventSource: FakeEventSource, navigator: { onLine: true } },
-      syncCore: {}, syncStorage: {}, elements: {}
+      syncCore: incarnationFixture.sync, syncStorage: {}, elements: {}
     },
     use: { needsBootstrapResolution: () => false }, emit
   });

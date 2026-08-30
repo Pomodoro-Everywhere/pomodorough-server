@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const runtimeModule = require("./app-runtime.js");
 const sessionModule = require("./app-session.js");
@@ -114,8 +115,8 @@ test("runtime routes valid revision events and fails closed on invalid event use
 
 function sessionState(overrides = {}) {
   return {
-    authenticated: true, sessionIdentityValidated: true, csrfToken: "csrf", user: { id: "user-1" },
-    localOwnerId: "user-1", bootstrapGateOwned: false, bootstrapPending: null, bootstrapBlocked: false,
+    authenticated: true, sessionIdentityValidated: true, csrfToken: "csrf", user: incarnationFixture.accountUser("user-1"),
+    localOwnerId: incarnationFixture.ownerId("user-1"), bootstrapGateOwned: false, bootstrapPending: null, bootstrapBlocked: false,
     quarantinedLocal: null, ready: true, retrying: false, syncing: false, offlineOwnerMode: false,
     pending: [], pendingTaskOperations: [], pendingDurationOperations: [], pendingAutoStartOperations: [],
     pendingSelectedTaskOperations: [], ...overrides
@@ -138,20 +139,27 @@ function sessionFixture(overrides = {}) {
   const host = {
     navigator: { onLine: true }, localStorage, location: { assign: (value) => calls.push(["assign", value]) },
     console: { warn: (...args) => calls.push(["warn", ...args]) },
-    fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: { id: "user-1" }, csrfToken: "csrf-2" }) }),
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: incarnationFixture.accountUser("user-1"), csrfToken: "csrf-2" }) }),
     setTimeout: (callback) => { calls.push(["timeout", callback]); return 1; },
     prompt: () => null, confirm: () => true,
     EventSource: class { addEventListener() {} close() {} }, ...overrides.host
   };
   const syncCore = {
+    ...incarnationFixture.sync,
     canUseCachedOwnerOffline: () => false,
     postJSONWithCsrfRetry: async ({ onTiming }) => { onTiming({ requestAtMs: 1 }); return { ok: true }; },
     ...overrides.syncCore
   };
   const syncStorage = {
+    AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
+    readAccountBinding: async () => ({ sourceOwnerId: state.localOwnerId, gateOwnerId: null }),
+    guardedMutation: async () => {},
     allocateClockRequestSequence: async () => 1, clearBootstrapGate: async () => {}, ...overrides.syncStorage
   };
+  const cleanup = require("./app-storage.js").create({ state, external: { host, syncCore, syncStorage }, use: {} });
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    cleanupIdentity: cleanup.cleanupIdentity, assertCleanupIdentity: cleanup.assertCleanupIdentity,
     database: () => ({}), tabId: () => "tab-1", needsBootstrapResolution: () => false,
     clearLocalData: async () => calls.push("clear"), tr: (_key, _values, fallback) => fallback,
     render: () => calls.push("render"), renderProfile: () => calls.push("profile"),
@@ -188,9 +196,9 @@ test("session stream gates, parses hints, polls, and closes offline", () => {
   sources[0].onerror();
   assert.equal(sources[0].closed, true);
   assert.equal(fixture.actions.pollRemoteState(), false);
-  fixture.actions.closeRevisionStreamForIdentityChange("user-1");
+  fixture.actions.closeRevisionStreamForIdentityChange(incarnationFixture.ownerId("user-1"));
   fixture.actions.setRevisionStreamForTest({ close: () => fixture.calls.push("manualClose") });
-  fixture.actions.closeRevisionStreamForIdentityChange("user-2");
+  fixture.actions.closeRevisionStreamForIdentityChange(incarnationFixture.ownerId("user-2"));
   assert.equal(fixture.actions.hasRevisionStreamForTest(), false);
 });
 
@@ -206,29 +214,31 @@ test("session payload checks preserve sign-out and account-switch guarantees", a
   const failed = sessionFixture({ host: { fetch: async () => ({ status: 503, ok: false }) } });
   await assert.rejects(() => failed.actions.fetchSessionPayload(), /503/);
   const switched = sessionFixture({ host: { fetch: async () => ({ ok: true, status: 200,
-    json: async () => ({ user: { id: "user-2" }, csrfToken: "new" }) }) } });
+    json: async () => ({ user: incarnationFixture.accountUser("user-2"), csrfToken: "new" }) }) } });
   assert.equal(await switched.actions.loadSession(), true);
   assert.ok(switched.calls.includes("quarantine"));
   assert.ok(switched.calls.includes("restart"));
-  await assert.rejects(() => switched.actions.refreshMutationCsrf("user-1"), /account changed/i);
+  await assert.rejects(() => switched.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1")), /account changed/i);
 
   const signedOut = sessionFixture();
   signedOut.actions.setFetchForTest(async () => ({ status: 401 }));
-  await assert.rejects(() => signedOut.actions.refreshMutationCsrf("user-1"), /requires sign-in/i);
+  await assert.rejects(() => signedOut.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1")), /requires sign-in/i);
 });
 
-test("pending sign-out revokes before cleanup and retries when revocation is unavailable", async () => {
+test("pending sign-out cleans up before revocation and retains marker when revocation is unavailable", async () => {
   const deferred = sessionFixture({ localStorage: memoryStorage({ pomodoroughPendingLogout: "1" }),
-    host: { fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: { id: "user-1" }, csrfToken: null }) }) } });
+    host: { fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: incarnationFixture.accountUser("user-1"), csrfToken: null }) }) } });
   await assert.rejects(() => deferred.actions.loadSession(), /could not be revoked/i);
+  assert.ok(deferred.calls.includes("clear"));
   assert.equal(deferred.localStorage.getItem("pomodoroughPendingLogout"), "1");
 
   let request = 0;
   const completed = sessionFixture({ localStorage: memoryStorage({ pomodoroughPendingLogout: "1" }),
     host: { fetch: async (url) => {
       request += 1;
+      if (!url.endsWith("/me")) assert.ok(completed.calls.includes("clear"));
       return url.endsWith("/me")
-        ? { ok: true, status: 200, json: async () => ({ user: { id: "user-1" }, csrfToken: "fresh" }) }
+        ? { ok: true, status: 200, json: async () => ({ user: incarnationFixture.accountUser("user-1"), csrfToken: "fresh" }) }
         : { ok: false, status: 401 };
     } } });
   assert.equal(await completed.actions.loadSession(), false);
@@ -241,7 +251,7 @@ test("offline restoration and cleanup fail closed around unavailable storage", a
   const localStorage = {
     getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); }, removeItem() { throw new Error("blocked"); }
   };
-  const fixture = sessionFixture({ state: { quarantinedLocal: { user: { id: "user-1" } } }, localStorage,
+  const fixture = sessionFixture({ state: { quarantinedLocal: { user: incarnationFixture.accountUser("user-1") } }, localStorage,
     syncCore: { canUseCachedOwnerOffline: () => true }, syncStorage: { clearBootstrapGate: async () => { throw new Error("busy"); } } });
   assert.equal(await fixture.actions.activateCachedOwnerOffline(), false);
   assert.equal(fixture.actions.pendingLocalLogout(), false);
@@ -310,8 +320,9 @@ test("logout cancellation and deferred revocation retain the durable retry marke
     host: { confirm: () => true, fetch: async () => { throw new Error("offline"); } },
     use: { refreshAllPendingOperations: async () => { throw new Error("db busy"); }, clearLocalData: async () => { throw new Error("disk busy"); } } });
   await deferred.actions.logout();
-  assert.equal(deferred.localStorage.getItem("pomodoroughPendingLogout"), "1");
-  assert.ok(deferred.calls.filter((entry) => entry[0] === "warn").length >= 3);
+  assert.equal(deferred.localStorage.getItem("pomodoroughPendingLogout"), null);
+  assert.equal(deferred.elements.logoutButton.disabled, false);
+  assert.equal(deferred.calls.filter((entry) => entry[0] === "warn").length, 1);
 
   const completed = sessionFixture({ host: { fetch: async () => ({ ok: true, status: 200 }) } });
   await completed.actions.logout();
@@ -336,12 +347,15 @@ function actionBranchFixture(overrides = {}) {
     setInterval: (callback, delay) => { calls.push(["interval", callback, delay]); return 4; }, ...overrides.host
   };
   const syncStorage = {
+    AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
     finishTimer: async () => ({ transitioned: false, reason: "already_finished" }),
     cancelAndClearTimer: async () => ({ transitioned: false }), renewTimerOwnership: async () => {}, ...overrides.syncStorage
   };
   const operation = (kind) => ({ id: kind, type: kind, deviceSequence: 2, hlcWallMs: 3, hlcCounter: 4 });
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     controlsBlocked: () => false, persistDurationOperation: async () => ({ pendingDurationOperations: [operation("duration")] }),
+    assertExpectedAccount: (expectedUserId) => assert.equal(incarnationFixture.sync.accountOwnerId(state.user) || state.localOwnerId || null, expectedUserId),
     persistAutoStartOperation: async () => operation("auto"), persistSelectedTaskOperation: async () => operation("selected"),
     persistTaskOperation: async () => operation("task"), persistCommand: async () => operation("command"),
     database: () => ({}), settingsValue: () => ({}), rebuildOptimisticState: () => calls.push("rebuild"),
@@ -353,7 +367,7 @@ function actionBranchFixture(overrides = {}) {
     renderSyncStatus: () => calls.push("status"), showNotice: (message) => calls.push(["notice", message]),
     scheduleSync: (delay) => calls.push(["sync", delay]), ...overrides.use
   };
-  const actions = actionModule.create({ state, external: { host, syncStorage }, use });
+  const actions = actionModule.create({ state, external: { host, syncStorage, syncCore: incarnationFixture.sync }, use });
   return { actions, calls, state, syncStorage, timers, use };
 }
 

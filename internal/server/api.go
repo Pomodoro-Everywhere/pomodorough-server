@@ -48,7 +48,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]string{
-			"id": identity.Profile.ID, "email": identity.Profile.Email, "name": identity.Profile.Name, "avatarUrl": identity.Profile.AvatarURL,
+			"accountIncarnation": accountIncarnation(identity),
+			"id":                 identity.Profile.ID, "email": identity.Profile.Email, "name": identity.Profile.Name, "avatarUrl": identity.Profile.AvatarURL,
 		},
 		"csrfToken": csrfToken,
 	})
@@ -154,7 +155,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		"auto_start_operations", len(request.AutoStartOperations),
 		"selected_task_operations", len(request.SelectedTaskOperations),
 	)
-	writeJSON(w, http.StatusOK, result)
+	writeAccountSnapshot(w, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
@@ -174,7 +175,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identit
 		s.internalAPIError(w, "read bootstrap snapshot", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeAccountSnapshot(w, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
@@ -216,7 +217,7 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 		s.internalAPIError(w, "resolve bootstrap history", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeAccountSnapshot(w, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}

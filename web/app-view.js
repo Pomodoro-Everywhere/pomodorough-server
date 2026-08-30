@@ -29,7 +29,8 @@
       "finishTimer", "cancelAndClearTimer", "stopCompletionAlert", "logout", "deleteAccount",
       "closeRevisionStreamForIdentityChange", "clearLocalData", "redirectToLogin",
       "chooseBootstrapStrategy", "retryBootstrapResolution", "handleOnline", "handleOffline",
-      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState"
+      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState",
+      "quarantineAccountMismatch", "retryPendingLogout", "captureAccountContext"
     ],
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
@@ -520,7 +521,7 @@
 
     renderProfile() {
       const { state, use, elements } = this;
-      if (!state.user) {
+      if (!state.user || state.logoutRecoveryRequired) {
         elements.profile.hidden = true;
         return;
       }
@@ -601,6 +602,8 @@
         ? "Upload stopped before any local or remote data changed."
         : `${localCount} local completed run${localCount === 1 ? "" : "s"}; ${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}. Timers, tasks, or settings may also differ.`;
       elements.bootstrapDialog.setAttribute("aria-busy", String(view.busy));
+      if (state.bootstrapOwnershipConfirmation) elements.bootstrapSummary.textContent = use.tr("bootstrap.ownershipChanged", {},
+        "Account ownership changed or predates incarnation validation. Retained work cannot be uploaded to this account. Keep remote explicitly discards retained local work; cancel leaves it untouched.");
       elements.bootstrapChoices.hidden = !view.choosing;
       elements.bootstrapConfirmation.hidden = !view.confirming;
     }
@@ -617,7 +620,8 @@
         elements.bootstrapError.textContent = state.bootstrapError || state.bootstrapLimitError;
       }
       for (const button of elements.bootstrapChoiceButtons) {
-        button.hidden = limitRecovery && button.dataset.bootstrapStrategy !== "keep_remote";
+        button.hidden = (limitRecovery || state.bootstrapOwnershipConfirmation)
+          && button.dataset.bootstrapStrategy !== "keep_remote";
         button.disabled = state.bootstrapSubmitting;
       }
       elements.bootstrapConfirm.disabled = state.bootstrapSubmitting;
@@ -647,9 +651,14 @@
 
     renderBootstrapDialog() {
       const { state, elements, syncCore } = this;
+      if (elements.logoutRecovery) elements.logoutRecovery.hidden = !state.logoutRecoveryRequired;
+      if (state.logoutRecoveryRequired) {
+        this.renderLogoutRecovery();
+        return;
+      }
       const limitRecovery = Boolean(state.bootstrapLimitError);
       const view = syncCore.bootstrapDialogView({
-        planMode: limitRecovery ? "choose" : state.bootstrapPlan?.mode,
+        planMode: limitRecovery || state.bootstrapOwnershipConfirmation ? "choose" : state.bootstrapPlan?.mode,
         strategy: state.bootstrapStrategy, pending: state.bootstrapPending,
         error: state.bootstrapError, submitting: state.bootstrapSubmitting,
         blocked: state.bootstrapBlocked, authenticated: state.authenticated
@@ -661,6 +670,23 @@
       this.renderBootstrapSummary(view, limitRecovery);
       this.renderBootstrapActions(view, limitRecovery);
       this.renderBootstrapConfirmation(view);
+      this.focusBootstrapDialog();
+    }
+
+    renderLogoutRecovery() {
+      const { state, elements, use, host } = this;
+      elements.bootstrapTitle.textContent = use.tr(
+        "account.logout.recoveryTitle", {}, "Finish pending sign-out"
+      );
+      elements.bootstrapSummary.textContent = use.tr(
+        "account.logout.recoverySummary", {},
+        "Finish sign-out before using local data. Connect and sign in to the account that owns the pending data, then retry. A different account cannot clear it."
+      );
+      for (const name of ["bootstrapChoices", "bootstrapConfirmation", "bootstrapError",
+        "bootstrapRetry", "bootstrapSignOut"]) elements[name].hidden = true;
+      elements.bootstrapDialog.setAttribute("aria-busy", String(state.logoutRecoveryBusy));
+      elements.logoutRecoveryRetry.disabled = state.logoutRecoveryBusy;
+      elements.logoutRecoverySignIn.disabled = state.logoutRecoveryBusy || !host.navigator.onLine;
       this.focusBootstrapDialog();
     }
 
@@ -810,6 +836,8 @@
       const { state, use, elements, host, view } = this;
       elements.logoutButton.addEventListener("click", use.logout);
       elements.deleteAccountButton.addEventListener("click", use.deleteAccount);
+      elements.logoutRecoveryRetry?.addEventListener("click", use.retryPendingLogout);
+      elements.logoutRecoverySignIn?.addEventListener("click", use.redirectToLogin);
       host.addEventListener("storage", (event) => {
         if (event.key !== PENDING_LOGOUT_KEY || event.newValue !== "1") return;
         use.closeRevisionStreamForIdentityChange();
@@ -842,14 +870,19 @@
     }
 
     setupConnectivityEvents() {
-      const { state, use, host, syncStorage, document, view } = this;
+      const { state, use, host, syncStorage, syncCore, document, view } = this;
       host.addEventListener("online", use.handleOnline);
       host.addEventListener("offline", use.handleOffline);
       host.addEventListener("pagehide", () => {
         if (!use.database() || !state.deviceId) return;
         syncStorage.releaseTimerOwnership(use.database(), {
+          ...use.captureAccountContext(),
+          expectedUserId: syncCore.accountOwnerId(state.user) || state.localOwnerId || null,
           deviceId: state.deviceId, tabId: use.tabId(), nowMs: Date.now()
-        }).catch(() => {});
+        }).catch((error) => {
+          if (error.name === "AccountOwnershipError") use.quarantineAccountMismatch();
+          else host.console.warn("Timer ownership release failed:", error);
+        });
       });
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState !== "visible") return;

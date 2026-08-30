@@ -22,6 +22,10 @@
   "account.logout.cleanupFailed": "Signed-out local data could not be cleared: {error}",
   "account.logout.failed": "Sign out failed ({status}).",
   "account.logout.revocationPending": "Pending sign-out could not be revoked yet.",
+  "account.logout.recoveryTitle": "Finish pending sign-out",
+  "account.logout.recoverySummary": "Finish sign-out before using local data. Connect and sign in to the account that owns the pending data, then retry. A different account cannot clear it.",
+  "account.logout.recoveryRetry": "Retry sign-out cleanup",
+  "account.logout.recoverySignIn": "Sign in to recover",
   "account.delete.httpFailed": "Account deletion failed ({status}).",
   "sync.label": "Line status",
   "sync.checking": "Checking line",
@@ -180,5 +184,6 @@
   "notice.taskSaveFailed": "Task change could not be saved.",
   "notice.timerSaveFailed": "Timer action could not be saved.",
   "notice.phaseSaveFailed": "Phase choice could not be saved.",
-  "notice.taskAddFailed": "Task could not be added."
+  "notice.taskAddFailed": "Task could not be added.",
+  "bootstrap.ownershipChanged": "Account ownership changed or predates incarnation validation. Retained work cannot be uploaded to this account. Keep remote explicitly discards retained local work; cancel leaves it untouched."
 }

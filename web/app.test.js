@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -120,15 +121,32 @@ function loadTaskProjection() {
     PomodoroughSync: sync,
     PomodoroughAppTest: { disableAutoStart: true },
     PomodoroughStorage: {
+      AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
+      assertAccountOwnership: incarnationFixture.storage.assertAccountOwnership,
       BootstrapGateError: class BootstrapGateError extends Error {},
+      async guardedMutation(database, stores, callback) {
+        const transaction = database.transaction([...new Set(["meta", ...stores])], "readwrite");
+        callback(transaction);
+        await new Promise((resolve, reject) => {
+          transaction.oncomplete = resolve;
+          transaction.onabort = () => reject(transaction.error);
+          transaction.onerror = () => {};
+        });
+      },
       finishAppliedPlan: completionPlanFixture,
       async normalizeLegacyDurationOperations() {},
       async clearBootstrapGate() {},
       async readBootstrapState() { return { gate: null, resolution: null }; },
+      async readAccountBinding() { return { sourceOwnerId: null, gateOwnerId: null }; },
       async acquireBootstrapGateWithLegacyAutoStart() {
         return { acquired: true, resolution: null };
       },
       async readQueues() { return queues; },
+      async readSyncState() {
+        const state = context.PomodoroughAppTest.state;
+        return { snapshot: state.localOwnerId ? { user: state.user } : null,
+          ...await context.PomodoroughStorage.readQueues() };
+      },
       projectState(input) {
         const app = context.PomodoroughAppTest;
         let projectedTimer = input.snapshot?.canonicalTimer
@@ -642,14 +660,14 @@ test("owner quarantine round-trip preserves selected-task base and pending claim
 
 test("cached owner activation restores quarantined state only before identity validation", async () => {
   const app = loadTaskProjection();
-  app.state.user = { id: "cached-owner" };
-  app.state.localOwnerId = "cached-owner";
+  app.state.user = incarnationFixture.accountUser("cached-owner");
+  app.state.localOwnerId = incarnationFixture.ownerId("cached-owner");
   app.state.baseSelectedTaskId = "task-cached";
   app.state.selectedTaskId = "task-cached";
   const cached = app.ownerStateValue();
   app.resetOwnerState();
   app.state.quarantinedLocal = cached;
-  app.state.localOwnerId = "cached-owner";
+  app.state.localOwnerId = incarnationFixture.ownerId("cached-owner");
   app.state.bootstrapGateOwned = true;
   app.state.bootstrapPending = null;
   app.state.sessionIdentityValidated = false;
@@ -670,7 +688,7 @@ test("cached owner activation restores quarantined state only before identity va
   assert.equal(app.state.bootstrapGateOwned, false);
 
   app.state.quarantinedLocal = cached;
-  app.state.localOwnerId = "cached-owner";
+  app.state.localOwnerId = incarnationFixture.ownerId("cached-owner");
   app.state.bootstrapGateOwned = true;
   app.state.sessionIdentityValidated = true;
   assert.equal(await app.activateCachedOwnerOffline(), false);
@@ -680,10 +698,10 @@ test("cached owner activation restores quarantined state only before identity va
 test("changed session identity closes old revision stream before replacement", () => {
   const app = loadTaskProjection();
   let closeCount = 0;
-  app.state.user = { id: "user-old" };
+  app.state.user = incarnationFixture.accountUser("user-old");
   app.setRevisionStreamForTest({ close() { closeCount += 1; } });
 
-  app.closeRevisionStreamForIdentityChange("user-new");
+  app.closeRevisionStreamForIdentityChange(incarnationFixture.ownerId("user-new"));
 
   assert.equal(closeCount, 1);
   assert.equal(app.hasRevisionStreamForTest(), false);
@@ -692,7 +710,7 @@ test("changed session identity closes old revision stream before replacement", (
 test("explicit identity teardown closes the current revision stream", () => {
   const app = loadTaskProjection();
   let closed = false;
-  app.state.user = { id: "account-a" };
+  app.state.user = incarnationFixture.accountUser("account-a");
   app.setRevisionStreamForTest({ close() { closed = true; } });
   app.closeRevisionStreamForIdentityChange();
   assert.equal(closed, true);
@@ -702,10 +720,10 @@ test("explicit identity teardown closes the current revision stream", () => {
 test("unchanged session identity keeps current revision stream", () => {
   const app = loadTaskProjection();
   let closeCount = 0;
-  app.state.user = { id: "user-1" };
+  app.state.user = incarnationFixture.accountUser("user-1");
   app.setRevisionStreamForTest({ close() { closeCount += 1; } });
 
-  app.closeRevisionStreamForIdentityChange("user-1");
+  app.closeRevisionStreamForIdentityChange(incarnationFixture.ownerId("user-1"));
 
   assert.equal(closeCount, 0);
   assert.equal(app.hasRevisionStreamForTest(), true);
@@ -1546,7 +1564,7 @@ test("settings and snapshot persistence values isolate mutable canonical state",
   app.state.baseDurationsMs = { focus: 1_500_000 };
   app.state.baseAutoStartBreaks = true;
   app.state.baseSelectedTaskId = "task-1";
-  app.state.user = { id: "user-1" };
+  app.state.user = incarnationFixture.accountUser("user-1");
 
   assert.deepEqual(JSON.parse(JSON.stringify(app.settingsValue({ selectedPhase: "focus" }))), {
     selectedPhase: "focus",
@@ -1587,6 +1605,8 @@ test("account deletion requires the exact destructive phrase", () => {
 
 test("account deletion keeps local state when confirmation, connectivity, or server deletion fails", async () => {
   const app = loadTaskProjection();
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.setStorageMethodForTest("guardedMutation", async () => {});
   let requests = 0;
   app.setFetchForTest(async () => {
     requests += 1;
@@ -1615,6 +1635,8 @@ test("account deletion keeps local state when confirmation, connectivity, or ser
 test("confirmed account deletion clears local state only after server success", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.setStorageMethodForTest("guardedMutation", async () => {});
   const requests = [];
   app.state.csrfToken = "csrf-current";
   app.setPromptResult("DELETE");
@@ -1637,7 +1659,10 @@ test("confirmed account deletion clears local state only after server success", 
 test("offline logout clears local data but keeps a durable revocation marker", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.state.localOwnerId = incarnationFixture.ownerId("account-1");
   app.state.csrfToken = "csrf-current";
+  app.setDatabaseForTest(await app.openDatabase());
   app.setFetchForTest(async () => ({ ok: false, status: 503 }));
 
   await app.logout();
@@ -1659,6 +1684,7 @@ test("offline logout marker is durable and explicitly cleared after revocation",
 
 test("session revocation defers without CSRF and accepts a successful server revoke", async () => {
   const app = loadTaskProjection();
+  app.state.user = incarnationFixture.accountUser("account-1");
   assert.equal(await app.requestSessionRevocation(null), false);
   assert.equal(await app.requestSessionRevocation("csrf"), true);
 });
@@ -1722,7 +1748,7 @@ test("deferred offline logout never reactivates the old session while revocation
       return {
         status: 200,
         ok: true,
-        async json() { return { user: { id: "old-account" }, csrfToken: "csrf" }; }
+        async json() { return { user: incarnationFixture.accountUser("old-account"), csrfToken: "csrf" }; }
       };
     }
     return { status: 503, ok: false };
@@ -1738,19 +1764,19 @@ test("deferred offline logout never reactivates the old session while revocation
 test("session refresh uses an uncached same-origin request and rotates CSRF only for the same account", async () => {
   const app = loadTaskProjection();
   const requests = [];
-  app.state.user = { id: "account-1" };
-  app.state.localOwnerId = "account-1";
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.state.localOwnerId = incarnationFixture.ownerId("account-1");
   app.state.csrfToken = "stale-token";
   app.setFetchForTest(async (url, options) => {
     requests.push({ url, options });
     return {
       status: 200,
       ok: true,
-      async json() { return { user: { id: "account-1" }, csrfToken: "fresh-token" }; }
+      async json() { return { user: incarnationFixture.accountUser("account-1"), csrfToken: "fresh-token" }; }
     };
   });
 
-  assert.equal(await app.refreshMutationCsrf("account-1"), "fresh-token");
+  assert.equal(await app.refreshMutationCsrf(incarnationFixture.ownerId("account-1")), "fresh-token");
   assert.equal(app.state.csrfToken, "fresh-token");
   assert.equal(app.state.sessionIdentityValidated, true);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
@@ -1766,8 +1792,8 @@ test("sync preflight reloads durable queues and skips an empty non-forced reques
   app.state.authenticated = true;
   app.state.sessionIdentityValidated = true;
   app.state.csrfToken = "csrf";
-  app.state.user = { id: "account-1" };
-  app.state.localOwnerId = "account-1";
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.state.localOwnerId = incarnationFixture.ownerId("account-1");
   app.state.bootstrapBlocked = false;
   app.state.bootstrapGatePersisted = false;
   app.setQueuesForTest({
@@ -1794,8 +1820,8 @@ test("sync preflight schedules exponential retry when the durable bootstrap gate
   app.state.authenticated = true;
   app.state.sessionIdentityValidated = true;
   app.state.csrfToken = "csrf";
-  app.state.user = { id: "account-1" };
-  app.state.localOwnerId = "account-1";
+  app.state.user = incarnationFixture.accountUser("account-1");
+  app.state.localOwnerId = incarnationFixture.ownerId("account-1");
   app.state.bootstrapBlocked = false;
   app.state.bootstrapGatePersisted = false;
   app.setStorageMethodForTest("readBootstrapState", async () => {
@@ -1834,8 +1860,8 @@ test("retry backoff caps at one minute and does not arm while offline", () => {
 test("account bootstrap restart invalidates foreign ownership before migrating local preferences", async () => {
   const app = loadTaskProjection();
   const calls = [];
-  app.state.user = { id: "account-current" };
-  app.state.bootstrapPending = { userId: "account-old" };
+  app.state.user = incarnationFixture.accountUser("account-current");
+  app.state.bootstrapPending = { userId: incarnationFixture.ownerId("account-old") };
   app.setStorageMethodForTest("invalidateForeignResolution", async (_database, input) => {
     calls.push(["invalidate", input.currentUserId, input.gateToken]);
     return { acquired: true, resolution: null };
@@ -1857,7 +1883,7 @@ test("account bootstrap restart invalidates foreign ownership before migrating l
   await app.restartBootstrapForCurrentAccount();
 
   assert.deepEqual(calls.map((entry) => entry[0]), ["invalidate", "auto-start", "selected-task"]);
-  assert.equal(calls[0][1], "account-current");
+  assert.equal(calls[0][1], incarnationFixture.ownerId("account-current"));
   assert.equal(calls[0][2], "test-tab-id");
   assert.equal(app.state.bootstrapPending, null);
   assert.equal(app.state.bootstrapGateOwned, true);
@@ -1873,11 +1899,13 @@ test("account bootstrap restart invalidates foreign ownership before migrating l
 
 test("bootstrap preview uses an uncached request and persists its bounded clock sample", async () => {
   const app = loadTaskProjection();
+  app.state.user = incarnationFixture.accountUser("account-1");
   const requests = [];
   let savedClockOffset = null;
   const serverTime = new Date().toISOString();
   const serverHlcWallMs = Date.parse(serverTime);
   const payload = {
+    accountIncarnation: app.state.user.accountIncarnation,
     revision: 0,
     canonicalTimer: null,
     history: [],
@@ -1907,7 +1935,8 @@ test("bootstrap preview uses an uncached request and persists its bounded clock 
   assert.equal(await app.loadBootstrapPreview(), payload);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
     url: "/api/v1/bootstrap",
-    options: { credentials: "same-origin", cache: "no-store" }
+    options: { credentials: "same-origin", cache: "no-store",
+      headers: sync.accountHeaders(incarnationFixture.ownerId("account-1")) }
   }]);
   assert.equal(savedClockOffset.requestSequence, 11);
   assert.equal(app.state.clockOffset.requestSequence, 11);
@@ -1915,11 +1944,11 @@ test("bootstrap preview uses an uncached request and persists its bounded clock 
 
 test("bootstrap send validation rotates legacy capture only for the active gate owner", async () => {
   const app = loadTaskProjection();
-  const original = { userId: "account-1", payload: { requestId: "original" } };
-  const rotated = { userId: "account-1", payload: { requestId: "rotated" } };
+  const original = { userId: incarnationFixture.ownerId("account-1"), payload: { requestId: "original" } };
+  const rotated = { userId: incarnationFixture.ownerId("account-1"), payload: { requestId: "rotated" } };
   const validations = [];
   let normalizeCalls = 0;
-  app.state.user = { id: "account-1" };
+  app.state.user = incarnationFixture.accountUser("account-1");
   app.state.bootstrapPending = original;
   app.state.bootstrapGateOwned = true;
   app.setStorageMethodForTest("normalizeLegacyDurationOperations", async (_database, options) => {
@@ -1936,7 +1965,7 @@ test("bootstrap send validation rotates legacy capture only for the active gate 
   assert.equal(app.state.bootstrapPending, rotated);
   assert.equal(normalizeCalls, 1);
   assert.equal(validations[0].pending, rotated);
-  assert.equal(validations[0].currentUserId, "account-1");
+  assert.equal(validations[0].currentUserId, incarnationFixture.ownerId("account-1"));
   assert.equal(validations[0].gateToken, "test-tab-id");
 
   app.state.bootstrapGateOwned = false;
@@ -1948,8 +1977,8 @@ test("bootstrap send validation rotates legacy capture only for the active gate 
 test("bootstrap resolution persists an exact owner-bound request before it can be submitted", async () => {
   const app = loadTaskProjection();
   let captured = null;
-  const pending = { userId: "account-1", payload: { strategy: "keep_remote" } };
-  app.state.user = { id: "account-1" };
+  const pending = { userId: incarnationFixture.ownerId("account-1"), payload: { strategy: "keep_remote" } };
+  app.state.user = incarnationFixture.accountUser("account-1");
   app.state.deviceId = "device-1";
   app.state.bootstrapPreview = { revision: 17 };
   app.setStorageMethodForTest("captureResolution", async (_database, input, options) => {
@@ -1958,12 +1987,14 @@ test("bootstrap resolution persists an exact owner-bound request before it can b
   });
 
   assert.equal(await app.persistBootstrapResolution("keep_remote"), pending);
-  assert.equal(captured.input.userId, "account-1");
+  assert.equal(captured.input.userId, incarnationFixture.ownerId("account-1"));
   assert.equal(captured.input.deviceId, "device-1");
   assert.equal(captured.input.expectedRevision, 17);
   assert.equal(captured.input.strategy, "keep_remote");
   assert.equal(typeof captured.input.requestId, "string");
   assert.deepEqual(JSON.parse(JSON.stringify(captured.options)), {
+    ownerId: incarnationFixture.ownerId("account-1"), currentUserId: incarnationFixture.ownerId("account-1"),
+    localOwnerId: null, expectedUserId: null,
     replaceExisting: false,
     gateToken: "test-tab-id"
   });
@@ -1975,7 +2006,7 @@ test("bootstrap resolution persists an exact owner-bound request before it can b
 test("bootstrap resolution fails closed for unknown strategies and a gate owned by another tab", async () => {
   const app = loadTaskProjection();
   let captureCount = 0;
-  app.state.user = { id: "account-1" };
+  app.state.user = incarnationFixture.accountUser("account-1");
   app.state.deviceId = "device-1";
   app.state.bootstrapPreview = { revision: 17 };
   app.setStorageMethodForTest("captureResolution", async () => {
@@ -2000,7 +2031,7 @@ test("bootstrap resolution fails closed for unknown strategies and a gate owned 
 
 test("session lookup rejects server failures without replacing the current credentials", async () => {
   const app = loadTaskProjection();
-  app.state.user = { id: "account-1" };
+  app.state.user = incarnationFixture.accountUser("account-1");
   app.state.csrfToken = "current-token";
   app.setFetchForTest(async () => ({ status: 503, ok: false }));
 

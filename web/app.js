@@ -11,7 +11,8 @@
     "autoStartBreaks", "taskSelector", "dial", "dialTicks", "dialProgress", "phaseLabel",
     "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "timerToggle",
     "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",
-    "taskInput", "taskList", "taskCount", "deviceMark"
+    "taskInput", "taskList", "taskCount", "deviceMark", "logoutRecovery",
+    "logoutRecoveryRetry", "logoutRecoverySignIn"
   ]);
   const MODULE_GLOBALS = Object.freeze([
     "PomodoroughAppState", "PomodoroughAppStorage", "PomodoroughAppActions",
@@ -92,8 +93,13 @@
       translations: root.PomodoroughI18n
     };
     const builder = root.PomodoroughAppRuntime.createRuntime({ state, externals });
+    const application = { root, host, state, externals };
+    builder.install({
+      manifest: { name: "startup", provides: ["resumeStartup"] },
+      create: () => ({ resumeStartup: () => resumeStartup(application) })
+    });
     for (const browserModule of browserModules(root)) builder.install(browserModule);
-    return { root, host, state, externals, runtime: builder.finalize() };
+    return Object.assign(application, { runtime: builder.finalize() });
   }
 
   function call(application, name, ...args) {
@@ -143,9 +149,27 @@
     call(application, "setupEvents");
     call(application, "render");
     registerServiceWorker(application);
-    if (!await call(application, "clearPendingLogoutData")) return;
+    await resumeStartup(application);
+  }
+
+  async function resumeStartup(application) {
+    if (application.startup) return application.startup;
+    application.startup = resumeStorageAndSession(application);
+    try {
+      return await application.startup;
+    } finally {
+      application.startup = null;
+    }
+  }
+
+  async function resumeStorageAndSession(application) {
+    if (!await call(application, "clearPendingLogoutData")) {
+      await call(application, "initializeSession");
+      if (application.state.logoutRecoveryRequired) return false;
+    }
     if (!await initializeStorage(application)) return;
     await call(application, "initializeSession");
+    return true;
   }
 
   function applicationOrchestration(application) {

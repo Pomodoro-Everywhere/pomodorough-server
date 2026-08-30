@@ -6,6 +6,7 @@
   "use strict";
 
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
+  const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
 
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
@@ -18,10 +19,12 @@
     name: "session",
     externals: ["host", "syncCore", "syncStorage", "elements"],
     requires: [
+      "captureAccountContext",
       "database", "clearLocalData", "tr", "render", "renderProfile", "renderSyncStatus",
       "showNotice", "quarantineOwnerState", "restoreOwnerState", "restartBootstrapForCurrentAccount",
       "needsBootstrapResolution", "prepareBootstrap", "syncNow", "scheduleSync", "scheduleRetry",
-      "resetSyncRetry", "refreshAllPendingOperations", "tabId"
+      "resetSyncRetry", "refreshAllPendingOperations", "tabId", "cleanupIdentity",
+      "assertCleanupIdentity", "resumeStartup"
     ],
     provides: [
       "activateCachedOwnerOffline", "fetchSessionPayload", "applySessionPayload", "loadSession",
@@ -30,7 +33,7 @@
       "queueSessionRevalidation", "restoreSessionAndSync", "handleOnline", "handleOffline",
       "accountDeletionConfirmationIsValid", "pendingLocalLogout", "markPendingLogout",
       "clearPendingLogout", "clearPendingLogoutData", "initializeSession",
-      "requestSessionRevocation", "deleteAccount", "logout",
+      "requestSessionRevocation", "deleteAccount", "logout", "retryPendingLogout",
       "setFetchForTest", "setStorageMethodForTest", "setRevisionStreamForTest",
       "hasRevisionStreamForTest"
     ],
@@ -39,8 +42,8 @@
   });
 
   class RevisionStream {
-    constructor(state, host, use, emit) {
-      Object.assign(this, { state, host, use, emit });
+    constructor(state, host, use, emit, syncCore) {
+      Object.assign(this, { state, host, use, emit, syncCore });
       this.eventSource = null;
       this.receiveRevision = this.receiveRevision.bind(this);
     }
@@ -67,15 +70,21 @@
       if (!this.state.sessionIdentityValidated || !this.state.authenticated
         || this.use.needsBootstrapResolution() || !this.host.navigator.onLine || this.eventSource) return;
       this.eventSource = new this.host.EventSource("/api/v1/stream");
-      this.eventSource.onmessage = this.receiveRevision;
-      this.eventSource.addEventListener("revision", this.receiveRevision);
+      const stream = this.eventSource;
+      const ownerId = this.syncCore.accountOwnerId(this.state.user);
+      const receive = (event) => {
+        if (stream === this.eventSource && ownerId === this.syncCore.accountOwnerId(this.state.user)) this.receiveRevision(event);
+      };
+      this.eventSource.onmessage = receive;
+      this.eventSource.addEventListener("revision", receive);
       this.eventSource.onerror = () => {
-        if (!this.host.navigator.onLine) this.closeRevisionStream();
+        if (stream === this.eventSource && ownerId === this.syncCore.accountOwnerId(this.state.user)
+          && !this.host.navigator.onLine) this.closeRevisionStream();
       };
     }
 
     closeRevisionStreamForIdentityChange(nextUserId) {
-      if (!nextUserId || (this.state.user?.id && this.state.user.id !== nextUserId)) this.closeRevisionStream();
+      if (!nextUserId || (this.syncCore.accountOwnerId(this.state.user) && this.syncCore.accountOwnerId(this.state.user) !== nextUserId)) this.closeRevisionStream();
     }
 
     closeRevisionStream() {
@@ -103,6 +112,7 @@
     constructor(state, external, use, stream) {
       Object.assign(this, { state, use, stream }, external);
       this.redirecting = false;
+      this.sessionRequestSequence = 0;
     }
 
     actions() {
@@ -111,20 +121,24 @@
         "refreshMutationCsrf", "postMutation", "redirectToLogin", "queueSessionRevalidation",
         "restoreSessionAndSync", "handleOnline", "handleOffline", "accountDeletionConfirmationIsValid",
         "pendingLocalLogout", "markPendingLogout", "clearPendingLogout", "clearPendingLogoutData",
-        "initializeSession", "requestSessionRevocation", "deleteAccount", "logout",
+        "initializeSession", "requestSessionRevocation", "deleteAccount", "logout", "retryPendingLogout",
         "setFetchForTest", "setStorageMethodForTest"
       ]);
     }
 
     async activateCachedOwnerOffline() {
+      if (this.pendingLocalLogout()) return false;
       const local = this.state.quarantinedLocal;
+      if (!this.syncCore.validAccountIncarnation(local?.user?.accountIncarnation)) return false;
       if (!this.syncCore.canUseCachedOwnerOffline({
-        sessionValidated: this.state.sessionIdentityValidated, cachedUserId: local?.user?.id,
+        sessionValidated: this.state.sessionIdentityValidated, cachedUserId: this.syncCore.accountOwnerId(local?.user),
         localOwnerId: this.state.localOwnerId, gateOwned: this.state.bootstrapGateOwned,
         pending: this.state.bootstrapPending
       })) return false;
       try {
-        await this.syncStorage.clearBootstrapGate(this.use.database(), this.use.tabId());
+        const context = this.use.captureAccountContext();
+        await this.syncStorage.clearBootstrapGate(this.use.database(), this.use.tabId(), context);
+        context.assertCurrent();
       } catch {
         return false;
       }
@@ -137,22 +151,46 @@
     }
 
     async fetchSessionPayload() {
+      const context = this.use.captureAccountContext();
+      const sequence = ++this.sessionRequestSequence;
+      const identity = this.pendingLocalLogout() ? this.use.cleanupIdentity() : null;
+      const binding = await this.syncStorage.readAccountBinding(this.use.database());
+      context.assertCurrent();
       const response = await this.host.fetch("/api/v1/me", {
         credentials: "same-origin", cache: "no-store"
       });
+      await this.validateSessionBinding(binding, context, sequence);
       if (response.status === 401) {
-        if (this.pendingLocalLogout()) this.clearPendingLogout();
+        if (identity) {
+          if (!await this.clearPendingLogoutData(identity)) return null;
+          this.use.assertCleanupIdentity(identity);
+          this.clearPendingLogout();
+        }
         this.redirectToLogin();
         return null;
       }
       if (!response.ok) throw new Error(this.use.tr(
         "session.checkFailed", { status: response.status }, `Session check failed (${response.status}).`
       ));
-      return response.json();
+      const payload = await response.json();
+      await this.validateSessionBinding(binding, context, sequence);
+      Object.defineProperty(payload, "accountBinding", { value: {
+        ...binding, ownerId: this.syncCore.authenticatedOwnerId(payload.user)
+      } });
+      return payload;
+    }
+
+    async validateSessionBinding(binding, context, sequence) {
+      const current = await this.syncStorage.readAccountBinding(this.use.database());
+      context.assertCurrent();
+      if (sequence !== this.sessionRequestSequence || JSON.stringify(current) !== JSON.stringify(binding)) {
+        throw new this.syncStorage.AccountOwnershipError();
+      }
     }
 
     applySessionPayload(payload) {
-      this.stream.closeRevisionStreamForIdentityChange(payload.user?.id);
+      this.stream.closeRevisionStreamForIdentityChange(this.syncCore.authenticatedOwnerId(payload.user));
+      this.state.authenticatedAccountBinding = payload.accountBinding || null;
       this.state.user = payload.user || null;
       this.state.csrfToken = payload.csrfToken || null;
       this.state.authenticated = true;
@@ -162,23 +200,16 @@
     }
 
     async loadSession() {
+      const identity = this.pendingLocalLogout() ? this.use.cleanupIdentity() : null;
       const payload = await this.fetchSessionPayload();
       if (!payload) return false;
-      if (this.pendingLocalLogout()) {
-        if (!await this.requestSessionRevocation(payload.csrfToken || null)) throw new Error(this.use.tr(
-          "account.logout.revocationPending", {}, "Pending sign-out could not be revoked yet."
-        ));
-        this.clearPendingLogout();
-        this.stream.closeRevisionStreamForIdentityChange();
-        await this.use.clearLocalData();
-        this.redirectToLogin();
-        return false;
-      }
-      const previousOwnerId = this.state.user?.id || this.state.localOwnerId;
-      if (previousOwnerId && payload.user?.id !== previousOwnerId) {
-        this.stream.closeRevisionStreamForIdentityChange(payload.user?.id);
+      if (identity || this.pendingLocalLogout()) return this.finishPendingLogout(payload, identity);
+      const previousOwnerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId;
+      if (previousOwnerId && this.syncCore.accountOwnerId(payload.user) !== previousOwnerId) {
+        const sourceOwnerId = this.state.localOwnerId || previousOwnerId;
+        this.stream.closeRevisionStreamForIdentityChange(this.syncCore.accountOwnerId(payload.user));
         this.use.quarantineOwnerState();
-        this.state.localOwnerId = previousOwnerId;
+        this.state.localOwnerId = sourceOwnerId;
         this.state.bootstrapBlocked = true;
         this.applySessionPayload(payload);
         await this.use.restartBootstrapForCurrentAccount();
@@ -189,15 +220,36 @@
       return true;
     }
 
+    async finishPendingLogout(payload, identity) {
+      const userId = this.syncCore.accountOwnerId(payload.user);
+      if (!identity || typeof userId !== "string" || !userId
+        || identity.expectedUserId && identity.expectedUserId !== userId) {
+        throw new this.syncStorage.AccountOwnershipError();
+      }
+      const authorized = { ...identity, expectedUserId: userId, authenticatedUserId: userId };
+      this.use.assertCleanupIdentity(authorized);
+      this.stream.closeRevisionStream();
+      await this.use.clearLocalData(authorized);
+      this.state.logoutRecoveryRequired = false;
+      if (!await this.requestSessionRevocation(payload.csrfToken || null, userId)) throw new Error(this.use.tr(
+        "account.logout.revocationPending", {}, "Pending sign-out could not be revoked yet."
+      ));
+      this.use.assertCleanupIdentity(authorized);
+      this.clearPendingLogout();
+      this.redirectToLogin();
+      return false;
+    }
+
     async refreshMutationCsrf(expectedUserId) {
       const payload = await this.fetchSessionPayload();
       if (!payload) throw new Error(this.use.tr(
         "session.refreshRequiresSignIn", {}, "Session refresh requires sign-in."
       ));
-      if (!payload.user?.id || payload.user.id !== expectedUserId) {
-        this.stream.closeRevisionStreamForIdentityChange(payload.user?.id);
+      if (!this.syncCore.accountOwnerId(payload.user) || this.syncCore.accountOwnerId(payload.user) !== expectedUserId) {
+        const sourceOwnerId = this.state.localOwnerId || expectedUserId;
+        this.stream.closeRevisionStreamForIdentityChange(this.syncCore.accountOwnerId(payload.user));
         this.use.quarantineOwnerState();
-        this.state.localOwnerId = expectedUserId;
+        this.state.localOwnerId = sourceOwnerId;
         this.state.bootstrapBlocked = true;
         this.applySessionPayload(payload);
         await this.use.restartBootstrapForCurrentAccount();
@@ -211,18 +263,33 @@
     }
 
     async postMutation(url, body, expectedUserId) {
+      const context = this.use.captureAccountContext();
+      if (context.ownerId !== expectedUserId) throw new this.syncStorage.AccountOwnershipError();
+      const headers = this.syncCore.accountHeaders(expectedUserId);
       let timing = null;
       const response = await this.syncCore.postJSONWithCsrfRetry({
-        fetcher: this.host.fetch, url, body, csrfToken: this.state.csrfToken,
+        fetcher: async (...args) => {
+          await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, {
+            ...context, allowBootstrap: url === "/api/v1/bootstrap/resolve"
+          });
+          context.assertCurrent();
+          return this.host.fetch(...args);
+        }, url, body, headers, csrfToken: this.state.csrfToken,
         refreshCsrf: () => this.refreshMutationCsrf(expectedUserId),
-        nextRequestSequence: () => this.syncStorage.allocateClockRequestSequence(this.use.database()),
+        nextRequestSequence: () => this.syncStorage.allocateClockRequestSequence(this.use.database(), context),
         onTiming: (value) => { timing = value; }
       });
+      context.assertCurrent();
       return { response, timing };
     }
 
     redirectToLogin() {
       if (this.redirecting) return;
+      if (this.state.logoutRecoveryRequired
+        && (this.state.logoutRecoveryBusy || !this.host.navigator.onLine)) {
+        this.use.render();
+        return;
+      }
       this.redirecting = true;
       this.host.location.assign("/auth/google/start?return=%2Fapp");
     }
@@ -235,10 +302,12 @@
       });
       this.stream.closeRevisionStream();
       this.use.render();
+      if (this.pendingLocalLogout()) return;
       this.host.setTimeout(() => this.restoreSessionAndSync(), 0);
     }
 
     async restoreSessionAndSync() {
+      if (this.state.logoutRecoveryRequired) return this.retryPendingLogout();
       try {
         if (!this.state.sessionIdentityValidated || !this.state.authenticated || !this.state.csrfToken) {
           await this.loadSession();
@@ -262,7 +331,7 @@
     handleOnline() {
       this.state.retrying = false;
       this.use.resetSyncRetry();
-      this.use.renderSyncStatus();
+      this.use.render();
       this.restoreSessionAndSync();
     }
 
@@ -270,7 +339,7 @@
       this.state.syncing = false;
       this.state.retrying = false;
       this.stream.closeRevisionStream();
-      this.use.renderSyncStatus();
+      this.use.render();
     }
 
     accountDeletionConfirmationIsValid(value) {
@@ -278,11 +347,14 @@
     }
 
     pendingLocalLogout() {
-      try { return this.host.localStorage.getItem(PENDING_LOGOUT_KEY) === "1"; } catch { return false; }
+      try { return this.host.localStorage.getItem(PENDING_LOGOUT_KEY) !== null; } catch { return false; }
     }
 
     markPendingLogout() {
       try {
+        this.host.localStorage.setItem(PENDING_LOGOUT_OWNER_KEY, JSON.stringify({
+          userId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null
+        }));
         this.host.localStorage.setItem(PENDING_LOGOUT_KEY, "1");
       } catch {
         // IndexedDB is still cleared below when durable marker storage is unavailable.
@@ -292,23 +364,38 @@
     clearPendingLogout() {
       try {
         this.host.localStorage.removeItem(PENDING_LOGOUT_KEY);
+        this.host.localStorage.removeItem(PENDING_LOGOUT_OWNER_KEY);
       } catch {
         // A successful server revocation makes a stale inaccessible marker harmless.
       }
     }
 
-    async clearPendingLogoutData() {
+    async clearPendingLogoutData(identity) {
       if (!this.pendingLocalLogout()) return true;
       try {
-        await this.use.clearLocalData();
+        await this.use.clearLocalData(identity);
+        this.state.logoutRecoveryRequired = false;
         return true;
       } catch (error) {
+        this.state.logoutRecoveryRequired = true;
         this.use.showNotice(this.use.tr(
           "account.logout.cleanupFailed", { error: error.message },
           `Signed-out local data could not be cleared: ${error.message}`
         ));
-        this.use.renderSyncStatus();
+        this.use.render();
         return false;
+      }
+    }
+
+    async retryPendingLogout() {
+      if (this.state.logoutRecoveryBusy) return false;
+      this.state.logoutRecoveryBusy = true;
+      this.use.render();
+      try {
+        return await this.use.resumeStartup();
+      } finally {
+        this.state.logoutRecoveryBusy = false;
+        this.use.render();
       }
     }
 
@@ -316,6 +403,7 @@
       try {
         if (await this.loadSession()) await this.use.prepareBootstrap();
       } catch (error) {
+        if (this.pendingLocalLogout()) this.state.logoutRecoveryRequired = true;
         if (!this.state.sessionIdentityValidated) {
           this.state.authenticated = false;
           this.state.csrfToken = null;
@@ -324,14 +412,16 @@
         if (this.host.navigator.onLine) this.state.retrying = true;
         this.use.render();
         this.use.scheduleRetry();
+        this.use.showNotice(error.message);
         this.host.console.warn("Pomodorough session deferred:", error);
       }
     }
 
-    async requestSessionRevocation(csrfToken) {
+    async requestSessionRevocation(csrfToken, ownerId = this.syncCore.accountOwnerId(this.state.user)) {
       if (!csrfToken) return false;
       const response = await this.host.fetch("/api/v1/auth/logout", {
-        method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken }
+        method: "POST", credentials: "same-origin",
+        headers: { "X-CSRF-Token": csrfToken, ...this.syncCore.accountHeaders(ownerId) }
       });
       if (!response.ok && response.status !== 401) throw new Error(this.use.tr(
         "account.logout.failed", { status: response.status }, `Sign out failed (${response.status}).`
@@ -358,11 +448,15 @@
         return;
       }
       this.elements.deleteAccountButton.disabled = true;
+      const context = this.use.captureAccountContext();
       if (!await this.requestAccountDeletion(confirmation)) return;
+      context.assertCurrent();
       this.markPendingLogout();
+      const identity = this.use.cleanupIdentity();
       this.stream.closeRevisionStreamForIdentityChange();
       try {
-        await this.use.clearLocalData();
+        await this.use.clearLocalData(identity);
+        this.use.assertCleanupIdentity(identity);
         this.clearPendingLogout();
       } catch (error) {
         this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
@@ -372,11 +466,16 @@
 
     async requestAccountDeletion(confirmation) {
       try {
+        const context = this.use.captureAccountContext();
+        await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
+        context.assertCurrent();
         const response = await this.host.fetch("/api/v1/account", {
           method: "DELETE", credentials: "same-origin",
-          headers: { "Content-Type": "application/json", "X-CSRF-Token": this.state.csrfToken },
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": this.state.csrfToken,
+            ...this.syncCore.accountHeaders(context.ownerId) },
           body: JSON.stringify({ confirmation })
         });
+        context.assertCurrent();
         if (!response.ok) throw new Error(this.use.tr(
           "account.delete.httpFailed", { status: response.status },
           `Account deletion failed (${response.status}).`
@@ -398,11 +497,15 @@
     }
 
     async logout() {
+      const context = this.use.captureAccountContext();
       try {
         await this.use.refreshAllPendingOperations();
+        await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
       } catch (error) {
         this.host.console.warn("Pomodorough pending queues unavailable before logout:", error);
+        return;
       }
+      context.assertCurrent();
       const pendingCount = this.pendingOperationCount();
       if (pendingCount > 0) {
         const confirmed = this.host.confirm(this.use.tr(
@@ -413,21 +516,26 @@
       }
       this.elements.logoutButton.disabled = true;
       this.markPendingLogout();
+      const identity = this.use.cleanupIdentity();
       let serverRevoked = false;
       try {
-        serverRevoked = await this.requestSessionRevocation(this.state.csrfToken);
+        serverRevoked = await this.requestSessionRevocation(this.state.csrfToken, context.ownerId);
       } catch (error) {
         this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
       }
+      this.use.assertCleanupIdentity(identity);
       this.stream.closeRevisionStream();
       let localDataCleared = false;
       try {
-        await this.use.clearLocalData();
+        await this.use.clearLocalData(identity);
         localDataCleared = true;
       } catch (error) {
         this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
       }
-      if (serverRevoked && localDataCleared) this.clearPendingLogout();
+      if (serverRevoked && localDataCleared) {
+        this.use.assertCleanupIdentity(identity);
+        this.clearPendingLogout();
+      }
       this.redirectToLogin();
     }
 
@@ -441,7 +549,7 @@
   }
 
   function create({ state, external, use, emit }) {
-    const stream = new RevisionStream(state, external.host, use, emit);
+    const stream = new RevisionStream(state, external.host, use, emit, external.syncCore);
     const lifecycle = new SessionLifecycle(state, external, use, stream);
     return { ...stream.actions(), ...lifecycle.actions() };
   }

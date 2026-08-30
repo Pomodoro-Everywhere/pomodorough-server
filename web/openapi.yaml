@@ -16,6 +16,16 @@ info:
     desktop clients authenticate with an access-token bearer credential and do
     not send CSRF credentials.
 
+    Authenticated `/me` user profiles and bootstrap/sync snapshots include
+    `accountIncarnation`, an opaque account-lifetime identifier. Public user IDs
+    can repeat after deletion; incarnations cannot. Web clients bind cached state
+    to this identifier and send `X-Pomodorough-Account-Incarnation` on subsequent
+    authenticated requests. A present header must exactly match the authenticated
+    account incarnation; otherwise the server returns 409 without executing the
+    request. Omission remains supported for existing native clients. Web clients
+    must revalidate identity and use Core bootstrap policy on incarnation changes,
+    not accept lower revisions within the same incarnation.
+
     Revision events are hints only. Clients must use `GET /api/v1/bootstrap` or
     `POST /api/v1/sync` as authoritative sources of timer, task, and duration
     and auto-start preference state.
@@ -888,6 +898,13 @@ components:
           type: string
           format: date-time
 
+    AccountIncarnation:
+      type: string
+      pattern: "^[a-f0-9]{64}$"
+      minLength: 64
+      maxLength: 64
+      description: Opaque authenticated account lifetime, stable until account deletion.
+
     User:
       type: object
       additionalProperties: false
@@ -906,6 +923,8 @@ components:
           type: string
         avatarUrl:
           type: string
+        accountIncarnation:
+          $ref: "#/components/schemas/AccountIncarnation"
 
     MeResponse:
       type: object
@@ -913,7 +932,10 @@ components:
       required: [user, csrfToken]
       properties:
         user:
-          $ref: "#/components/schemas/User"
+          allOf:
+            - $ref: "#/components/schemas/User"
+            - type: object
+              required: [accountIncarnation]
         csrfToken:
           type: string
           description: Web CSRF token, or an empty string for bearer authentication.
@@ -1572,6 +1594,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - accountIncarnation
         - acknowledgements
         - taskAcknowledgements
         - durationAcknowledgements
@@ -1588,6 +1611,8 @@ components:
         - serverHlcWallMs
         - serverHlcCounter
       properties:
+        accountIncarnation:
+          $ref: "#/components/schemas/AccountIncarnation"
         acknowledgements:
           type: array
           description: One entry for each command in request order.

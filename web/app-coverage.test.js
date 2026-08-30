@@ -1,6 +1,7 @@
 "use strict";
 
 const test = require("node:test");
+const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 
 function baseState(overrides = {}) {
@@ -8,10 +9,10 @@ function baseState(overrides = {}) {
     actionLocked: false, authenticated: false, autoStartBreaks: false,
     bootstrapBlocked: false, bootstrapGatePersisted: false, bootstrapPending: null,
     clockOffset: 0, csrfToken: "", deviceId: "device-1", durationsMs: { focus: 1_500_000 },
-    hlcCounter: 0, hlcWallMs: 0, history: [], localOwnerId: "user-1", pending: [],
+    hlcCounter: 0, hlcWallMs: 0, history: [], localOwnerId: incarnationFixture.ownerId("user-1"), pending: [],
     pendingAutoStartOperations: [], pendingDurationOperations: [], pendingSelectedTaskOperations: [],
     pendingTaskOperations: [], ready: true, revision: 2, selectedPhase: "focus",
-    selectedTaskId: null, sessionIdentityValidated: true, tasks: [], user: { id: "user-1" },
+    selectedTaskId: null, sessionIdentityValidated: true, tasks: [], user: incarnationFixture.accountUser("user-1"),
     ...overrides
   };
 }
@@ -21,6 +22,7 @@ function actionFixture(overrides = {}) {
   const calls = [];
   const state = baseState();
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     controlsBlocked: () => false,
     persistDurationOperation: async (phase, durationMs) => ({ pendingDurationOperations: [{ phase, durationMs }] }),
     persistAutoStartOperation: async (enabled) => ({ id: `auto-${enabled}` }),
@@ -36,7 +38,7 @@ function actionFixture(overrides = {}) {
   };
   const host = { setTimeout, clearTimeout };
   const syncStorage = {};
-  const actions = require("./app-actions.js").create({ state, external: { host, syncStorage }, use });
+  const actions = require("./app-actions.js").create({ state, external: { host, syncStorage, syncCore: incarnationFixture.sync }, use });
   return { actions, calls, notices, state, use };
 }
 
@@ -79,7 +81,7 @@ function syncFixture(overrides = {}) {
     navigator: { onLine: true }, console: { warn: (...args) => calls.push(["warn", ...args]) },
     clearTimeout: () => {}, setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; }
   };
-  const syncCore = {
+  const syncCore = { ...incarnationFixture.sync,
     trustedNow: () => 100, requiresBootstrapResolution: () => false,
     serverClockOffset: () => 17, compareTimerCommands: () => 0, buildSyncBatch: (queues) => queues
   };
@@ -89,6 +91,7 @@ function syncFixture(overrides = {}) {
     normalizeLegacyDurationOperations: async () => {}, readQueues: async () => ({})
   };
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     renderSyncStatus: () => calls.push("status"), rebuildOptimisticState: () => calls.push("rebuild"),
     database: () => ({}), compareDurationOperations: () => 0,
     restoreSessionAndSync: () => calls.push("restore"), stopCompletionAlert: () => calls.push("stop"),
@@ -148,10 +151,11 @@ function bootstrapFixture() {
   };
   const host = {
     crypto: { randomUUID: () => "request-1" }, console: { warn: () => {} }, setTimeout,
-    fetch: async () => ({ ok: true, status: 200, json: async () => ({ revision: 8, serverTime: "now" }) })
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ revision: 8, serverTime: "now", accountIncarnation: state.user.accountIncarnation }) })
   };
-  const syncCore = { validateCanonicalResponse: () => {}, serverClockOffset: () => 23, isResolutionStrategy: (v) => v === "keep_remote" };
+  const syncCore = { ...incarnationFixture.sync, validateCanonicalResponse: () => {}, serverClockOffset: () => 23, isResolutionStrategy: (v) => v === "keep_remote" };
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     database: () => ({}), tabId: () => "tab-1", acquireBootstrapGate: async () => ({ acquired: true }),
     refreshMigratedPreferences: async () => {}, defaultDurationsMs: () => ({}), render: () => calls.push("render"),
     redirectToLogin: () => calls.push("login"), tr: (_key, _args, fallback) => fallback
@@ -163,7 +167,7 @@ function bootstrapFixture() {
 
 test("bootstrap preview handles authentication, transport failure, and clock persistence", async () => {
   const fixture = bootstrapFixture();
-  assert.deepEqual(await fixture.actions.loadBootstrapPreview(), { revision: 8, serverTime: "now" });
+  assert.deepEqual(await fixture.actions.loadBootstrapPreview(), { revision: 8, serverTime: "now", accountIncarnation: fixture.state.user.accountIncarnation });
   assert.equal(fixture.state.clockOffset, 23);
 
   fixture.host.fetch = async () => ({ ok: false, status: 401 });
@@ -220,6 +224,7 @@ function viewFixture(overrides = {}) {
     ...overrides.state
   });
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     controlsBlocked: () => false, tr: (_key, _args, fallback) => fallback,
     phaseLabel: (phase) => phase, activeCompletionAlertTimerId: () => null,
     updateTimerCompletion: () => {}, ...overrides.use
@@ -274,6 +279,7 @@ test("view timer instructions and controls distinguish active and terminal state
 test("view timer projection clamps elapsed time and formats accessible clock text", () => {
   const state = baseState({ timer: { status: "idle" } });
   const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     elapsedFor: () => 61_001, emptyTimer: (phase, plannedDurationMs) => ({ phase, plannedDurationMs }),
     selectedDurationMs: () => 90_000
   };

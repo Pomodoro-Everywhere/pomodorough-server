@@ -543,9 +543,17 @@
   }
 
   class AccountOwnershipError extends Error {
-    constructor() {
-      super("Canonical account changed before sync apply.");
+    constructor(message = "Canonical account changed before sync apply.") {
+      super(message);
       this.name = "AccountOwnershipError";
+    }
+  }
+
+  function assertAccountOwnership(snapshot, expectedUserId = null) {
+    const ownerId = core.accountOwnerId(snapshot?.user);
+    if (expectedUserId !== null && (typeof expectedUserId !== "string" || !expectedUserId)
+      || ownerId !== expectedUserId) {
+      throw new AccountOwnershipError("Local account changed. Revalidate the session before making changes.");
     }
   }
 
@@ -649,103 +657,83 @@
     return latest;
   }
 
-  function allocateClockRequestSequence(database) {
+  function assertStorageContext(results, input = {}) {
+    input.assertCurrent?.();
+    if (Object.prototype.hasOwnProperty.call(input, "expectedUserId")) {
+      assertAccountOwnership(results.snapshot?.value, input.expectedUserId);
+    }
+    const target = results.gate?.value?.accountOwnerId;
+    if (target && input.currentUserId && target !== input.currentUserId) throw new AccountOwnershipError();
+  }
+
+  function accountMetadataMutation(database, input, keys, change) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(META_STORE, "readwrite");
       const store = transaction.objectStore(META_STORE);
-      const request = store.get(CLOCK_REQUEST_SEQUENCE_KEY);
-      let sequence;
+      const requests = Object.fromEntries([...new Set(["snapshot", GATE_KEY, RESOLUTION_KEY, ...keys])]
+        .map((key) => [key === GATE_KEY ? "gate" : key === RESOLUTION_KEY ? "resolution" : key, store.get(key)]));
+      let outcome;
       let failure;
-      request.onsuccess = () => {
-        sequence = (Number(request.result?.value) || 0) + 1;
-        if (!Number.isSafeInteger(sequence) || sequence <= 0) {
-          failure = new ClockRangeError();
-          transaction.abort();
-          return;
-        }
-        store.put({ key: CLOCK_REQUEST_SEQUENCE_KEY, value: sequence });
-      };
-      transaction.oncomplete = () => resolve(sequence);
+      const results = {};
+      collectTransactionRequests(requests, results, () => {
+        assertStorageContext(results, input);
+        outcome = change(store, results);
+      }, (error) => { failure = error; transaction.abort(); });
+      transaction.oncomplete = () => resolve(outcome);
       transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
       transaction.onerror = () => {};
     });
   }
 
-  function saveClockOffset(database, sample) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      const request = store.get(CLOCK_OFFSET_KEY);
-      let saved;
-      let failure;
-      request.onsuccess = () => {
-        try {
-          saved = putLatestClockOffset(store, request.result?.value || null, sample);
-        } catch (error) {
-          failure = error;
-          transaction.abort();
-        }
-      };
-      transaction.oncomplete = () => resolve(saved);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+  function allocateClockRequestSequence(database, input = {}) {
+    return accountMetadataMutation(database, input, [CLOCK_REQUEST_SEQUENCE_KEY], (store, results) => {
+      const sequence = (Number(results[CLOCK_REQUEST_SEQUENCE_KEY]?.value) || 0) + 1;
+      if (!Number.isSafeInteger(sequence) || sequence <= 0) throw new ClockRangeError();
+      store.put({ key: CLOCK_REQUEST_SEQUENCE_KEY, value: sequence });
+      return sequence;
     });
+  }
+
+  function saveClockOffset(database, sample, input = {}) {
+    return accountMetadataMutation(database, input, [CLOCK_OFFSET_KEY], (store, results) =>
+      putLatestClockOffset(store, results[CLOCK_OFFSET_KEY]?.value || null, sample));
   }
 
   function acquireBootstrapGate(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      const gateRequest = store.get(GATE_KEY);
-      const resolutionRequest = store.get(RESOLUTION_KEY);
-      let remaining = 2;
-      let existing;
-      let resolution;
-      let result;
-      const acquire = () => {
-        remaining -= 1;
-        if (remaining !== 0) return;
-        if (existing?.token !== input.token && leaseIsLive(existing, input.nowMs)) {
-          result = { acquired: false, takenOver: false, gate: existing, resolution };
-          return;
-        }
-        const gate = leaseValue(input.token, input.nowMs, input.leaseMs);
-        const takenOver = Boolean(existing && existing.token !== input.token);
-        if (resolution && resolution.gateToken !== input.token) {
-          resolution = { ...resolution, gateToken: input.token };
-          store.put({ key: RESOLUTION_KEY, value: resolution });
-        }
-        result = {
-          acquired: true,
-          takenOver,
-          gate,
-          resolution
-        };
-        store.put({ key: GATE_KEY, value: gate });
-      };
-      gateRequest.onsuccess = () => {
-        existing = gateRequest.result?.value || null;
-        acquire();
-      };
-      resolutionRequest.onsuccess = () => {
-        resolution = resolutionRequest.result?.value || null;
-        acquire();
-      };
-      transaction.oncomplete = () => resolve(result);
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+    return accountMetadataMutation(database, { ...input, currentUserId: null }, [], (store, results) => {
+      const existing = results.gate?.value || null;
+      let resolution = results.resolution?.value || null;
+      if (existing?.accountOwnerId && input.currentUserId && existing.accountOwnerId !== input.currentUserId) {
+        return { acquired: false, takenOver: false, gate: existing, resolution };
+      }
+      if (existing?.token !== input.token && leaseIsLive(existing, input.nowMs)) {
+        return { acquired: false, takenOver: false, gate: existing, resolution };
+      }
+      const gate = boundBootstrapLease(input.token, input);
+      const takenOver = Boolean(existing && existing.token !== input.token);
+      if (resolution && resolution.gateToken !== input.token) {
+        resolution = { ...resolution, gateToken: input.token };
+        store.put({ key: RESOLUTION_KEY, value: resolution });
+      }
+      store.put({ key: GATE_KEY, value: gate });
+      return { acquired: true, takenOver, gate, resolution };
     });
+  }
+
+  function boundBootstrapLease(token, input) {
+    return { ...leaseValue(token, input.nowMs, input.leaseMs),
+      ...(input.currentUserId ? { accountOwnerId: input.currentUserId } : {}) };
   }
 
   async function acquireBootstrapGateWithLegacyAutoStart(database, input) {
     const gate = await acquireBootstrapGate(database, input);
     if (!gate.acquired || gate.resolution) return gate;
     const legacyAutoStartMigration = await migrateLegacyAutoStart(database, {
-      operationId: input.legacyAutoStartOperationId,
+      ...input, operationId: input.legacyAutoStartOperationId,
       nowMs: input.nowMs
     });
     const legacySelectedTaskMigration = await migrateLegacySelectedTask(database, {
-      operationId: input.legacySelectedTaskOperationId,
+      ...input, operationId: input.legacySelectedTaskOperationId,
       nowMs: input.nowMs
     });
     return { ...gate, legacyAutoStartMigration, legacySelectedTaskMigration };
@@ -764,64 +752,32 @@
     };
   }
 
-  function clearBootstrapGate(database, token) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      const gateRequest = store.get(GATE_KEY);
-      const resolutionRequest = store.get(RESOLUTION_KEY);
-      let remaining = 2;
-      let gate;
-      let resolution;
-      let failure = null;
-      const clear = () => {
-        remaining -= 1;
-        if (remaining !== 0) return;
-        if (resolution) {
-          failure = new BootstrapGateError("Saved history resolution still requires completion.");
-          transaction.abort();
-          return;
-        }
-        if (!gate || gate.token !== token) {
-          failure = new BootstrapGateError("Bootstrap gate is owned by another tab.");
-          transaction.abort();
-          return;
-        }
-        store.delete(GATE_KEY);
-      };
-      gateRequest.onsuccess = () => {
-        gate = gateRequest.result?.value || null;
-        clear();
-      };
-      resolutionRequest.onsuccess = () => {
-        resolution = resolutionRequest.result?.value || null;
-        clear();
-      };
-      transaction.oncomplete = () => resolve(true);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+  function clearBootstrapGate(database, token, input = {}) {
+    return accountMetadataMutation(database, input, [], (store, results) => {
+      if (results.resolution) throw new BootstrapGateError("Saved history resolution still requires completion.");
+      if (results.gate?.value?.token !== token) throw new BootstrapGateError("Bootstrap gate is owned by another tab.");
+      store.delete(GATE_KEY);
+      return true;
     });
   }
 
-  function guardedMutation(database, storeNames, operation) {
+  function guardedMutation(database, storeNames, operation, input = {}) {
+    const expectedUserId = input.expectedUserId ?? null;
     return new Promise((resolve, reject) => {
       const names = [...new Set([META_STORE, ...storeNames])];
       const transaction = database.transaction(names, "readwrite");
       const metaStore = transaction.objectStore(META_STORE);
       const outcome = { value: undefined };
       let failure = null;
-      let checksRemaining = 2;
-      let gate;
-      let resolution;
-      const proceed = () => {
-        checksRemaining -= 1;
-        if (checksRemaining !== 0) return;
-        if (gate || resolution) {
-          failure = new BootstrapGateError();
-          transaction.abort();
-          return;
-        }
+      const requests = {
+        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
+        snapshot: metaStore.get("snapshot")
+      };
+      collectRequestResults(requests, (results) => {
         try {
+          if (!input.allowBootstrap && (results.gate || results.resolution)) throw new BootstrapGateError();
+          assertStorageContext(results, input);
+          assertAccountOwnership(results.snapshot?.value, expectedUserId);
           operation(transaction, outcome, (error) => {
             failure = error;
             transaction.abort();
@@ -830,17 +786,7 @@
           failure = error;
           transaction.abort();
         }
-      };
-      const gateRequest = metaStore.get(GATE_KEY);
-      gateRequest.onsuccess = () => {
-        gate = gateRequest.result;
-        proceed();
-      };
-      const resolutionRequest = metaStore.get(RESOLUTION_KEY);
-      resolutionRequest.onsuccess = () => {
-        resolution = resolutionRequest.result;
-        proceed();
-      };
+      });
       transaction.oncomplete = () => resolve(outcome.value);
       transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
       transaction.onerror = () => {};
@@ -863,13 +809,13 @@
     const requests = {
       gate: metaStore.get(GATE_KEY),
       resolution: metaStore.get(RESOLUTION_KEY),
+      projectionSnapshot: metaStore.get("snapshot"),
       hlc: metaStore.get("hlc")
     };
     if (input.withDeviceSequence) requests.deviceSequence = metaStore.get("deviceSequence");
     if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
     if (!requiresProjection) return requests;
     Object.assign(requests, {
-      projectionSnapshot: metaStore.get("snapshot"),
       projectionDeviceId: metaStore.get("deviceId"),
       projectionCommands: transaction.objectStore(PENDING_STORE).getAll(),
       projectionTasks: transaction.objectStore(TASK_PENDING_STORE).getAll(),
@@ -962,6 +908,7 @@
   }
 
   function allocateMutation(database, input) {
+    const expectedUserId = input.expectedUserId ?? null;
     return new Promise((resolve, reject) => {
       const requiresProjection = input.requireProjection === true || input.sharedCore != null;
       const transaction = database.transaction(synchronizedMutationStores(input), "readwrite");
@@ -972,6 +919,8 @@
       collectRequestResults(requests, (results) => {
         try {
           if (results.gate || results.resolution) throw new BootstrapGateError();
+          input.assertCurrent?.();
+          assertAccountOwnership(results.projectionSnapshot?.value, expectedUserId);
           const clock = mutationClock(input, results);
           allocated = input.build(clock);
           if (requiresProjection) {
@@ -1201,6 +1150,8 @@
 
   function applyCancelAndClearTimer(transaction, input, results) {
     if (results.gate || results.resolution) throw new BootstrapGateError();
+    input.assertCurrent?.();
+    assertAccountOwnership(results.snapshot?.value, input.expectedUserId);
     const commands = results.commands || [];
     const timer = projectedTimer(results.snapshot?.value, commands, input.nowMs, input.sharedCore);
     const types = cancelCommandTypes(timer, input);
@@ -1217,6 +1168,7 @@
   }
 
   function cancelAndClearTimer(database, input) {
+    input = { ...input };
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(timerMutationStoreNames(input.withUuidV7), "readwrite");
       const requests = timerMutationRequests(transaction, input, false);
@@ -1263,15 +1215,15 @@
       : null;
   }
 
-  function completionCommandRequest(input, timer, projectedTimer, ownerGranted) {
+  function completionCommandRequest(input, timer, projection, ownerGranted) {
     return storageAuthority(input).completionPlan({
       kind: "commandRequest",
       commandType: "finish",
       requestedTimer: input.requestedTimer || timer,
-      projectedTimer,
+      projectedTimer: projection.canonicalTimer,
       automatic: input.manual !== true,
       generateAutoBreak: true,
-      autoStartBreaks: input.autoStartBreaks === true,
+      autoStartBreaks: projection.autoStartBreaks,
       localDeviceId: input.deviceId,
       ownership: completionOwnership(timer.id, input, ownerGranted)
     });
@@ -1317,13 +1269,27 @@
   }
 
   function finishProjection(results, input, commands, finishCommand, wallMs) {
-    return projectState({
+    const pending = commands.concat(finishCommand);
+    const projection = projectState({
       snapshot: results.snapshot?.value || null,
-      queues: { commands: commands.concat(finishCommand) },
+      queues: {
+        commands: pending,
+        taskOperations: results.taskOperations,
+        durationOperations: results.durationOperations,
+        autoStartOperations: results.autoStartOperations,
+        selectedTaskOperations: results.selectedTaskOperations
+      },
       nowMs: wallMs,
       deviceId: input.deviceId,
       sharedCore: input.sharedCore
     });
+    const timer = projection.canonicalTimer;
+    const start = pending.filter((command) => command.type === "start" && command.timerId === timer?.id)
+      .sort(core.compareTimerCommands).at(-1);
+    if (timer && start?.dependsOnCommandId) {
+      projection.canonicalTimer = { ...timer, dependsOnCommandId: start.dependsOnCommandId };
+    }
+    return projection;
   }
 
   function finishAppliedCompletion(input, finishCommand, projection, ownerGranted) {
@@ -1333,7 +1299,7 @@
       phase: finishCommand.phase,
       occurredAt: finishCommand.occurredAt,
       history: projection.history,
-      autoStartBreaks: input.autoStartBreaks === true,
+      autoStartBreaks: projection.autoStartBreaks,
       localDeviceId: input.deviceId,
       ownsTimer: ownerGranted,
       referenceMs: Date.parse(finishCommand.occurredAt)
@@ -1367,7 +1333,7 @@
     };
   }
 
-  function persistFinishedTimer(metaStore, pendingStore, input, batch, ownership) {
+  function persistFinishedTimer(metaStore, pendingStore, input, batch, ownership, settings) {
     for (const command of batch.persisted) pendingStore.add(command);
     if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: batch.commandIds.at(-1) });
     if (batch.persisted.length === 2 && ownership.ownerGranted) {
@@ -1385,38 +1351,46 @@
     metaStore.put({ key: "deviceSequence", value: batch.highestSequence + batch.persisted.length });
     metaStore.put({ key: "hlc", value: { wallMs: batch.wallMs, counter: batch.counter } });
     if (input.settings) {
-      metaStore.put({ key: "settings", value: { ...input.settings, selectedPhase: batch.selectedPhase } });
+      metaStore.put({ key: "settings", value: { ...settings, selectedPhase: batch.selectedPhase } });
     }
   }
 
   function applyFinishedTimer(transaction, input, results) {
     if (results.gate || results.resolution) throw new BootstrapGateError();
+    input.assertCurrent?.();
+    assertAccountOwnership(results.snapshot?.value, input.expectedUserId);
     const commands = results.commands || [];
-    const projected = projectedTimer(results.snapshot?.value, commands, input.nowMs, input.sharedCore);
-    const timer = input.requestedTimer || projectedTimer(
-      results.snapshot?.value, commands, input.localNowMs ?? input.nowMs, input.sharedCore
-    );
+    const projection = finishProjection(results, input, commands, [], input.nowMs);
+    const projected = projection.canonicalTimer;
+    const timer = input.requestedTimer || finishProjection(
+      results, input, commands, [], input.localNowMs ?? input.nowMs
+    ).canonicalTimer;
     if (!timer || timer.id !== input.timerId || timer.phase !== input.phase
-      || !["running", "paused"].includes(timer.status) || projected?.id !== timer.id) {
+      || !["running", "paused"].includes(timer.status) || projected?.id !== timer.id
+      || projected.lastIntent?.type === "finish") {
       return { transitioned: false, reason: "stale", commands: [] };
     }
     const metaStore = transaction.objectStore(META_STORE);
     const ownership = finishTimerOwnership(metaStore, results, input, commands, timer);
     if (ownership.denied) return ownership.denied;
-    const requestPlan = completionCommandRequest(input, timer, projected, ownership.ownerGranted);
+    const requestPlan = completionCommandRequest(input, timer, projection, ownership.ownerGranted);
     if (!requestPlan.commandEligible) {
       return { transitioned: false, reason: "stale", commands: [] };
     }
     const batch = finishCommandBatch(
       results, input, timer, commands, ownership.ownerGranted, requestPlan
     );
-    validateTimerCommandBatch(results, input, commands, batch.persisted, batch.wallMs);
+    const prospective = finishProjection(results, input, commands, batch.persisted, batch.wallMs);
+    for (const command of batch.persisted) {
+      validateProspectiveProjection(prospective, command, PENDING_STORE);
+    }
     persistFinishedTimer(
       metaStore,
       transaction.objectStore(PENDING_STORE),
       input,
       batch,
-      ownership
+      ownership,
+      results.settings?.value || {}
     );
     return {
       transitioned: true, reason: "", commands: batch.persisted, selectedPhase: batch.selectedPhase,
@@ -1425,9 +1399,10 @@
   }
 
   function finishTimer(database, input) {
+    input = { ...input };
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction(timerMutationStoreNames(input.withUuidV7), "readwrite");
-      const requests = timerMutationRequests(transaction, input, true);
+      const transaction = database.transaction(timerMutationStoreNames(true), "readwrite");
+      const requests = finishedTimerRequests(transaction, input);
       const results = {};
       let outcome;
       let failure = null;
@@ -1443,9 +1418,19 @@
     });
   }
 
+  function finishedTimerRequests(transaction, input) {
+    return {
+      ...timerMutationRequests(transaction, input, true),
+      settings: transaction.objectStore(META_STORE).get("settings"),
+      taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
+      durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
+      autoStartOperations: transaction.objectStore(AUTO_START_PENDING_STORE).getAll(),
+      selectedTaskOperations: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()
+    };
+  }
+
   function renewTimerOwnership(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, PENDING_STORE], "readwrite");
+    return guardedMutation(database, [PENDING_STORE], (transaction, outcome, abort) => {
       const store = transaction.objectStore(META_STORE);
       const requests = {
         owner: store.get(TIMER_OWNER_KEY),
@@ -1453,11 +1438,9 @@
         commands: transaction.objectStore(PENDING_STORE).getAll()
       };
       const results = {};
-      let remaining = Object.keys(requests).length;
-      let renewed = false;
-      const renew = () => {
-        remaining -= 1;
-        if (remaining !== 0) return;
+      outcome.value = false;
+      collectTransactionRequests(requests, results, () => {
+        input.assertCurrent?.();
         let owner = results.owner?.value || null;
         owner ||= claimMissingTimerOwner(
           store,
@@ -1470,39 +1453,28 @@
         const leaseLive = Number(owner?.leaseExpiresAtMs) > input.nowMs;
         if (!sameTimerAndDevice || owner.tabId !== input.tabId && leaseLive) return;
         store.put({ key: TIMER_OWNER_KEY, value: timerOwnerValue(input.timerId, input) });
-        renewed = true;
-      };
-      for (const [name, request] of Object.entries(requests)) {
-        request.onsuccess = () => {
-          results[name] = request.result;
-          renew();
-        };
-      }
-      transaction.oncomplete = () => resolve(renewed);
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
-    });
+        outcome.value = true;
+      }, abort);
+    }, { ...input, allowBootstrap: true });
   }
 
   function releaseTimerOwnership(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
+    return guardedMutation(database, [], (transaction, outcome, abort) => {
       const store = transaction.objectStore(META_STORE);
       const request = store.get(TIMER_OWNER_KEY);
       request.onsuccess = () => {
+        try { input.assertCurrent?.(); } catch (error) { abort(error); return; }
         const owner = request.result?.value || null;
         if (owner?.deviceId !== input.deviceId || owner.tabId !== input.tabId) return;
         store.put({ key: TIMER_OWNER_KEY, value: { ...owner, leaseExpiresAtMs: input.nowMs } });
       };
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
-    });
+    }, { ...input, allowBootstrap: true });
   }
 
   function resolutionCaptureRequests(transaction) {
     const metaStore = transaction.objectStore(META_STORE);
     return {
+      snapshot: metaStore.get("snapshot"),
       gate: metaStore.get(GATE_KEY),
       resolution: metaStore.get(RESOLUTION_KEY),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
@@ -1514,6 +1486,7 @@
   }
 
   function validateResolutionCapture(results, input, options) {
+    assertStorageContext(results, { ...options, currentUserId: input.userId });
     const gate = results.gate?.value || null;
     if (!gate || gate.token !== options.gateToken) {
       throw new BootstrapGateError("Bootstrap gate is owned by another tab.");
@@ -1569,7 +1542,8 @@
     validateResolutionCapture(results, input, options);
     const pending = {
       ...core.createPendingResolution(resolutionCaptureInput(transaction, results, input)),
-      gateToken: options.gateToken
+      gateToken: options.gateToken,
+      sourceOwnerId: core.accountOwnerId(results.snapshot?.value?.user) || null
     };
     const violation = core.resolutionLimitViolation(pending.payload);
     if (violation) throw new ResolutionLimitError(violation);
@@ -1599,95 +1573,59 @@
     });
   }
 
+  async function readAccountBinding(database) {
+    const transaction = database.transaction(META_STORE, "readonly");
+    const store = transaction.objectStore(META_STORE);
+    const [snapshot, gate] = await Promise.all([requestResult(store.get("snapshot")), requestResult(store.get(GATE_KEY))]);
+    return { sourceOwnerId: core.accountOwnerId(snapshot?.value?.user) || null,
+      gateOwnerId: gate?.value?.accountOwnerId || null };
+  }
+
+  function assertBootstrapAccountBinding(results, input) {
+    const gateOwnerId = results.gate?.value?.accountOwnerId;
+    if (!gateOwnerId || gateOwnerId === input.currentUserId) return;
+    const binding = input.accountBinding;
+    if (!binding || binding.ownerId !== input.currentUserId || binding.gateOwnerId !== gateOwnerId
+      || binding.sourceOwnerId !== (core.accountOwnerId(results.snapshot?.value?.user) || null)) {
+      throw new AccountOwnershipError();
+    }
+  }
+
   function invalidateForeignResolution(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      const gateRequest = store.get(GATE_KEY);
-      const resolutionRequest = store.get(RESOLUTION_KEY);
-      let remaining = 2;
-      let gate;
-      let resolution;
-      let result;
-      const invalidate = () => {
-        remaining -= 1;
-        if (remaining !== 0) return;
-        if (gate?.token !== input.gateToken && leaseIsLive(gate, input.nowMs)) {
-          result = {
-            acquired: false,
-            invalidated: false,
-            gate,
-            resolution: resolution?.userId === input.currentUserId ? resolution : null
-          };
-          return;
-        }
-        const invalidated = Boolean(resolution && resolution.userId !== input.currentUserId);
-        if (invalidated) {
-          store.delete(RESOLUTION_KEY);
-          resolution = null;
-        } else if (resolution && resolution.gateToken !== input.gateToken) {
-          resolution = { ...resolution, gateToken: input.gateToken };
-          store.put({ key: RESOLUTION_KEY, value: resolution });
-        }
-        gate = leaseValue(input.gateToken, input.nowMs, input.leaseMs);
-        store.put({ key: GATE_KEY, value: gate });
-        result = { acquired: true, invalidated, resolution, gate };
-      };
-      gateRequest.onsuccess = () => {
-        gate = gateRequest.result?.value || null;
-        invalidate();
-      };
-      resolutionRequest.onsuccess = () => {
-        resolution = resolutionRequest.result?.value || null;
-        invalidate();
-      };
-      transaction.oncomplete = () => resolve(result);
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+    const sourceFence = { ...input, currentUserId: null };
+    return accountMetadataMutation(database, sourceFence, [], (store, results) => {
+      assertBootstrapAccountBinding(results, input);
+      let gate = results.gate?.value || null;
+      let resolution = results.resolution?.value || null;
+      if (gate?.token !== input.gateToken && leaseIsLive(gate, input.nowMs)) {
+        return { acquired: false, invalidated: false, gate,
+          resolution: resolution?.userId === input.currentUserId ? resolution : null };
+      }
+      const invalidated = Boolean(resolution && resolution.userId !== input.currentUserId);
+      if (invalidated) {
+        store.delete(RESOLUTION_KEY);
+        resolution = null;
+      } else if (resolution && resolution.gateToken !== input.gateToken) {
+        resolution = { ...resolution, gateToken: input.gateToken };
+        store.put({ key: RESOLUTION_KEY, value: resolution });
+      }
+      gate = boundBootstrapLease(input.gateToken, input);
+      store.put({ key: GATE_KEY, value: gate });
+      return { acquired: true, invalidated, resolution, gate };
     });
   }
 
   function validatePendingForSend(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
-      const store = transaction.objectStore(META_STORE);
-      const gateRequest = store.get(GATE_KEY);
-      const resolutionRequest = store.get(RESOLUTION_KEY);
-      let remaining = 2;
-      let gate;
-      let resolution;
-      let failure = null;
-      const validate = () => {
-        remaining -= 1;
-        if (remaining !== 0) return;
-        if (!input.pending || input.pending.userId !== input.currentUserId
-          || !resolution || resolution.userId !== input.currentUserId
-          || JSON.stringify(resolution) !== JSON.stringify(input.pending)) {
-          failure = new BootstrapGateError("Saved history resolution does not match current account.");
-          transaction.abort();
-          return;
-        }
-        if (!gate || gate.token !== input.gateToken || resolution.gateToken !== input.gateToken) {
-          failure = new BootstrapGateError("Bootstrap gate is owned by another tab.");
-          transaction.abort();
-          return;
-        }
-        store.put({
-          key: GATE_KEY,
-          value: leaseValue(input.gateToken, input.nowMs, input.leaseMs)
-        });
-      };
-      gateRequest.onsuccess = () => {
-        gate = gateRequest.result?.value || null;
-        validate();
-      };
-      resolutionRequest.onsuccess = () => {
-        resolution = resolutionRequest.result?.value || null;
-        validate();
-      };
-      transaction.oncomplete = () => resolve(resolution);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+    return accountMetadataMutation(database, input, [], (store, results) => {
+      const resolution = results.resolution?.value || null;
+      if (!input.pending || input.pending.userId !== input.currentUserId
+        || !resolution || resolution.userId !== input.currentUserId
+        || JSON.stringify(resolution) !== JSON.stringify(input.pending)) {
+        throw new BootstrapGateError("Saved history resolution does not match current account.");
+      }
+      validateResolutionApply(results, input.pending);
+      store.put({ key: GATE_KEY, value: boundBootstrapLease(input.gateToken, input) });
+      return resolution;
     });
   }
 
@@ -1727,7 +1665,7 @@
     const gate = results.gate?.value || null;
     const resolution = results.resolution?.value || null;
     const storedSnapshot = results.snapshot?.value || null;
-    const isStaleSuccess = !resolution && !gate && storedSnapshot?.user?.id === pending.userId
+    const isStaleSuccess = !resolution && !gate && core.accountOwnerId(storedSnapshot?.user) === pending.userId
       && Number(storedSnapshot.revision) >= Number(canonical.snapshot.revision);
     if (!isStaleSuccess) return null;
     completeResolutionLegacyMigrations(metaStore, results.settings, pending);
@@ -1753,6 +1691,8 @@
   }
 
   function validateResolutionApply(results, pending) {
+    assertStorageContext(results, { currentUserId: pending.userId,
+      ...(Object.hasOwn(pending, "sourceOwnerId") ? { expectedUserId: pending.sourceOwnerId } : {}) });
     const resolution = results.resolution?.value || null;
     if (!resolution || JSON.stringify(resolution) !== JSON.stringify(pending)) {
       throw new BootstrapGateError("Saved history resolution changed before apply.");
@@ -1823,6 +1763,8 @@
   }
 
   function applyPendingResolution(transaction, results, pending, canonical) {
+    canonical.assertCurrent?.();
+    assertAccountOwnership(canonical.snapshot, pending.userId);
     const metaStore = transaction.objectStore(META_STORE);
     const staleOutcome = staleResolutionOutcome(metaStore, results, pending, canonical);
     if (staleOutcome) return staleOutcome;
@@ -1878,8 +1820,9 @@
   }
 
   function validateSyncResponseApply(input, results, storedSnapshot) {
-    const storedUserId = storedSnapshot?.user?.id || null;
-    const incomingUserId = input.snapshot?.user?.id || null;
+    input.assertCurrent?.();
+    const storedUserId = core.accountOwnerId(storedSnapshot?.user) || null;
+    const incomingUserId = core.accountOwnerId(input.snapshot?.user) || null;
     if (!input.expectedUserId || storedUserId !== input.expectedUserId
       || incomingUserId !== input.expectedUserId) throw new AccountOwnershipError();
     if (results.gate || results.resolution) throw new BootstrapGateError();
@@ -2048,79 +1991,50 @@
   }
 
   function migrateLegacySelectedTask(database, input) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, SELECTED_TASK_PENDING_STORE], "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
-      const settingsRequest = metaStore.get("settings");
-      let result;
-      settingsRequest.onsuccess = () => {
-        const settings = settingsRequest.result?.value || {};
-        if (settings.selectedTaskSyncBootstrapped === true) {
-          result = { migrated: false, operation: null };
-          return;
-        }
-        const { selectedTaskId, ...nextSettings } = settings;
-        let operation = null;
-        if (typeof selectedTaskId === "string" && selectedTaskId) {
-          operation = {
-            id: input.operationId,
-            taskId: selectedTaskId,
-            occurredAt: LEGACY_EPOCH,
-            hlcWallMs: 0,
-            hlcCounter: 0
-          };
-          transaction.objectStore(SELECTED_TASK_PENDING_STORE).add(operation);
-        }
-        metaStore.put({
-          key: "settings",
-          value: { ...nextSettings, selectedTaskSyncBootstrapped: true }
-        });
-        result = { migrated: operation !== null, operation };
-      };
-      transaction.oncomplete = () => resolve(result);
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+    return legacySettingsMutation(database, SELECTED_TASK_PENDING_STORE, input, (transaction, settings) => {
+      if (settings.selectedTaskSyncBootstrapped === true) return { migrated: false, operation: null };
+      const { selectedTaskId, ...nextSettings } = settings;
+      const operation = typeof selectedTaskId === "string" && selectedTaskId
+        ? { id: input.operationId, taskId: selectedTaskId, occurredAt: LEGACY_EPOCH, hlcWallMs: 0, hlcCounter: 0 }
+        : null;
+      if (operation) transaction.objectStore(SELECTED_TASK_PENDING_STORE).add(operation);
+      transaction.objectStore(META_STORE).put({
+        key: "settings", value: { ...nextSettings, selectedTaskSyncBootstrapped: true }
+      });
+      return { migrated: operation !== null, operation };
     });
   }
 
   function migrateLegacyAutoStart(database, input) {
+    return legacySettingsMutation(database, AUTO_START_PENDING_STORE, input, (transaction, settings) => {
+      if (settings.autoStartSyncBootstrapped === true) return { migrated: false, operation: null };
+      const { autoStartBreaks, autoStartBreaksExplicit, ...nextSettings } = settings;
+      const operation = autoStartBreaks === true || autoStartBreaksExplicit === true
+        ? { id: input.operationId, enabled: autoStartBreaks === true,
+          occurredAt: LEGACY_EPOCH, hlcWallMs: 0, hlcCounter: 0 } : null;
+      if (operation) transaction.objectStore(AUTO_START_PENDING_STORE).add(operation);
+      transaction.objectStore(META_STORE).put({
+        key: "settings", value: { ...nextSettings, autoStartSyncBootstrapped: true }
+      });
+      return { migrated: operation !== null, operation };
+    });
+  }
+
+  function legacySettingsMutation(database, storeName, input, change) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, AUTO_START_PENDING_STORE], "readwrite");
+      const transaction = database.transaction([META_STORE, storeName], "readwrite");
       const metaStore = transaction.objectStore(META_STORE);
-      const settingsRequest = metaStore.get("settings");
-      let settingsRecord;
+      const results = {};
+      const requests = { settings: metaStore.get("settings"), snapshot: metaStore.get("snapshot"),
+        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY) };
       let result;
-      const migrate = () => {
-        const settings = settingsRecord?.value || {};
-        if (settings.autoStartSyncBootstrapped === true) {
-          result = { migrated: false, operation: null };
-          return;
-        }
-        const { autoStartBreaks, autoStartBreaksExplicit, ...nextSettings } = settings;
-        let operation = null;
-        const explicitChoice = autoStartBreaks === true || autoStartBreaksExplicit === true;
-        if (explicitChoice) {
-          operation = {
-            id: input.operationId,
-            enabled: autoStartBreaks === true,
-            occurredAt: new Date(0).toISOString(),
-            hlcWallMs: 0,
-            hlcCounter: 0
-          };
-          transaction.objectStore(AUTO_START_PENDING_STORE).add(operation);
-        }
-        metaStore.put({
-          key: "settings",
-          value: { ...nextSettings, autoStartSyncBootstrapped: true }
-        });
-        result = { migrated: operation !== null, operation };
-      };
-      settingsRequest.onsuccess = () => {
-        settingsRecord = settingsRequest.result;
-        migrate();
-      };
+      let failure;
+      collectTransactionRequests(requests, results, () => {
+        assertStorageContext(results, input);
+        result = change(transaction, results.settings?.value || {});
+      }, (error) => { failure = error; transaction.abort(); });
       transaction.oncomplete = () => resolve(result);
-      transaction.onabort = () => reject(transaction.error || new Error("Storage transaction aborted."));
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
       transaction.onerror = () => {};
     });
   }
@@ -2173,6 +2087,7 @@
       const metaStore = transaction.objectStore(META_STORE);
       const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
       const requests = {
+        snapshot: metaStore.get("snapshot"),
         durations: durationStore.getAll(),
         gate: metaStore.get(GATE_KEY),
         resolution: metaStore.get(RESOLUTION_KEY)
@@ -2181,6 +2096,7 @@
       const state = { changed: 0, resolution: null };
       let failure = null;
       collectTransactionRequests(requests, results, () => {
+        assertStorageContext(results, options);
         canonicalizeLegacyDurationQueue(durationStore, results.durations || [], state);
         state.resolution = rotateLegacyDurationResolution(
           metaStore,
@@ -2202,6 +2118,7 @@
   return Object.freeze({
     BootstrapGateError,
     AccountOwnershipError,
+    assertAccountOwnership,
     ClockRangeError,
     UUIDRangeError,
     ResolutionLimitError,
@@ -2225,6 +2142,7 @@
     finishTimer,
     guardedMutation,
     invalidateForeignResolution,
+    readAccountBinding,
     leaseIsLive,
     migrateLegacyAutoStart,
     migrateLegacySelectedTask,
