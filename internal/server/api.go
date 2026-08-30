@@ -80,7 +80,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ide
 		writeAPIError(w, http.StatusBadRequest, "type DELETE to confirm account deletion")
 		return
 	}
-	if err := s.store.DeleteUserForGeneration(r.Context(), identity.UserID, identity.Generation); err != nil {
+	if err := s.store.DeleteUserWithReceipt(r.Context(), identity.UserID, identity.Generation, identity.Credential, identity.CSRFHash); err != nil {
 		if isUnauthorized(err) {
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return

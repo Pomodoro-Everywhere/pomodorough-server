@@ -228,6 +228,25 @@ period (30 days or less is recommended). Account deletion removes live storage
 immediately; a restore from an older backup must reapply deletions recorded
 after that backup rather than resurrect deleted accounts.
 
+`DELETE /api/v1/account` retries with the exact originally authorized credential
+and `{"confirmation":"DELETE"}` return `204` only for that committed deletion.
+Clients must try the retained access token before refreshing, even when expired;
+only a definitive `401` without a receipt permits normal refresh. Other failures
+remain ambiguous, and `401` is never a success signal. Web retries additionally
+require the original CSRF cookie/header and configured `Origin`.
+
+Private `receipt-*.json` files in `DELETION_LEDGER_DIR` bind a digest of the user,
+authentication method, and original opaque-token hash to the deleted generation
+(and the CSRF hash for web sessions). Receipts are fsynced before the unchanged
+version-1 tombstone; a receipt without its tombstone cannot confirm deletion.
+Confirmation rechecks the tombstone and completes old-generation file removal
+under the account lock, leaving any recreated generation untouched. Receipts
+never authorize another endpoint and do not expire with credentials. Keep the
+entire independent ledger durable and backed up: do not roll it back with
+`DATA_DIR`, remove receipts, or downgrade to a release without replay support
+while clients have pending confirmations. Losing receipts can strand recovery;
+losing tombstones can resurrect backed-up accounts.
+
 Application-level abuse controls allow 30 authentication requests per source
 IP per minute, 240 authenticated requests per account per minute, and four
 concurrent revision streams per account. Rejections return `429` with

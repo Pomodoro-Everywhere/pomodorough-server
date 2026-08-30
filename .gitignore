@@ -19,3 +19,7 @@ pomodorough.env
 *.pem
 *.p12
 *.pfx
+.DS_Store
+.cache_ggshield
+.ruff_cache/
+/.audit/

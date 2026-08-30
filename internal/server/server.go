@@ -47,6 +47,7 @@ type principal struct {
 	Method     string
 	CSRFHash   []byte
 	Generation int64
+	Credential store.DeletionCredential
 }
 
 type authenticatedHandler func(http.ResponseWriter, *http.Request, principal)
@@ -101,7 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/refresh", s.rateLimitByIP(http.HandlerFunc(s.handleRefresh)))
 	mux.Handle("GET /api/v1/me", s.requireAuth(s.handleMe))
 	mux.Handle("POST /api/v1/auth/logout", s.requireMutation(s.handleLogout))
-	mux.Handle("DELETE /api/v1/account", s.requireMutation(s.handleDeleteAccount))
+	mux.Handle("DELETE /api/v1/account", s.requireAccountDeletion())
 	mux.Handle("POST /api/v1/auth/revoke-device", s.requireMutation(s.handleRevokeDevice))
 	mux.Handle("POST /api/v1/sync", s.requireMutation(s.handleSync))
 	mux.Handle("GET /api/v1/bootstrap", s.requireAuth(s.handleBootstrap))
@@ -189,34 +190,20 @@ func (s *Server) writeRateLimit(w http.ResponseWriter, r *http.Request, scope st
 }
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
-	var token, expectedKind, method string
-	if authorization := r.Header.Get("Authorization"); authorization != "" {
-		var err error
-		token, err = authn.BearerToken(authorization)
-		if err != nil {
-			return principal{}, store.ErrUnauthorized
-		}
-		expectedKind = "access"
-		method = "bearer"
-	} else {
-		cookie, err := r.Cookie(authn.WebSessionCookie)
-		if err != nil {
-			return principal{}, store.ErrUnauthorized
-		}
-		token = cookie.Value
-		expectedKind = "web"
-		method = "cookie"
-	}
-	userID, tokenHash, err := authn.ParseOpaqueToken(token)
+	userID, credential, err := requestCredential(r)
 	if err != nil {
 		return principal{}, store.ErrUnauthorized
+	}
+	expectedKind := "web"
+	if credential.Method == "bearer" {
+		expectedKind = "access"
 	}
 	db, err := s.store.OpenExistingUser(r.Context(), userID)
 	if err != nil {
 		return principal{}, store.ErrUnauthorized
 	}
 	defer db.Close()
-	info, err := store.Authenticate(r.Context(), db, tokenHash, expectedKind, time.Now())
+	info, err := store.Authenticate(r.Context(), db, credential.TokenHash, expectedKind, time.Now())
 	if err != nil || !authn.EqualString(info.Profile.ID, userID) {
 		return principal{}, store.ErrUnauthorized
 	}
@@ -225,9 +212,10 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 		Profile:    info.Profile,
 		SessionID:  info.SessionID,
 		DeviceID:   info.DeviceID,
-		Method:     method,
+		Method:     credential.Method,
 		CSRFHash:   info.CSRFHash,
 		Generation: info.Generation,
+		Credential: credential,
 	}, nil
 }
 

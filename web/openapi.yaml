@@ -325,6 +325,14 @@ paths:
         the conditional CSRF headers. Deletion is immediate in live storage;
         encrypted infrastructure backups may retain deleted data until their
         documented rotation period expires.
+        If a successful response is lost, repeat this DELETE with the exact
+        originally authorized access token or web session and confirmation.
+        A private durable receipt confirms only that deleted account generation,
+        even after credential expiry or server restart; it never deletes a
+        recreated account or authenticates another endpoint. Web retries require
+        the original CSRF token, matching cookie/header, and same-site Origin.
+        A 204 is sent only after the old generation's remaining live files are
+        purged. A 401 without a receipt is not evidence of successful deletion.
       security:
         - cookieAuth: []
         - bearerAuth: []
@@ -339,7 +347,7 @@ paths:
               $ref: "#/components/schemas/DeleteAccountRequest"
       responses:
         "204":
-          description: Account and all active session data were deleted.
+          description: The credential's account generation was deleted, or its committed deletion was confirmed again.
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

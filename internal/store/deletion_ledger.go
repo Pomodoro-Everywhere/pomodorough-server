@@ -146,7 +146,7 @@ func (s *Store) recordDeletion(userID string, generation int64, now time.Time) e
 	return syncDirectory(s.deletionLedgerDir, "deletion ledger")
 }
 
-func (s *Store) writePendingDeletionRecord(record deletionRecord) (string, error) {
+func (s *Store) writePendingDeletionRecord(record any) (string, error) {
 	temporary, err := os.CreateTemp(s.deletionLedgerDir, ".pending-deletion-")
 	if err != nil {
 		return "", fmt.Errorf("create deletion record: %w", err)
