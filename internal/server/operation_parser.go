@@ -107,6 +107,9 @@ func parseCommand(deviceID string, input syncCommandJSON, now time.Time) (timer.
 	if input.ObservedElapsedMs == nil {
 		return timer.Command{}, fmt.Errorf("missing observed elapsed")
 	}
+	if *input.ObservedElapsedMs < -maxSafeInteger || *input.ObservedElapsedMs > maxSafeInteger {
+		return timer.Command{}, fmt.Errorf("observed elapsed is outside the safe integer range")
+	}
 	return timer.Command{
 		ID: input.ID, DeviceID: deviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
 		TaskID: input.TaskID, Type: input.Type, Phase: input.Phase, PlannedDurationMs: *input.PlannedDurationMs,

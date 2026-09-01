@@ -1095,7 +1095,9 @@ components:
         observedElapsedMs:
           type: integer
           format: int64
-          description: Client-observed elapsed time; reducer clamps it to timer bounds.
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+          description: Client-observed elapsed time within JavaScript's safe integer range; reducer clamps it to timer bounds.
       example:
         id: command-01J2YKCP7G5A3F9D8S6H4J2K1L
         deviceSequence: 12
