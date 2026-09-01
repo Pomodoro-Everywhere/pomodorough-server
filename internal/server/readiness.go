@@ -1,0 +1,228 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+
+	"pomodorough/internal/authn"
+	"pomodorough/internal/store"
+)
+
+const (
+	readinessCheckTimeout  = 2 * time.Second
+	readinessAssetMaxBytes = 2 << 20
+	readinessCoreVersion   = "0.10.0"
+)
+
+type readinessAsset struct {
+	name       string
+	digest     string
+	provenance bool
+}
+
+type readinessCore interface {
+	Call(context.Context, string, []byte) ([]byte, error)
+}
+
+type readinessFailure struct {
+	code string
+	err  error
+}
+
+func (failure *readinessFailure) Error() string { return failure.err.Error() }
+func (failure *readinessFailure) Unwrap() error { return failure.err }
+
+var readinessAssets = []readinessAsset{
+	{"index.html", "248841452f1e5bc9589dcce6ddd1d477d133512237cc14fcd61f043a71f53c2a", false},
+	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
+	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
+	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
+	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
+	{"app.html", "88f1b3c940bd190fad4c951fe770c0085c0164c6a0fcf37452fd28f05fa92a15", false},
+	{"app.css", "bb7f5a06c790def0bde9b76f16fe7e6ca2415b7f9e507792d00c0defddb34623", false},
+	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
+	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
+	{"pomodorough_core.wasm", "f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6", true},
+	{"sync-core.js", "22df0bae998505f4ef6c9e399ff845c96bf0c30ad9f937ef19aa4b03c69b5739", false},
+	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
+	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
+	{"sync-storage.js", "8edfec5cb309202cb20a9974e67ab00e85c0ce5cea38325000730b7d3da3bef4", false},
+	{"i18n.js", "0ea53b34e8ec9c924a89bb2ca54364401feaa356fb10deb028c6098e3ece1d0e", false},
+	{"locales/en.json", "3a3b6569acd14efba313e3b6f9ce793d08e2d71a086275cf4d4caf456eef68e1", false},
+	{"locales/ar-XB.json", "12e9bc96684f9009c873194b9b77d0cfde6d4e27bc6bd3f4582721c6e31a715e", false},
+	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
+	{"app-state.js", "409eb06f5ecdb2e4959da956d0542591505309dd0c3dcd0f23c4a43801f7c7e3", false},
+	{"app-storage.js", "95a9ae6f290b0b3bf65cabe3e3379ae1c59c21f771e984886c5772a2d40c5dfa", false},
+	{"app-actions.js", "6c4be81531571c7f349108e3e7b3c8f790e3874d297889c05ba6af5b75d06dba", false},
+	{"app-sync.js", "3fa6beaba550fbb455e03602a9b262b85773654c01080e8e7a60e1d2f18a1061", false},
+	{"app-bootstrap.js", "7dce5b16ba3f6cf27c7ce4887e07ce2cee55228830670686a2c9620cfe94814d", false},
+	{"app-session.js", "cadbf5d431a39e89f99cd68abdcc58ea69f3ec2d77f05bd2f40d408148e870c1", false},
+	{"app-view.js", "2440d3c489cf8680ef464e5511b0c85aaab27a9837f64f2940962060922fee56", false},
+	{"app.js", "467eff8543fe1a409447dc41b64766b2509f26cc0a08e5aeea35f8e904775c35", false},
+	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
+	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
+	{"sw.js", "d55098fa1ce41f43954a284e3fb28944bac6cb470992d6d15ce0a2b3071bbffc", false},
+	{"openapi.yaml", "8a5db31a006cecf6ec857f938fb0903dd90f13a9a43fa5933cec8132faec2a49", false},
+}
+
+func readinessKeyDigest(secret []byte) [sha256.Size]byte {
+	return sha256.Sum256(secret)
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, request *http.Request) {
+	timeout := s.readinessTimeout
+	if timeout <= 0 {
+		timeout = readinessCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
+	defer cancel()
+	if err := s.readiness(ctx); err != nil {
+		code := readinessErrorCode(ctx, err)
+		s.logger.Warn("readiness check failed", "code", code)
+		writeJSON(w, http.StatusServiceUnavailable, readinessResponse{Status: "not_ready", Error: code})
+		return
+	}
+	writeJSON(w, http.StatusOK, readinessResponse{Status: "ready"})
+}
+
+type readinessResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+func (s *Server) readiness(ctx context.Context) error {
+	digest := readinessKeyDigest(s.cfg.AppSecret)
+	if len(s.cfg.AppSecret) < 32 || s.codec == nil || !authn.EqualHash(digest[:], s.appSecretDigest[:]) {
+		return readinessError("key_unavailable", errors.New("application key material is unavailable"))
+	}
+	if s.store == nil {
+		return readinessError("storage_unavailable", errors.New("account storage is unavailable"))
+	}
+	if err := s.store.Ready(ctx); err != nil {
+		return err
+	}
+	if err := s.validateReadinessAssets(ctx); err != nil {
+		return err
+	}
+	return s.validateReadinessCore(ctx)
+}
+
+func (s *Server) validateReadinessAssets(ctx context.Context) error {
+	info, err := os.Lstat(s.cfg.WebRoot)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return readinessError("web_unavailable", errors.New("web root is unavailable"))
+	}
+	root, err := os.OpenRoot(s.cfg.WebRoot)
+	if err != nil {
+		return readinessError("web_unavailable", errors.New("web root is unavailable"))
+	}
+	defer root.Close()
+	for _, asset := range readinessAssets {
+		if err := validateReadinessAsset(ctx, root, asset); err != nil {
+			code := "web_unavailable"
+			if asset.provenance {
+				code = "core_provenance_invalid"
+			}
+			return readinessError(code, err)
+		}
+	}
+	return nil
+}
+
+func validateReadinessAsset(ctx context.Context, root *os.Root, asset readinessAsset) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := root.Lstat(asset.name)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o444 == 0 ||
+		info.Size() <= 0 || info.Size() > readinessAssetMaxBytes {
+		return fmt.Errorf("required asset %s has invalid metadata", asset.name)
+	}
+	file, err := root.Open(asset.name)
+	if err != nil {
+		return fmt.Errorf("open required asset %s: %w", asset.name, err)
+	}
+	digest, readErr := readinessFileDigest(ctx, file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return fmt.Errorf("read required asset %s", asset.name)
+	}
+	if hex.EncodeToString(digest[:]) != asset.digest {
+		return fmt.Errorf("required asset %s has invalid digest", asset.name)
+	}
+	return nil
+}
+
+func readinessFileDigest(ctx context.Context, reader io.Reader) ([sha256.Size]byte, error) {
+	hash := sha256.New()
+	buffer := make([]byte, 64*1024)
+	limited := io.LimitReader(reader, readinessAssetMaxBytes+1)
+	for {
+		if err := ctx.Err(); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		count, err := limited.Read(buffer)
+		if count > 0 {
+			_, _ = hash.Write(buffer[:count])
+		}
+		if errors.Is(err, io.EOF) {
+			var digest [sha256.Size]byte
+			copy(digest[:], hash.Sum(nil))
+			return digest, nil
+		}
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+	}
+}
+
+func (s *Server) validateReadinessCore(ctx context.Context) error {
+	if s.readinessCore == nil {
+		return readinessError("core_unavailable", errors.New("shared core runtime is unavailable"))
+	}
+	result, err := s.readinessCore.Call(ctx, "core.version", []byte(`{}`))
+	if err != nil || len(result) > 4096 {
+		return readinessError("core_unavailable", errors.New("shared core runtime probe failed"))
+	}
+	var envelope struct {
+		OK    bool `json:"ok"`
+		Value struct {
+			SchemaVersion int    `json:"schemaVersion"`
+			CoreVersion   string `json:"coreVersion"`
+		} `json:"value"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(result))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF || !envelope.OK ||
+		envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != readinessCoreVersion {
+		return readinessError("core_unavailable", errors.New("shared core runtime identity is invalid"))
+	}
+	return nil
+}
+
+func readinessError(code string, err error) error {
+	return &readinessFailure{code: code, err: err}
+}
+
+func readinessErrorCode(ctx context.Context, err error) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return "check_timeout"
+	}
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return "check_canceled"
+	}
+	var failure *readinessFailure
+	if errors.As(err, &failure) {
+		return failure.code
+	}
+	return store.ReadinessErrorCode(err)
+}

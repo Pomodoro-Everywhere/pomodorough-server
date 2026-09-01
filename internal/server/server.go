@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 
 	"pomodorough/internal/authn"
 	"pomodorough/internal/config"
+	"pomodorough/internal/sharedcore"
 	"pomodorough/internal/store"
 )
 
@@ -27,6 +27,9 @@ type Server struct {
 	cfg                     config.Config
 	store                   *store.Store
 	codec                   *authn.Codec
+	appSecretDigest         [32]byte
+	readinessCore           readinessCore
+	readinessTimeout        time.Duration
 	logger                  *slog.Logger
 	oauthConfig             *oauth2.Config
 	webVerifier             *oidc.IDTokenVerifier
@@ -34,6 +37,7 @@ type Server struct {
 	hub                     *revisionHub
 	streamKeepaliveInterval time.Duration
 	authIPLimiter           *windowRateLimiter
+	clientIPs               clientIPPolicy
 	accountLimiter          *windowRateLimiter
 	streamLimiter           *concurrentLimiter
 	metrics                 *requestMetrics
@@ -53,9 +57,17 @@ type principal struct {
 type authenticatedHandler func(http.ResponseWriter, *http.Request, principal)
 
 func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Server, error) {
+	if len(cfg.AppSecret) < 32 {
+		return nil, errors.New("APP_SECRET must be at least 32 bytes")
+	}
+	cfg.AppSecret = append([]byte(nil), cfg.AppSecret...)
 	codec, err := authn.NewCodec(cfg.AppSecret)
 	if err != nil {
 		return nil, fmt.Errorf("initialize transient token codec: %w", err)
+	}
+	clientIPs, valid := newClientIPPolicy(cfg.TrustedProxyCIDRs, cfg.TrustedProxyHops)
+	if !valid {
+		return nil, errors.New("trusted proxy configuration is incomplete or invalid")
 	}
 	keySetContext := oidc.ClientContext(context.Background(), &http.Client{Timeout: 10 * time.Second})
 	keySet := oidc.NewRemoteKeySet(keySetContext, "https://www.googleapis.com/oauth2/v3/certs")
@@ -63,10 +75,13 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 		cfg:                     cfg,
 		store:                   userStore,
 		codec:                   codec,
+		appSecretDigest:         readinessKeyDigest(cfg.AppSecret),
+		readinessTimeout:        readinessCheckTimeout,
 		logger:                  logger,
 		hub:                     newRevisionHub(),
 		streamKeepaliveInterval: 20 * time.Second,
 		authIPLimiter:           newWindowRateLimiter(30, time.Minute),
+		clientIPs:               clientIPs,
 		accountLimiter:          newWindowRateLimiter(240, time.Minute),
 		streamLimiter:           newConcurrentLimiter(4),
 		metrics:                 newRequestMetrics(),
@@ -90,9 +105,22 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 	return s, nil
 }
 
+func NewForTraffic(cfg config.Config, userStore *store.Store, logger *slog.Logger, core *sharedcore.Core) (*Server, error) {
+	if core == nil {
+		return nil, errors.New("shared core runtime is required")
+	}
+	application, err := New(cfg, userStore, logger)
+	if err != nil {
+		return nil, err
+	}
+	application.readinessCore = core
+	return application, nil
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /openapi.yaml", s.handleOpenAPISpec)
 	mux.Handle("GET /auth/google/start", s.rateLimitByIP(http.HandlerFunc(s.handleGoogleStart)))
@@ -159,27 +187,12 @@ func (s *Server) requireMutation(next authenticatedHandler) http.Handler {
 
 func (s *Server) rateLimitByIP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowed, retryAfter := s.authIPLimiter.allow(clientIP(r), time.Now()); !allowed {
+		if allowed, retryAfter := s.authIPLimiter.allow(s.clientIPs.clientIP(r), time.Now()); !allowed {
 			s.writeRateLimit(w, r, "ip", retryAfter)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	remote := net.ParseIP(host)
-	if remote != nil && remote.IsLoopback() {
-		forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
-		if net.ParseIP(forwarded) != nil {
-			return forwarded
-		}
-	}
-	return host
 }
 
 func (s *Server) writeRateLimit(w http.ResponseWriter, r *http.Request, scope string, retryAfter time.Duration) {

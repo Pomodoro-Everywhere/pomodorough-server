@@ -9,6 +9,7 @@ __pycache__/
 .env.*
 !.env.example
 pomodorough.env
+/integration-credentials.json
 
 *.db
 *.db-shm
@@ -30,4 +31,11 @@ pomodorough.env
 .DS_Store
 .cache_ggshield
 .ruff_cache/
+/.coverage
+/.coverage.*
+/coverage.json
+/coverage.lcov
+/coverage.out
+/coverage.xml
+/htmlcov/
 /.audit/

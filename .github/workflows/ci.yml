@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: 44ff36e125cf653c1761dfb5951f6e77e41a2c82
+          ref: 542aca9a322a1b04c3e53d4a76152f385675d0a1
           path: shared-core
           persist-credentials: false
       - name: Rebuild and verify embedded shared core
@@ -42,14 +42,14 @@ jobs:
             "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 f34fe57b5e080dd69afa5c7f28b60bc77851c7f874db99744eab72b4e1858877
+            --sha256 f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 f34fe57b5e080dd69afa5c7f28b60bc77851c7f874db99744eab72b4e1858877 \
+            --sha256 f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6 \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
           cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm
-          test "$(cat internal/sharedcore/CORE_COMMIT)" = "44ff36e125cf653c1761dfb5951f6e77e41a2c82"
+          test "$(cat internal/sharedcore/CORE_COMMIT)" = "542aca9a322a1b04c3e53d4a76152f385675d0a1"
           (cd internal/sharedcore && sha256sum --check pomodorough_core.wasm.sha256)
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -60,6 +60,8 @@ jobs:
         run: go test ./...
       - name: Test shared-core provenance verifier
         run: python3 -m unittest scripts/test_shared_core_provenance.py -v
+      - name: Test integration credential documentation
+        run: python3 -m unittest scripts/test_integration_credential_docs.py -v
       - name: Test with race detector
         run: go test -race ./...
       - name: Repeat Server race gate under package parallelism

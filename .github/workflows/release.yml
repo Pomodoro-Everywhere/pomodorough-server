@@ -21,12 +21,24 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
       - name: Check out pinned shared core
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: 44ff36e125cf653c1761dfb5951f6e77e41a2c82
+          ref: 542aca9a322a1b04c3e53d4a76152f385675d0a1
           path: shared-core
           persist-credentials: false
       - name: Rebuild and verify embedded shared core
@@ -42,9 +54,9 @@ jobs:
           python3 shared-core/scripts/verify_wasm_artifact.py "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 f34fe57b5e080dd69afa5c7f28b60bc77851c7f874db99744eab72b4e1858877
+            --sha256 f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 f34fe57b5e080dd69afa5c7f28b60bc77851c7f874db99744eab72b4e1858877 \
+            --sha256 f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6 \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
@@ -62,8 +74,12 @@ jobs:
         run: go test ./...
       - name: Test shared-core provenance verifier
         run: python3 -m unittest scripts/test_shared_core_provenance.py -v
+      - name: Test integration credential documentation
+        run: python3 -m unittest scripts/test_integration_credential_docs.py -v
       - name: Test server with race detector
         run: go test -race ./...
+      - name: Test release identity contract
+        run: python3 -m unittest scripts/test_release_identity_s7.py -v
       - name: Vet server
         run: go vet ./...
       - name: Scan reachable Go dependencies
@@ -97,7 +113,7 @@ jobs:
   build:
     name: Build ${{ matrix.goos }} ${{ matrix.goarch }}
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -109,108 +125,298 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
+            runner: ubuntu-24.04
+            binary: pomodorough
           - goos: linux
             goarch: arm64
+            runner: ubuntu-24.04-arm
+            binary: pomodorough
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+            binary: pomodorough
           - goos: darwin
             goarch: arm64
+            runner: macos-14
+            binary: pomodorough
+          - goos: windows
+            goarch: amd64
+            runner: windows-2022
+            binary: pomodorough.exe
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+      - name: Validate tag-bound source identity
+        if: matrix.goos != 'windows'
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Validate tag-bound Windows source identity
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/release_identity.py validate-source `
+            --tag "$env:GITHUB_REF_NAME" `
+            --workflow-sha "$env:GITHUB_WORKFLOW_SHA" `
+            --event-sha "$env:GITHUB_SHA" `
+            --event-ref "$env:GITHUB_REF" `
+            --workflow-ref "$env:GITHUB_WORKFLOW_REF" `
+            --github-repository "$env:GITHUB_REPOSITORY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
+      - name: Build reproducible native binary
+        if: matrix.goos != 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
+          ldflags="-s -w -buildid= -X=main.version=${version} -X=main.sourceCommit=${GITHUB_SHA}"
+          ldflags+=" -X=main.embeddedVersionMarker=pomodorough-release-version:${version}"
+          ldflags+=" -X=main.embeddedCommitMarker=pomodorough-release-commit:${GITHUB_SHA}"
+          mkdir -p dist/native
+          first_binary="$RUNNER_TEMP/pomodorough.first"
+          second_binary="dist/native/${BINARY_NAME}"
+          CGO_ENABLED=0 go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "$ldflags" \
+            -o "$first_binary" \
+            ./cmd/pomodorough
+          CGO_ENABLED=0 go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "$ldflags" \
+            -o "$second_binary" \
+            ./cmd/pomodorough
+          cmp "$first_binary" "$second_binary"
+      - name: Build reproducible native Windows binary
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = python scripts/release_identity.py version "$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ldflags = "-s -w -buildid= -X=main.version=$version -X=main.sourceCommit=$env:GITHUB_SHA"
+          $ldflags += " -X=main.embeddedVersionMarker=pomodorough-release-version:$version"
+          $ldflags += " -X=main.embeddedCommitMarker=pomodorough-release-commit:$env:GITHUB_SHA"
+          New-Item -ItemType Directory -Force -Path dist/native | Out-Null
+          $firstBinary = Join-Path $env:RUNNER_TEMP "pomodorough.first.exe"
+          $secondBinary = "dist/native/$env:BINARY_NAME"
+          $env:CGO_ENABLED = "0"
+          go build -trimpath -buildvcs=false -ldflags $ldflags -o $firstBinary ./cmd/pomodorough
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -buildvcs=false -ldflags $ldflags -o $secondBinary ./cmd/pomodorough
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $firstHash = (Get-FileHash -Algorithm SHA256 -Path $firstBinary).Hash
+          $secondHash = (Get-FileHash -Algorithm SHA256 -Path $secondBinary).Hash
+          if ($firstHash -cne $secondHash) { throw "Windows builds are not reproducible" }
+      - name: Smoke-test and bind native binary identity
+        if: matrix.goos != 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
+          package="pomodorough-${version}-${GOOS}-${GOARCH}"
+          python3 scripts/release_identity.py record-binary \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --goos "$GOOS" \
+            --goarch "$GOARCH" \
+            --binary "dist/native/${BINARY_NAME}" \
+            --output "dist/native/${package}.native.json"
+      - name: Smoke-test and bind native Windows binary identity
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = python scripts/release_identity.py version "$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = "pomodorough-$version-$env:GOOS-$env:GOARCH"
+          $nativeRecord = "dist/native/$package.native.json"
+          python scripts/release_identity.py record-binary `
+            --tag "$env:GITHUB_REF_NAME" `
+            --commit "$env:GITHUB_SHA" `
+            --goos "$env:GOOS" `
+            --goarch "$env:GOARCH" `
+            --binary "dist/native/$env:BINARY_NAME" `
+            --output "$nativeRecord"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attest immutable native test record
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/native/${{ matrix.binary }}
+            dist/native/*.native.json
+      - name: Upload native binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/native
+          if-no-files-found: error
+      - name: Upload immutable native test record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-record-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/native/*.native.json
+          if-no-files-found: error
+
+  package:
+    name: Package ${{ matrix.goos }} ${{ matrix.goarch }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: pomodorough
+          - goos: linux
+            goarch: arm64
+            binary: pomodorough
+          - goos: darwin
+            goarch: amd64
+            binary: pomodorough
+          - goos: darwin
+            goarch: arm64
+            binary: pomodorough
+          - goos: windows
+            goarch: amd64
+            binary: pomodorough.exe
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Download native binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: native-binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: binary
+      - name: Verify native binary and test-record attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for asset in binary/*; do
+            gh attestation verify "$asset" --repo "$GH_REPO"
+          done
       - name: Build reproducible archive
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
           package="pomodorough-${version}-${GOOS}-${GOARCH}"
           source_date_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          chmod 0755 "binary/${BINARY_NAME}"
 
-          mkdir -p "dist/${package}"
-          CGO_ENABLED=0 go build \
-            -trimpath \
-            -buildvcs=false \
-            -ldflags="-s -w -buildid=" \
-            -o "dist/${package}/pomodorough" \
-            ./cmd/pomodorough
-          cp -R web deploy docs scripts README.md LICENSE "dist/${package}/"
-          tar \
-            --sort=name \
-            --mtime="@${source_date_epoch}" \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -C dist \
-            -cf - \
-            "${package}" | gzip -n > "dist/${package}.tar.gz"
+          assemble_archive() {
+            rm -rf "dist/${package}" "dist/${package}.tar.gz"
+            mkdir -p "dist/${package}"
+            install -m 0755 "binary/${BINARY_NAME}" "dist/${package}/${BINARY_NAME}"
+            cp -R web deploy docs scripts README.md LICENSE "dist/${package}/"
+            tar \
+              --sort=name \
+              --mtime="@${source_date_epoch}" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C dist \
+              -cf - \
+              "${package}" | gzip -n > "dist/${package}.tar.gz"
+          }
 
+          assemble_archive
           first_archive="$RUNNER_TEMP/${package}.first.tar.gz"
           cp "dist/${package}.tar.gz" "$first_archive"
-          rm -rf "dist/${package}" "dist/${package}.tar.gz"
-          mkdir -p "dist/${package}"
-          CGO_ENABLED=0 go build \
-            -trimpath \
-            -buildvcs=false \
-            -ldflags="-s -w -buildid=" \
-            -o "dist/${package}/pomodorough" \
-            ./cmd/pomodorough
-          cp -R web deploy docs scripts README.md LICENSE "dist/${package}/"
-          tar \
-            --sort=name \
-            --mtime="@${source_date_epoch}" \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -C dist \
-            -cf - \
-            "${package}" | gzip -n > "dist/${package}.tar.gz"
+          assemble_archive
           cmp "$first_archive" "dist/${package}.tar.gz"
-      - name: Smoke-test archive layout and architecture
+      - name: Bind final archive to native-tested binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
           package="pomodorough-${version}-${GOOS}-${GOARCH}"
-          archive="dist/${package}.tar.gz"
-          extract="$(mktemp -d)"
-          gzip -t "$archive"
-          tar -xzf "$archive" -C "$extract"
-          test -x "$extract/$package/pomodorough"
-          test -f "$extract/$package/web/index.html"
-          test -f "$extract/$package/web/privacy.html"
-          test -f "$extract/$package/deploy/pomodorough.service"
-          test -f "$extract/$package/deploy/pomodorough.env.example"
-          test -x "$extract/$package/scripts/restore_drill.py"
-          binary_kind="$(file -b "$extract/$package/pomodorough")"
-          case "$GOOS/$GOARCH" in
-            linux/amd64) grep -q 'ELF 64-bit.*x86-64' <<<"$binary_kind" ;;
-            linux/arm64) grep -q 'ELF 64-bit.*ARM aarch64' <<<"$binary_kind" ;;
-            darwin/arm64) grep -q 'Mach-O 64-bit.*arm64' <<<"$binary_kind" ;;
-            *) echo "Unsupported release matrix entry: $GOOS/$GOARCH" >&2; exit 1 ;;
-          esac
-      - name: Attest archive provenance
+          python3 scripts/release_identity.py bind-archive \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --goos "$GOOS" \
+            --goarch "$GOARCH" \
+            --native-record "binary/${package}.native.json" \
+            --binary "binary/${BINARY_NAME}" \
+            --archive "dist/${package}.tar.gz" \
+            --output "dist/${package}.identity.json"
+      - name: Attest archive and identity binding
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: dist/*.tar.gz
-      - name: Upload archive
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.identity.json
+      - name: Upload archive and identity binding
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pomodorough-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.identity.json
           if-no-files-found: error
 
   release:
     name: Publish GitHub release
-    needs: build
+    needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -221,13 +427,40 @@ jobs:
       - name: Check out source for SBOM
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
-      - name: Download archives
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Download archives and identity bindings
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: pomodorough-*
           path: dist
           merge-multiple: true
+      - name: Download immutable native test records
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-record-*
+          path: trusted-native-records
+          merge-multiple: true
+      - name: Verify package attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for asset in dist/*.tar.gz dist/*.identity.json; do
+            gh attestation verify "$asset" --repo "$GH_REPO"
+          done
       - name: Export SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -236,9 +469,24 @@ jobs:
           output-file: dist/pomodorough-server.spdx.json
           upload-artifact: false
           upload-release-assets: false
-      - name: Create checksums
-        working-directory: dist
-        run: sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS
+      - name: Verify and import immutable native test records
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for record in trusted-native-records/*.native.json; do
+            gh attestation verify "$record" --repo "$GH_REPO"
+          done
+          cp -- trusted-native-records/*.native.json dist/
+      - name: Finalize release identity and checksums
+        run: |
+          python3 scripts/release_identity.py finalize-release \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --directory dist \
+            --native-record-directory trusted-native-records \
+            --output dist/SHA256SUMS
       - name: Attest SBOM and checksum manifest
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
@@ -252,6 +500,8 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/*.tar.gz \
+            dist/*.identity.json \
+            dist/*.native.json \
             dist/*.spdx.json \
             dist/SHA256SUMS \
             --verify-tag \
@@ -264,11 +514,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
           expected_assets=(
+            "pomodorough-${version}-darwin-amd64.tar.gz"
+            "pomodorough-${version}-darwin-amd64.identity.json"
+            "pomodorough-${version}-darwin-amd64.native.json"
             "pomodorough-${version}-darwin-arm64.tar.gz"
+            "pomodorough-${version}-darwin-arm64.identity.json"
+            "pomodorough-${version}-darwin-arm64.native.json"
             "pomodorough-${version}-linux-amd64.tar.gz"
+            "pomodorough-${version}-linux-amd64.identity.json"
+            "pomodorough-${version}-linux-amd64.native.json"
             "pomodorough-${version}-linux-arm64.tar.gz"
+            "pomodorough-${version}-linux-arm64.identity.json"
+            "pomodorough-${version}-linux-arm64.native.json"
+            "pomodorough-${version}-windows-amd64.tar.gz"
+            "pomodorough-${version}-windows-amd64.identity.json"
+            "pomodorough-${version}-windows-amd64.native.json"
             "pomodorough-server.spdx.json"
             "SHA256SUMS"
           )
@@ -277,13 +539,16 @@ jobs:
           printf '%s\n' "${expected_assets[@]}" | sort > "$RUNNER_TEMP/expected-assets.txt"
           find "$verified" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
           cmp "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
-          cd "$verified"
-          sha256sum --check SHA256SUMS
-          for archive in *.tar.gz; do
-            gh attestation verify "$archive" --repo "$GH_REPO"
+          python3 scripts/release_identity.py verify-release \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --directory "$verified" \
+            --checksums "$verified/SHA256SUMS"
+          for asset in "$verified"/*.tar.gz "$verified"/*.identity.json "$verified"/*.native.json; do
+            gh attestation verify "$asset" --repo "$GH_REPO"
           done
-          gh attestation verify pomodorough-server.spdx.json --repo "$GH_REPO"
-          gh attestation verify SHA256SUMS --repo "$GH_REPO"
+          gh attestation verify "$verified/pomodorough-server.spdx.json" --repo "$GH_REPO"
+          gh attestation verify "$verified/SHA256SUMS" --repo "$GH_REPO"
       - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}

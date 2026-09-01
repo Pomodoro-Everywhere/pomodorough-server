@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	webSessionLifetime   = 30 * 24 * time.Hour
-	accessTokenLifetime  = 15 * time.Minute
-	refreshTokenLifetime = 30 * 24 * time.Hour
+	webSessionLifetime    = 30 * 24 * time.Hour
+	accessTokenLifetime   = 15 * time.Minute
+	refreshTokenLifetime  = 30 * 24 * time.Hour
+	nativeChallengeDomain = "google-native-exchange-v1"
 )
 
 type googleIdentity struct {
@@ -225,7 +226,7 @@ func (s *Server) persistWebAccount(ctx context.Context, identity googleIdentity)
 	return webSessionResult{sessionToken: sessionToken, csrfToken: csrfToken, expiresAt: expiresAt}, nil
 }
 
-func (s *Server) handleNativeChallenge(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.NativeAuthEnabled() {
 		writeAPIError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
@@ -235,11 +236,17 @@ func (s *Server) handleNativeChallenge(w http.ResponseWriter, _ *http.Request) {
 		s.internalAPIError(w, "generate native nonce", err)
 		return
 	}
-	expiresAt := time.Now().Add(authn.ChallengeLifetime)
+	issuedAt := time.Now()
+	expiresAt := issuedAt.Add(authn.ChallengeLifetime)
 	challenge := authn.NativeChallenge{Nonce: nonce, ExpiresAt: expiresAt.Unix()}
 	sealed, err := s.codec.Seal("native-challenge", challenge)
 	if err != nil {
 		s.internalAPIError(w, "seal native challenge", err)
+		return
+	}
+	digest := store.HashNativeChallenge(nativeChallengeDomain, sealed)
+	if err := s.store.CreateNativeChallenge(r.Context(), digest, nativeChallengeDomain, issuedAt, time.Unix(challenge.ExpiresAt, 0)); err != nil {
+		s.internalAPIError(w, "persist native challenge", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -277,15 +284,20 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid Google token")
 		return
 	}
-	session, failure := s.persistNativeAccount(r.Context(), identity, request.DeviceID, request.Platform)
+	digest := store.HashNativeChallenge(nativeChallengeDomain, request.Challenge)
+	session, failure := s.persistNativeAccount(r.Context(), identity, request.DeviceID, request.Platform, digest)
 	if failure != nil {
+		if isUnauthorized(failure.err) {
+			writeAPIError(w, http.StatusUnauthorized, "invalid challenge")
+			return
+		}
 		s.internalAPIError(w, failure.operation, failure.err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nativeTokenResponse(session.accessToken, session.refreshToken, session.accessExpiry, session.refreshExpiry))
 }
 
-func (s *Server) persistNativeAccount(ctx context.Context, identity googleIdentity, deviceID, platform string) (nativeSessionResult, *authOperationFailure) {
+func (s *Server) persistNativeAccount(ctx context.Context, identity googleIdentity, deviceID, platform string, challengeDigest [32]byte) (nativeSessionResult, *authOperationFailure) {
 	userID := authn.UserID(s.cfg.AppSecret, identity.Issuer, identity.Subject)
 	unlock := s.store.LockUser(userID)
 	defer unlock()
@@ -294,16 +306,17 @@ func (s *Server) persistNativeAccount(ctx context.Context, identity googleIdenti
 		return nativeSessionResult{}, &authOperationFailure{"open native user account", err}
 	}
 	defer db.Close()
+	now := time.Now()
 	profile := store.Profile{ID: userID, Issuer: identity.Issuer, Subject: identity.Subject, Email: identity.Email, Name: identity.Name, AvatarURL: identity.AvatarURL}
-	if err := store.UpsertProfile(ctx, db, profile, time.Now()); err != nil {
-		return nativeSessionResult{}, &authOperationFailure{"update native user profile", err}
-	}
-	accessToken, refreshToken, session, tokens, err := newNativeSession(userID, deviceID, platform, time.Now())
+	accessToken, refreshToken, session, tokens, err := newNativeSession(userID, deviceID, platform, now)
 	if err != nil {
 		return nativeSessionResult{}, &authOperationFailure{"generate native session", err}
 	}
-	if err := store.CreateSession(ctx, db, session, tokens); err != nil {
-		return nativeSessionResult{}, &authOperationFailure{"create native session", err}
+	consumption := store.NativeChallengeConsumption{
+		Digest: challengeDigest, Domain: nativeChallengeDomain, Now: now, Profile: profile, Session: session, Tokens: tokens,
+	}
+	if err := s.store.ConsumeNativeChallengeAndCreateSession(ctx, db, consumption); err != nil {
+		return nativeSessionResult{}, &authOperationFailure{"consume native challenge", err}
 	}
 	return nativeSessionResult{
 		accessToken: accessToken, refreshToken: refreshToken,

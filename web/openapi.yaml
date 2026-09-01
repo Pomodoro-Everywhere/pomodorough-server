@@ -68,17 +68,50 @@ paths:
     get:
       tags: [System]
       operationId: getHealth
-      summary: Check service health
+      summary: Check process liveness
+      description: Reports only that the HTTP process can serve requests. Use `/readyz` for traffic routing.
       security: []
       responses:
         "200":
-          description: Service is ready to accept requests.
+          description: Process is alive. Runtime dependencies may still be unavailable.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
               example:
                 status: ok
+
+  /readyz:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: Check traffic readiness
+      description: |
+        Performs a read-only check of application key material, bounded account
+        storage, SQLite integrity and schema, deletion ledger availability, and
+        account lifecycle bindings. It also verifies the fixed server web asset
+        inventory, bundled Core/WASM provenance, and the Core runtime operation
+        used by traffic. The check fails closed after two seconds and never
+        creates, migrates, repairs, or rewrites dependencies.
+      security: []
+      responses:
+        "200":
+          description: Required runtime dependencies are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+              example:
+                status: ready
+        "503":
+          description: A required runtime dependency is unavailable or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+              example:
+                status: not_ready
+                error: storage_unavailable
 
   /metrics:
     get:
@@ -824,6 +857,28 @@ components:
         status:
           type: string
           enum: [ok]
+
+    ReadinessResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        error:
+          type: string
+          enum:
+            - key_unavailable
+            - storage_unavailable
+            - ledger_unavailable
+            - database_unavailable
+            - lifecycle_invalid
+            - web_unavailable
+            - core_provenance_invalid
+            - core_unavailable
+            - check_timeout
+            - check_canceled
 
     NativeChallengeResponse:
       type: object

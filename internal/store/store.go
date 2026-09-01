@@ -71,13 +71,22 @@ func NewWithDeletionLedger(dataDir, deletionLedgerDir string) (*Store, error) {
 	if err := os.Chmod(usersDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure user data directory: %w", err)
 	}
-	if err := secureDeletionLedgerDirectory(deletionLedgerDir); err != nil {
+	if err := prepareDeletionLedgerDirectory(dataDir, deletionLedgerDir); err != nil {
+		return nil, err
+	}
+	if err := validateIndependentDeletionLedger(dataDir, deletionLedgerDir); err != nil {
 		return nil, err
 	}
 	store := &Store{
 		usersDir:          usersDir,
 		deletionLedgerDir: deletionLedgerDir,
 		locks:             make(map[string]*userLock),
+	}
+	if err := registerAccountLedger(usersDir, deletionLedgerDir); err != nil {
+		return nil, err
+	}
+	if err := store.validateAccountLifecycleInventory(); err != nil {
+		return nil, err
 	}
 	if err := store.applyDeletionObligations(context.Background()); err != nil {
 		return nil, err

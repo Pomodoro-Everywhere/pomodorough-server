@@ -80,7 +80,7 @@ func setConfigEnvironment(t *testing.T) {
 	t.Setenv("APP_SECRET", strings.Repeat("s", 32))
 	for _, name := range []string{
 		"LISTEN_ADDR", "DATA_DIR", "DELETION_LEDGER_DIR", "WEB_ROOT", "PUBLIC_URL", "GOOGLE_WEB_CLIENT_ID",
-		"GOOGLE_WEB_CLIENT_SECRET", "GOOGLE_NATIVE_CLIENT_IDS",
+		"GOOGLE_WEB_CLIENT_SECRET", "GOOGLE_NATIVE_CLIENT_IDS", "TRUSTED_PROXY_CIDRS", "TRUSTED_PROXY_HOPS",
 	} {
 		t.Setenv(name, "")
 	}

@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -88,6 +90,7 @@ type protocolConnectionTracker struct {
 type protocolFixtureSeed struct {
 	credentials integrationuser.Credentials
 	database    []byte
+	ledger      map[string][]byte
 }
 
 var cachedProtocolFixtureSeed struct {
@@ -138,10 +141,7 @@ func newProtocolFixtureWithStreams(t *testing.T, openStreams bool) *protocolFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	userPath := filepath.Join(dataDir, "users", seed.credentials.UserID+".sqlite")
-	if err := os.WriteFile(userPath, seed.database, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	restoreProtocolFixtureSeed(t, dataDir, seed)
 	webRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webRoot, "openapi.yaml"), []byte("openapi: 3.0.3\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -194,12 +194,48 @@ func loadProtocolFixtureSeed(t *testing.T, ctx context.Context, secret []byte, d
 		}
 		cachedProtocolFixtureSeed.seed.credentials = credentials
 		userPath := filepath.Join(dataDir, "users", credentials.UserID+".sqlite")
-		cachedProtocolFixtureSeed.seed.database, cachedProtocolFixtureSeed.err = os.ReadFile(userPath)
+		cachedProtocolFixtureSeed.seed.database, err = os.ReadFile(userPath)
+		if err != nil {
+			cachedProtocolFixtureSeed.err = err
+			return
+		}
+		cachedProtocolFixtureSeed.seed.ledger, cachedProtocolFixtureSeed.err = readProtocolLifecycleSeed(dataDir, credentials.UserID)
 	})
 	if cachedProtocolFixtureSeed.err != nil {
 		t.Fatal(cachedProtocolFixtureSeed.err)
 	}
 	return cachedProtocolFixtureSeed.seed
+}
+
+func readProtocolLifecycleSeed(dataDir, userID string) (map[string][]byte, error) {
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(userID)))
+	ledgerDir := dataDir + "-deletion-ledger"
+	seed := make(map[string][]byte)
+	for _, name := range []string{"account-" + digest + ".json", digest + ".json"} {
+		contents, err := os.ReadFile(filepath.Join(ledgerDir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		seed[name] = contents
+	}
+	return seed, nil
+}
+
+func restoreProtocolFixtureSeed(t *testing.T, dataDir string, seed protocolFixtureSeed) {
+	t.Helper()
+	ledgerDir := dataDir + "-deletion-ledger"
+	for name, contents := range seed.ledger {
+		if err := os.WriteFile(filepath.Join(ledgerDir, name), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userPath := filepath.Join(dataDir, "users", seed.credentials.UserID+".sqlite")
+	if err := os.WriteFile(userPath, seed.database, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *protocolFixture) close(t *testing.T) {

@@ -30,6 +30,7 @@ func TestOpenAPIRoutesSchemasStatusesAndSecurityMatchServer(t *testing.T) {
 	contracts := map[string]openAPIRouteContract{
 		"/openapi.yaml":                 {http.MethodGet, "getOpenAPISpec", []string{"200", "503"}, true, "", "200", "application/yaml", ""},
 		"/healthz":                      {http.MethodGet, "getHealth", []string{"200"}, true, "", "200", "application/json", "#/components/schemas/HealthResponse"},
+		"/readyz":                       {http.MethodGet, "getReadiness", []string{"200", "503"}, true, "", "200", "application/json", "#/components/schemas/ReadinessResponse"},
 		"/metrics":                      {http.MethodGet, "getMetrics", []string{"200"}, true, "", "200", "text/plain", ""},
 		"/auth/google/start":            {http.MethodGet, "startGoogleAuthentication", []string{"302", "429", "500", "503"}, true, "", "", "", ""},
 		"/auth/google/callback":         {http.MethodGet, "completeGoogleAuthentication", []string{"303", "400", "401", "429", "500", "502", "503"}, true, "", "", "", ""},
@@ -95,6 +96,34 @@ func TestOpenAPIRoutesSchemasStatusesAndSecurityMatchServer(t *testing.T) {
 		if response.Code != http.StatusMethodNotAllowed && response.Code != http.StatusNotFound {
 			t.Fatalf("undocumented %s %s status = %d, want 404 or 405", wrongMethod, path, response.Code)
 		}
+	}
+}
+
+func TestS6OpenAPIReadinessUsesStableNonsecretErrors(t *testing.T) {
+	document := loadOpenAPIDocument(t)
+	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	readiness := openAPIMap(t, schemas, "ReadinessResponse")
+	errorProperty := openAPIMap(t, openAPIMap(t, readiness, "properties"), "error")
+	want := []any{
+		"key_unavailable",
+		"storage_unavailable",
+		"ledger_unavailable",
+		"database_unavailable",
+		"lifecycle_invalid",
+		"web_unavailable",
+		"core_provenance_invalid",
+		"core_unavailable",
+		"check_timeout",
+		"check_canceled",
+	}
+	if got, ok := errorProperty["enum"].([]any); !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("readiness errors = %#v, want %#v", errorProperty["enum"], want)
+	}
+	readyOperation := openAPIMap(t, openAPIMap(t, openAPIMap(t, document, "paths"), "/readyz"), "get")
+	unavailable := openAPIMap(t, openAPIMap(t, readyOperation, "responses"), "503")
+	schema := openAPIMap(t, openAPIMap(t, openAPIMap(t, unavailable, "content"), "application/json"), "schema")
+	if schema["$ref"] != "#/components/schemas/ReadinessResponse" {
+		t.Fatalf("readiness 503 schema = %#v", schema)
 	}
 }
 

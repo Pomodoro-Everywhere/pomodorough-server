@@ -3,9 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +24,8 @@ type Config struct {
 	GoogleWebClientSecret   string
 	GoogleNativeClientIDs   []string
 	GoogleNativeClientIDSet map[string]struct{}
+	TrustedProxyCIDRs       []netip.Prefix
+	TrustedProxyHops        int
 }
 
 func Load() (Config, error) {
@@ -41,8 +45,52 @@ func Load() (Config, error) {
 	if err := normalizeOriginsAndPaths(&cfg); err != nil {
 		return Config{}, err
 	}
+	trustedCIDRs, trustedHops, err := trustedProxySettings()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TrustedProxyCIDRs = trustedCIDRs
+	cfg.TrustedProxyHops = trustedHops
 	cfg.GoogleNativeClientIDs, cfg.GoogleNativeClientIDSet = nativeClientIDs()
 	return cfg, nil
+}
+
+func trustedProxySettings() ([]netip.Prefix, int, error) {
+	rawCIDRs := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	rawHops := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_HOPS"))
+	if rawCIDRs == "" && rawHops == "" {
+		return nil, 0, nil
+	}
+	if rawCIDRs == "" || rawHops == "" {
+		return nil, 0, errors.New("TRUSTED_PROXY_CIDRS and TRUSTED_PROXY_HOPS must be configured together")
+	}
+	hops, err := strconv.Atoi(rawHops)
+	if err != nil || hops < 1 || hops > 16 {
+		return nil, 0, errors.New("TRUSTED_PROXY_HOPS must be an integer from 1 to 16")
+	}
+	cidrs, err := parseTrustedProxyCIDRs(rawCIDRs)
+	if err != nil {
+		return nil, 0, err
+	}
+	return cidrs, hops, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	cidrs := make([]netip.Prefix, 0)
+	seen := make(map[netip.Prefix]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(item))
+		if err != nil {
+			return nil, fmt.Errorf("parse TRUSTED_PROXY_CIDRS entry %q: %w", item, err)
+		}
+		prefix = prefix.Masked()
+		if _, exists := seen[prefix]; exists {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		cidrs = append(cidrs, prefix)
+	}
+	return cidrs, nil
 }
 
 func normalizeOriginsAndPaths(cfg *Config) error {

@@ -64,12 +64,12 @@ func TestStreamConcurrentLimitReturns429(t *testing.T) {
 	}
 }
 
-func TestClientIPTrustsForwardingOnlyFromLoopbackProxy(t *testing.T) {
+func TestClientIPDefaultsToDirectPeer(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://example.test", nil)
 	request.RemoteAddr = "127.0.0.1:9876"
 	request.Header.Set("X-Forwarded-For", "203.0.113.7, 127.0.0.1")
-	if got := clientIP(request); got != "203.0.113.7" {
-		t.Fatalf("loopback proxy clientIP = %q", got)
+	if got := clientIP(request); got != "127.0.0.1" {
+		t.Fatalf("direct loopback clientIP = %q", got)
 	}
 	request.RemoteAddr = "198.51.100.2:9876"
 	if got := clientIP(request); got != "198.51.100.2" {

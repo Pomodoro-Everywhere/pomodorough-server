@@ -9,7 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED = ROOT / "internal" / "sharedcore"
-OUTPUT = ROOT / "web" / "shared-core-metadata.js"
+WEB_OUTPUT = ROOT / "web" / "shared-core-metadata.js"
+READINESS_OUTPUT = ROOT / "internal" / "server" / "readiness_core_metadata_generated.go"
 
 
 def rendered_metadata() -> str:
@@ -39,16 +40,32 @@ def rendered_metadata() -> str:
 '''
 
 
+def rendered_outputs() -> dict[Path, str]:
+    metadata = rendered_metadata()
+    metadata_digest = hashlib.sha256(metadata.encode("utf-8")).hexdigest()
+    readiness_source = f'''package server
+
+const readinessSharedCoreMetadataDigest = "{metadata_digest}"
+'''
+    return {WEB_OUTPUT: metadata, READINESS_OUTPUT: readiness_source}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    expected = rendered_metadata()
+    outputs = rendered_outputs()
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != expected:
-            raise SystemExit("web/shared-core-metadata.js is stale; run this script without --check")
+        stale = [
+            str(path.relative_to(ROOT))
+            for path, expected in outputs.items()
+            if not path.exists() or path.read_text(encoding="utf-8") != expected
+        ]
+        if stale:
+            raise SystemExit(f"generated shared-core metadata is stale: {', '.join(stale)}")
         return
-    OUTPUT.write_text(expected, encoding="utf-8")
+    for path, expected in outputs.items():
+        path.write_text(expected, encoding="utf-8")
 
 
 if __name__ == "__main__":

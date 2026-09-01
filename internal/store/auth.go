@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"pomodorough/internal/authn"
@@ -49,6 +51,232 @@ type AuthInfo struct {
 type SessionTokens struct {
 	Session Session
 	Tokens  []TokenRecord
+}
+
+type NativeChallengeConsumption struct {
+	Digest  [sha256.Size]byte
+	Domain  string
+	Now     time.Time
+	Profile Profile
+	Session Session
+	Tokens  []TokenRecord
+}
+
+type nativeChallengeIssuance struct {
+	issuedAt  time.Time
+	expiresAt time.Time
+}
+
+type nativeChallengeSpentKey struct {
+	registryPath string
+	digest       [sha256.Size]byte
+}
+
+var nativeChallengeSpent = struct {
+	sync.Mutex
+	expiresAt map[nativeChallengeSpentKey]int64
+}{expiresAt: make(map[nativeChallengeSpentKey]int64)}
+
+func HashNativeChallenge(domain, sealedChallenge string) [sha256.Size]byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(domain))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(sealedChallenge))
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
+}
+
+func (s *Store) CreateNativeChallenge(ctx context.Context, digest [sha256.Size]byte, domain string, issuedAt, expiresAt time.Time) error {
+	if domain == "" || !expiresAt.After(issuedAt) {
+		return errors.New("invalid native challenge record")
+	}
+	epoch, err := currentNativeChallengeEpoch()
+	if err != nil {
+		return err
+	}
+	db, err := s.openNativeChallengeDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin native challenge creation: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM native_auth_challenges WHERE expires_at_ms <= ?`, issuedAt.UnixMilli()); err != nil {
+		return fmt.Errorf("prune native challenges: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO native_auth_challenges(digest, domain, issued_at_ms, expires_at_ms, process_epoch)
+		VALUES (?, ?, ?, ?, ?)`, digest[:], domain, issuedAt.UnixMilli(), expiresAt.UnixMilli(), epoch[:]); err != nil {
+		return fmt.Errorf("persist native challenge: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit native challenge creation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ConsumeNativeChallengeAndCreateSession(ctx context.Context, db *sql.DB, consumption NativeChallengeConsumption) error {
+	registry, err := s.openNativeChallengeDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer registry.Close()
+	conn, err := registry.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire native challenge registry connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("lock native challenge registry: %w", err)
+	}
+	defer conn.ExecContext(context.Background(), `ROLLBACK`)
+	issuance, err := loadNativeChallengeIssuance(ctx, conn, consumption)
+	if err != nil {
+		return err
+	}
+	spentKey := nativeChallengeSpentKey{s.nativeChallengeDatabasePath(), consumption.Digest}
+	if nativeChallengeWasSpent(spentKey, consumption.Now) {
+		return ErrUnauthorized
+	}
+	consumed, err := s.nativeChallengeConsumed(ctx, db, consumption.Profile.ID, consumption.Digest)
+	if err != nil {
+		return err
+	}
+	if consumed {
+		return ErrUnauthorized
+	}
+	if err := commitNativeChallengeAccount(ctx, db, consumption, issuance); err != nil {
+		return err
+	}
+	rememberNativeChallengeSpent(spentKey, issuance.expiresAt)
+	return nil
+}
+
+func nativeChallengeWasSpent(key nativeChallengeSpentKey, now time.Time) bool {
+	nowMS := now.UnixMilli()
+	nativeChallengeSpent.Lock()
+	defer nativeChallengeSpent.Unlock()
+	for candidate, expiresAt := range nativeChallengeSpent.expiresAt {
+		if expiresAt <= nowMS {
+			delete(nativeChallengeSpent.expiresAt, candidate)
+		}
+	}
+	expiresAt, present := nativeChallengeSpent.expiresAt[key]
+	return present && expiresAt > nowMS
+}
+
+func rememberNativeChallengeSpent(key nativeChallengeSpentKey, expiresAt time.Time) {
+	nativeChallengeSpent.Lock()
+	defer nativeChallengeSpent.Unlock()
+	nativeChallengeSpent.expiresAt[key] = expiresAt.UnixMilli()
+}
+
+func loadNativeChallengeIssuance(ctx context.Context, target *sql.Conn, consumption NativeChallengeConsumption) (nativeChallengeIssuance, error) {
+	epoch, err := currentNativeChallengeEpoch()
+	if err != nil {
+		return nativeChallengeIssuance{}, err
+	}
+	var issuedMS, expiresMS int64
+	err = target.QueryRowContext(ctx, `SELECT issued_at_ms, expires_at_ms FROM native_auth_challenges
+		WHERE digest = ? AND domain = ? AND process_epoch = ? AND issued_at_ms <= ? AND expires_at_ms > ?`,
+		consumption.Digest[:], consumption.Domain, epoch[:], consumption.Now.UnixMilli(), consumption.Now.UnixMilli()).Scan(&issuedMS, &expiresMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nativeChallengeIssuance{}, ErrUnauthorized
+	}
+	if err != nil {
+		return nativeChallengeIssuance{}, fmt.Errorf("read native challenge issuance: %w", err)
+	}
+	return nativeChallengeIssuance{time.UnixMilli(issuedMS), time.UnixMilli(expiresMS)}, nil
+}
+
+func (s *Store) nativeChallengeConsumed(ctx context.Context, target *sql.DB, targetUserID string, digest [sha256.Size]byte) (bool, error) {
+	consumed, err := nativeChallengeConsumedInDatabase(ctx, target, digest)
+	if err != nil || consumed {
+		return consumed, err
+	}
+	userIDs, err := accountStorageUserIDs(s.usersDir)
+	if err != nil {
+		return false, fmt.Errorf("list native challenge account receipts: %w", err)
+	}
+	for _, userID := range userIDs {
+		if userID == targetUserID {
+			continue
+		}
+		consumed, err := s.nativeChallengeConsumedByUser(ctx, userID, digest)
+		if err != nil || consumed {
+			return consumed, err
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) nativeChallengeConsumedByUser(ctx context.Context, userID string, digest [sha256.Size]byte) (bool, error) {
+	path, err := s.userPath(userID)
+	if err != nil {
+		return false, err
+	}
+	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return false, fmt.Errorf("open native challenge account receipt: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	consumed, err := nativeChallengeConsumedInDatabase(ctx, db, digest)
+	if err != nil {
+		return false, fmt.Errorf("read native challenge account receipt: %w", err)
+	}
+	return consumed, nil
+}
+
+func nativeChallengeConsumedInDatabase(ctx context.Context, db *sql.DB, digest [sha256.Size]byte) (bool, error) {
+	var present int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'native_challenge_consumptions'`).Scan(&present)
+	if err != nil {
+		return false, err
+	}
+	if present != 1 {
+		return false, nil
+	}
+	err = db.QueryRowContext(ctx, `SELECT count(*) FROM native_challenge_consumptions WHERE digest = ?`, digest[:]).Scan(&present)
+	if err != nil {
+		return false, err
+	}
+	return present == 1, nil
+}
+
+func commitNativeChallengeAccount(ctx context.Context, db *sql.DB, consumption NativeChallengeConsumption, issuance nativeChallengeIssuance) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin native challenge account commit: %w", err)
+	}
+	defer tx.Rollback()
+	if err := writeNativeChallengeAccount(ctx, tx, consumption, issuance); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit native challenge account: %w", err)
+	}
+	return nil
+}
+
+func writeNativeChallengeAccount(ctx context.Context, target contextExecer, consumption NativeChallengeConsumption, issuance nativeChallengeIssuance) error {
+	if _, err := target.ExecContext(ctx, nativeChallengeConsumptionSchema); err != nil {
+		return fmt.Errorf("create native challenge account receipts: %w", err)
+	}
+	if _, err := target.ExecContext(ctx, `INSERT INTO native_challenge_consumptions(
+		digest, domain, issued_at_ms, expires_at_ms, consumed_at_ms
+	) VALUES (?, ?, ?, ?, ?)`, consumption.Digest[:], consumption.Domain, issuance.issuedAt.UnixMilli(), issuance.expiresAt.UnixMilli(), consumption.Now.UnixMilli()); err != nil {
+		return fmt.Errorf("record native challenge consumption: %w", err)
+	}
+	if err := upsertProfile(ctx, target, consumption.Profile, consumption.Now); err != nil {
+		return fmt.Errorf("provision native profile: %w", err)
+	}
+	return insertSession(ctx, target, consumption.Session, consumption.Tokens)
 }
 
 func UpsertProfile(ctx context.Context, db *sql.DB, profile Profile, now time.Time) error {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +22,18 @@ var gracefulShutdownTimeout = 15 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	identity, err := currentBuildIdentity()
+	if err != nil {
+		logger.Error("invalid build identity", "error", err)
+		os.Exit(1)
+	}
+	if isVersionRequest(os.Args[1:]) {
+		if _, err := fmt.Fprintln(os.Stdout, identity.String()); err != nil {
+			logger.Error("write build identity", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
@@ -43,7 +56,7 @@ func main() {
 		logger.Error("initialize storage", "error", err)
 		os.Exit(1)
 	}
-	application, err := server.New(cfg, userStore, logger)
+	application, err := server.NewForTraffic(cfg, userStore, logger, core)
 	if err != nil {
 		logger.Error("initialize server", "error", err)
 		os.Exit(1)

@@ -9,6 +9,11 @@ import (
 	"path/filepath"
 )
 
+const (
+	fullSynchronousMode     = 2
+	userDatabasePragmaQuery = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"
+)
+
 func (s *Store) OpenUser(ctx context.Context, userID string) (*sql.DB, error) {
 	path, err := s.userPath(userID)
 	if err != nil {
@@ -126,7 +131,7 @@ func (s *Store) openExistingAccount(ctx context.Context, path, userID string) (*
 }
 
 func openDatabase(ctx context.Context, path string) (*sql.DB, error) {
-	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	dsn := "file:" + filepath.ToSlash(path) + userDatabasePragmaQuery
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open user database: %w", err)
@@ -138,9 +143,36 @@ func openDatabase(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("connect to user database: %w", err)
 	}
+	if err := verifyDatabaseDurability(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("verify user database durability: %w", err)
+	}
 	if err := migrate(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+func verifyDatabaseDurability(ctx context.Context, db *sql.DB) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire database connection: %w", err)
+	}
+	defer conn.Close()
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("read journal mode: %w", err)
+	}
+	if journalMode != "wal" {
+		return fmt.Errorf("journal mode %q; require WAL", journalMode)
+	}
+	var synchronousMode int
+	if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronousMode); err != nil {
+		return fmt.Errorf("read synchronous mode: %w", err)
+	}
+	if synchronousMode != fullSynchronousMode {
+		return fmt.Errorf("synchronous mode %d; require FULL (%d)", synchronousMode, fullSynchronousMode)
+	}
+	return nil
 }

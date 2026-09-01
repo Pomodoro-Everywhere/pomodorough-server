@@ -1,0 +1,3 @@
+package server
+
+const readinessSharedCoreMetadataDigest = "9c8bdfa25a2809b06b7bc94014b07fc7d0afe78d79c55ab52b8793fc3c27b54c"

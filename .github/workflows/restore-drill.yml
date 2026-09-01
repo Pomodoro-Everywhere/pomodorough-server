@@ -21,12 +21,13 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Exercise SQLite backup and restore
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise bound data and deletion-ledger restore
         run: |
           set -euo pipefail
-          source_db="$(mktemp)"
-          restore_dir="$(mktemp -d)"
-          restored_db="$restore_dir/restored.sqlite3"
-          python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE probe(value TEXT NOT NULL)"); db.execute("INSERT INTO probe VALUES (?)", ("restore-ready",)); db.commit(); db.close()' "$source_db"
-          python3 scripts/restore_drill.py "$source_db" "$restored_db"
-          test "$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM probe").fetchone()[0])' "$restored_db")" = "restore-ready"
+          python3 -m unittest scripts/test_restore_drill_s2.py -v
+          go test ./internal/store -count=1 -run '^TestRecovery'

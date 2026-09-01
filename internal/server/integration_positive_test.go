@@ -39,6 +39,18 @@ func TestPublicRoutesAndSecurityHeaders(t *testing.T) {
 			}
 		}
 	}
+
+	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/readyz", nil)
+	response := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("GET /readyz: status=%d Content-Type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	for _, header := range []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options"} {
+		if response.Header().Get(header) == "" {
+			t.Errorf("GET /readyz missing %s", header)
+		}
+	}
 }
 
 func TestCookieAuthenticationServesProfileAndApplication(t *testing.T) {

@@ -171,12 +171,12 @@ func TestParseBootstrapResolutionAcceptsMaximumOperationHistory(t *testing.T) {
 	}
 }
 
-func TestClientIPTrustsOnlyAValidForwardedAddressFromLoopback(t *testing.T) {
+func TestClientIPDefaultPolicyIgnoresForwarding(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/", nil)
 	request.RemoteAddr = "127.0.0.1:45000"
 	request.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.4")
-	if got := clientIP(request); got != "203.0.113.9" {
-		t.Fatalf("clientIP behind loopback proxy = %q, want 203.0.113.9", got)
+	if got := clientIP(request); got != "127.0.0.1" {
+		t.Fatalf("clientIP with forwarding disabled = %q, want 127.0.0.1", got)
 	}
 
 	request.RemoteAddr = "198.51.100.7:45000"

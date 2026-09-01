@@ -2652,12 +2652,17 @@ test("resolution apply atomically stores exact canonical state and preserves unc
 test("keep-remote reconciliation excludes captured rows and preserves later multi-domain rows", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
+  const capturedTaskIdentity = (await authoritativeCore()).taskIdentity({ title: "Captured task" });
   const capturedQueues = {
     commands: [command("captured", 1)],
-    taskOperations: [taskOperation("captured-task")],
+    taskOperations: [{
+      ...taskOperation("captured-task"),
+      taskId: capturedTaskIdentity.id,
+      title: capturedTaskIdentity.title
+    }],
     durationOperations: [durationOperation("captured-duration")],
     autoStartOperations: [autoStartOperation("captured-auto-start")],
-    selectedTaskOperations: [selectedTaskOperation("captured-selected-task", "task-captured-task")]
+    selectedTaskOperations: [selectedTaskOperation("captured-selected-task", capturedTaskIdentity.id)]
   };
   await seedQueues(instance.database, capturedQueues);
   await acquire(instance.database);
