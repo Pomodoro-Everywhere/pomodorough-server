@@ -58,6 +58,16 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      - name: Cross-build Windows server and store tests
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+          GOOS: windows
+        run: |
+          go test -c -o "$RUNNER_TEMP/store.test.exe" ./internal/store
+          go build -o "$RUNNER_TEMP/pomodorough.exe" ./cmd/pomodorough
+      - name: Test Windows lock build guard
+        run: python3 -m unittest scripts/test_windows_lock_guard_s10.py -v
       - name: Test shared-core provenance verifier
         run: python3 -m unittest scripts/test_shared_core_provenance.py -v
       - name: Test integration credential documentation

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 var (
@@ -31,9 +30,9 @@ func AcquireDataDirLock(dataDir string) (*DataDirLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open data directory lock: %w", err)
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if err := lockDataDirFile(file); err != nil {
+		_ = file.Close()
+		if errors.Is(err, ErrDataDirInUse) {
 			return nil, ErrDataDirInUse
 		}
 		return nil, fmt.Errorf("lock data directory: %w", err)
@@ -42,7 +41,7 @@ func AcquireDataDirLock(dataDir string) (*DataDirLock, error) {
 }
 
 func (l *DataDirLock) Close() error {
-	if err := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN); err != nil {
+	if err := unlockDataDirFile(l.file); err != nil {
 		_ = l.file.Close()
 		return fmt.Errorf("unlock data directory: %w", err)
 	}

@@ -72,6 +72,16 @@ jobs:
           cache: npm
       - name: Test server
         run: go test ./...
+      - name: Cross-build Windows server and store tests
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+          GOOS: windows
+        run: |
+          go test -c -o "$RUNNER_TEMP/store.test.exe" ./internal/store
+          go build -o "$RUNNER_TEMP/pomodorough.exe" ./cmd/pomodorough
+      - name: Test Windows lock build guard
+        run: python3 -m unittest scripts/test_windows_lock_guard_s10.py -v
       - name: Test shared-core provenance verifier
         run: python3 -m unittest scripts/test_shared_core_provenance.py -v
       - name: Test integration credential documentation
@@ -179,6 +189,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Test Windows data directory lock
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          go test ./internal/store -run '^TestDataDirLock'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build reproducible native binary
         if: matrix.goos != 'windows'
         env:
