@@ -13,6 +13,23 @@ contain account IDs, task/timer content, query strings, IP addresses, or OAuth
 values. For multiple replicas, scrape and aggregate every process; the service's
 rate limiter and metrics remain intentionally process-local.
 
+### Metrics exposure
+
+`GET /metrics` is intentionally unauthenticated so a local scraper can poll it
+without credentials, and the wire contract is unchanged: it stays on the same
+listener as the API (`server.go` `GET /metrics` route) with no login, CSRF, or
+rate-limit gate. It exposes only aggregate request counts and latency buckets,
+but per-route traffic shape is still operational information, so do not expose
+it to the public internet:
+
+- Keep the default `LISTEN_ADDR=127.0.0.1:8790` loopback binding and terminate
+  public TLS at a reverse proxy. Scrape over loopback.
+- If the service must listen on a non-loopback address, restrict `/metrics` at
+  the proxy or host firewall to scraper addresses only (for example, deny the
+  `/metrics` location to all but the monitoring host).
+- Do not add `TRUSTED_PROXY_CIDRS`/`TRUSTED_PROXY_HOPS` solely to reach
+  `/metrics`; those settings change client-IP attribution for rate limiting.
+
 ## Liveness and readiness
 
 `GET /healthz` is process liveness only. It always returns `200` with

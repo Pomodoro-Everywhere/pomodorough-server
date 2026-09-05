@@ -1,7 +1,10 @@
 .claude/
 graphify-out/
 node_modules/
-/dist/
+dist/
+*.tsbuildinfo
+coverage/
+test-results/
 __pycache__/
 *.py[cod]
 

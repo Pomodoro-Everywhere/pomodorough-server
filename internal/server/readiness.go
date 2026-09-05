@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 2 << 20
-	readinessCoreVersion   = "0.10.0"
+	readinessCoreVersion   = "0.11.0"
 )
 
 type readinessAsset struct {
@@ -51,7 +51,7 @@ var readinessAssets = []readinessAsset{
 	{"app.css", "bb7f5a06c790def0bde9b76f16fe7e6ca2415b7f9e507792d00c0defddb34623", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
-	{"pomodorough_core.wasm", "f735303cbd13a1671090b7ecd1e9c96a210ca007d8a35244bdf8028772c66eb6", true},
+	{"pomodorough_core.wasm", "162954f2c68dc3f90b663483b7df327d583d97f64d1391b60105febe2383896a", true},
 	{"sync-core.js", "22df0bae998505f4ef6c9e399ff845c96bf0c30ad9f937ef19aa4b03c69b5739", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},

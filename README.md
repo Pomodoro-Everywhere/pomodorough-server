@@ -45,6 +45,16 @@ The revision stream is an optimization, not a second source of truth. Clients
 always reconcile through `POST /api/v1/sync`, and every accepted operation is
 safe to submit more than once.
 
+### Versioning
+
+The Go service is versioned by git tags (`v0.10.0` and following); release
+binaries report their identity through `pomodorough --version` as documented in
+[`docs/release-identity-s7.md`](docs/release-identity-s7.md). The web PWA ships
+inside the same release, so the `version` field in [`package.json`](package.json)
+mirrors the service tag and is bumped with it. The `version` in
+[`web/openapi.yaml`](web/openapi.yaml) tracks the API contract revision
+separately and is not a release marker.
+
 ### Synchronization model
 
 1. Clients persist an operation locally before updating their interface.
@@ -456,6 +466,9 @@ structured records to the deployment's metrics system and alert on sustained
 backup-success signals. Keep log retention finite and access-controlled.
 The bounded Prometheus endpoint, alert recommendations, backup procedure, and
 recovery checklist are documented in [`docs/operations.md`](docs/operations.md).
+`GET /metrics` is unauthenticated by design and shares the API listener, so keep
+the loopback `LISTEN_ADDR` default behind a reverse proxy (or restrict
+`/metrics` at the proxy/firewall) and scrape it over loopback.
 
 ## API surface
 
