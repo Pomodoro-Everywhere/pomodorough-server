@@ -5,7 +5,7 @@
   if (typeof module === "object" && module.exports) module.exports = metadata;
   if (root) root.PomodoroughSharedCoreMetadata = metadata;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const sha256 = "b10a8f40a3a9220026a1bfe4224fd40ad4e9126260e8216ca7de5f8b303a58c9";
+  const sha256 = "e83b0ed6905317368fd13b4aa8891a305df7132e33bbee1baca6f47056fc15f7";
   return Object.freeze({
     coreCommit: "20f9696b9a7c5dd9f0a253b21a5c9bd225f9e9b2",
     sha256,
