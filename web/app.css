@@ -921,6 +921,16 @@ main {
   opacity: 0.45;
 }
 
+.app-version {
+  margin: 1rem 0 0;
+  color: var(--subtle);
+  font-family: var(--utility);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .rail-note {
   margin: 1.5rem 0 0;
   padding-inline-start: 0.8rem;

@@ -163,6 +163,7 @@
   "pattern.minutes": "‏⟦mïn⟧‏",
   "pattern.autoStart": "‏⟦Åûtö-stàrt brëàks⟧‏",
   "pattern.autoStart.detail": "‏⟦Shört àftër föcûs. Löng ëvëry föûrth cömplëtëd föcûs.⟧‏",
+  "pattern.version": "‏⟦Vërsïön {version}⟧‏",
   "history.kicker": "‏⟦Rûn lög / thïs àccöûnt⟧‏",
   "history.title": "‏⟦Rëcënt àrrïvàls⟧‏",
   "history.count": "‏⟦Årrïvàl cöûnt⟧‏",

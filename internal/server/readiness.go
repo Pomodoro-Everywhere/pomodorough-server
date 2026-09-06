@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 2 << 20
-	readinessCoreVersion   = "0.11.0"
+	readinessCoreVersion   = "0.11.1"
 )
 
 type readinessAsset struct {
@@ -47,18 +47,18 @@ var readinessAssets = []readinessAsset{
 	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
-	{"app.html", "88f1b3c940bd190fad4c951fe770c0085c0164c6a0fcf37452fd28f05fa92a15", false},
-	{"app.css", "bb7f5a06c790def0bde9b76f16fe7e6ca2415b7f9e507792d00c0defddb34623", false},
+	{"app.html", "c395a39b6f75bba2606e1984f0843ad419db4e2ffd820c6475615f73e659c265", false},
+	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
-	{"pomodorough_core.wasm", "162954f2c68dc3f90b663483b7df327d583d97f64d1391b60105febe2383896a", true},
+	{"pomodorough_core.wasm", "c7b37d9f5c105db8007543e6d10065f3e8b6d23960052bbd43b606cff9a6c6de", true},
 	{"sync-core.js", "22df0bae998505f4ef6c9e399ff845c96bf0c30ad9f937ef19aa4b03c69b5739", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
 	{"sync-storage.js", "8edfec5cb309202cb20a9974e67ab00e85c0ce5cea38325000730b7d3da3bef4", false},
 	{"i18n.js", "0ea53b34e8ec9c924a89bb2ca54364401feaa356fb10deb028c6098e3ece1d0e", false},
-	{"locales/en.json", "3a3b6569acd14efba313e3b6f9ce793d08e2d71a086275cf4d4caf456eef68e1", false},
-	{"locales/ar-XB.json", "12e9bc96684f9009c873194b9b77d0cfde6d4e27bc6bd3f4582721c6e31a715e", false},
+	{"locales/en.json", "ffb966cbe3f9c9ad86e23459e3d8184e455d8a7911a9386c7ab5f1257d839dfd", false},
+	{"locales/ar-XB.json", "20deded20dff83fe27d035f78ece2322145caf542ec161161ed93d7429ae51fe", false},
 	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
 	{"app-state.js", "409eb06f5ecdb2e4959da956d0542591505309dd0c3dcd0f23c4a43801f7c7e3", false},
 	{"app-storage.js", "95a9ae6f290b0b3bf65cabe3e3379ae1c59c21f771e984886c5772a2d40c5dfa", false},
@@ -66,8 +66,8 @@ var readinessAssets = []readinessAsset{
 	{"app-sync.js", "3fa6beaba550fbb455e03602a9b262b85773654c01080e8e7a60e1d2f18a1061", false},
 	{"app-bootstrap.js", "7dce5b16ba3f6cf27c7ce4887e07ce2cee55228830670686a2c9620cfe94814d", false},
 	{"app-session.js", "cadbf5d431a39e89f99cd68abdcc58ea69f3ec2d77f05bd2f40d408148e870c1", false},
-	{"app-view.js", "2440d3c489cf8680ef464e5511b0c85aaab27a9837f64f2940962060922fee56", false},
-	{"app.js", "467eff8543fe1a409447dc41b64766b2509f26cc0a08e5aeea35f8e904775c35", false},
+	{"app-view.js", "09face79e43da5bfa4ee406794d4de17f10adf7c7d79326d31c51517bff38320", false},
+	{"app.js", "753598d8974bc555810be67b4e5a7e7c5336d60a45025b8254012b390bc298d1", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
 	{"sw.js", "d55098fa1ce41f43954a284e3fb28944bac6cb470992d6d15ce0a2b3071bbffc", false},

@@ -90,6 +90,13 @@ function browser(environment) {
   const document = {
     visibilityState: "visible", title: "Pomodorough", activeElement: null,
     querySelector(id) {
+      if (id === 'meta[name="pomodorough-version"]') {
+        const match = source("app.html").match(
+          /<meta name="pomodorough-version" content="([^"]+)">/
+        );
+        assert.ok(match, `App HTML missing ${id}`);
+        return { content: match[1] };
+      }
       assert.ok(elements.has(id), `App HTML missing ${id}`);
       return elements.get(id);
     },

@@ -34,7 +34,7 @@
     ],
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
-      "renderDurations", "renderTaskSelector", "displayTimer", "timerDisplayView",
+      "renderDurations", "renderVersion", "renderTaskSelector", "displayTimer", "timerDisplayView",
       "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderTimer",
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
       "renderTasks", "formatTaskDuration", "formatHistoryDate", "renderProfile",
@@ -61,7 +61,7 @@
     actions() {
       return super.actions([
         "renderScreens", "activateScreen", "handleScreenKeydown", "renderDurations",
-        "renderTaskSelector", "renderDeviceMark", "createDialTicks", "clampInput"
+        "renderVersion", "renderTaskSelector", "renderDeviceMark", "createDialTicks", "clampInput"
       ]);
     }
 
@@ -125,6 +125,21 @@
       for (const button of elements.stepButtons) button.disabled = blocked || active;
       elements.autoStartBreaks.checked = state.autoStartBreaks;
       elements.autoStartBreaks.disabled = blocked;
+      this.renderVersion();
+    }
+
+    appVersion() {
+      const meta = this.document.querySelector?.('meta[name="pomodorough-version"]');
+      return meta?.content?.trim() || "unknown";
+    }
+
+    renderVersion() {
+      const { use, elements } = this;
+      if (!elements.appVersion) return;
+      const version = this.appVersion();
+      elements.appVersion.textContent = use.tr(
+        "pattern.version", { version }, `Version ${version}`
+      );
     }
 
     renderTaskSelector() {

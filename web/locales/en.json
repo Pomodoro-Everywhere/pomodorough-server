@@ -144,6 +144,7 @@
   "pattern.minutes": "min",
   "pattern.autoStart": "Auto-start breaks",
   "pattern.autoStart.detail": "Short after focus. Long every fourth completed focus.",
+  "pattern.version": "Version {version}",
   "history.kicker": "Run log / this account",
   "history.title": "Recent arrivals",
   "history.count": "Arrival count",

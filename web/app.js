@@ -8,7 +8,7 @@
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
     "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
-    "autoStartBreaks", "taskSelector", "dial", "dialTicks", "dialProgress", "phaseLabel",
+    "autoStartBreaks", "appVersion", "taskSelector", "dial", "dialTicks", "dialProgress", "phaseLabel",
     "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "timerToggle",
     "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",
     "taskInput", "taskList", "taskCount", "deviceMark", "logoutRecovery",
