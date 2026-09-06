@@ -22,48 +22,43 @@ var gracefulShutdownTimeout = 15 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	defer captureMainPanic(logger)
 	identity, err := currentBuildIdentity()
 	if err != nil {
-		logger.Error("invalid build identity", "error", err)
-		os.Exit(1)
+		failStartup(logger, "invalid build identity", err)
 	}
 	if isVersionRequest(os.Args[1:]) {
 		if _, err := fmt.Fprintln(os.Stdout, identity.String()); err != nil {
-			logger.Error("write build identity", "error", err)
-			os.Exit(1)
+			failStartup(logger, "write build identity", err)
 		}
 		return
 	}
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("invalid configuration", "error", err)
-		os.Exit(1)
+		failStartup(logger, "invalid configuration", err)
 	}
+	flushMonitoring := initErrorMonitoring(identity, cfg.SentryDSN, logger)
+	defer flushMonitoring()
 	core, err := sharedcore.Default(context.Background())
 	if err != nil {
-		logger.Error("initialize shared core", "error", err)
-		os.Exit(1)
+		failStartup(logger, "initialize shared core", err)
 	}
 	defer core.Close(context.Background())
 	dataDirLock, err := store.AcquireDataDirLock(cfg.DataDir)
 	if err != nil {
-		logger.Error("lock storage", "error", err)
-		os.Exit(1)
+		failStartup(logger, "lock storage", err)
 	}
 	defer dataDirLock.Close()
 	userStore, err := store.NewWithDeletionLedger(cfg.DataDir, cfg.DeletionLedgerDir)
 	if err != nil {
-		logger.Error("initialize storage", "error", err)
-		os.Exit(1)
+		failStartup(logger, "initialize storage", err)
 	}
 	application, err := server.NewForTraffic(cfg, userStore, logger, core)
 	if err != nil {
-		logger.Error("initialize server", "error", err)
-		os.Exit(1)
+		failStartup(logger, "initialize server", err)
 	}
 	if err := runServer(cfg, application, logger); err != nil {
-		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+		failStartup(logger, "server stopped", err)
 	}
 }
 

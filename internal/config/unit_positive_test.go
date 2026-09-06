@@ -17,6 +17,8 @@ func TestLoadValidConfiguration(t *testing.T) {
 	t.Setenv("GOOGLE_WEB_CLIENT_ID", " web-client ")
 	t.Setenv("GOOGLE_WEB_CLIENT_SECRET", " web-secret ")
 	t.Setenv("GOOGLE_NATIVE_CLIENT_IDS", " ios-client, android-client, ios-client,  ")
+	t.Setenv("SENTRY_DSN", " https://backend-key@o1.ingest.sentry.io/1 ")
+	t.Setenv("SENTRY_DSN_WEB", " https://web-key@o1.ingest.sentry.io/2 ")
 
 	cfg, err := Load()
 	if err != nil {
@@ -53,6 +55,12 @@ func TestLoadValidConfiguration(t *testing.T) {
 			t.Fatalf("native client ID set missing %q", id)
 		}
 	}
+	if cfg.SentryDSN != "https://backend-key@o1.ingest.sentry.io/1" {
+		t.Fatalf("SentryDSN = %q, want trimmed backend DSN", cfg.SentryDSN)
+	}
+	if cfg.SentryWebDSN != "https://web-key@o1.ingest.sentry.io/2" {
+		t.Fatalf("SentryWebDSN = %q, want trimmed web DSN", cfg.SentryWebDSN)
+	}
 }
 
 func TestLoadUsesDefaultsForBlankOptionalValues(t *testing.T) {
@@ -73,6 +81,9 @@ func TestLoadUsesDefaultsForBlankOptionalValues(t *testing.T) {
 	if cfg.WebAuthEnabled() || cfg.NativeAuthEnabled() {
 		t.Fatalf("authentication unexpectedly enabled: %#v", cfg)
 	}
+	if cfg.SentryDSN != "" || cfg.SentryWebDSN != "" {
+		t.Fatalf("error monitoring unexpectedly enabled: %#v", cfg)
+	}
 }
 
 func setConfigEnvironment(t *testing.T) {
@@ -80,7 +91,8 @@ func setConfigEnvironment(t *testing.T) {
 	t.Setenv("APP_SECRET", strings.Repeat("s", 32))
 	for _, name := range []string{
 		"LISTEN_ADDR", "DATA_DIR", "DELETION_LEDGER_DIR", "WEB_ROOT", "PUBLIC_URL", "GOOGLE_WEB_CLIENT_ID",
-		"GOOGLE_WEB_CLIENT_SECRET", "GOOGLE_NATIVE_CLIENT_IDS", "TRUSTED_PROXY_CIDRS", "TRUSTED_PROXY_HOPS",
+		"GOOGLE_WEB_CLIENT_SECRET", "GOOGLE_NATIVE_CLIENT_IDS", "SENTRY_DSN", "SENTRY_DSN_WEB",
+		"TRUSTED_PROXY_CIDRS", "TRUSTED_PROXY_HOPS",
 	} {
 		t.Setenv(name, "")
 	}

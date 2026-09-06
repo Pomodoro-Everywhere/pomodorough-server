@@ -6,11 +6,13 @@
   <meta name="theme-color" content="#142c5c" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c1b39" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A local-first focus timer that continues across your devices.">
-  <meta name="pomodorough-version" content="0.13.0">
+  <meta name="pomodorough-version" content="0.14.0">
+  <meta name="sentry-dsn" content="%POMODOROUGH_SENTRY_DSN%">
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css?v=20">
+  <script src="/sentry-client.js?v=1" defer></script>
   <script src="/shared-core-metadata.js?v=1" defer></script>
   <script src="/shared-core.js?v=6" defer></script>
   <script src="/sync-core.js?v=25" defer></script>
@@ -250,7 +252,7 @@
           </span>
         </label>
 
-        <p id="appVersion" class="app-version">Version 0.13.0</p>
+        <p id="appVersion" class="app-version">Version 0.14.0</p>
       </div>
       </section>
 

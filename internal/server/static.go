@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -13,6 +15,18 @@ import (
 )
 
 var hashedAssetPattern = regexp.MustCompile(`(?:^|[._-])[a-f0-9]{8,}(?:[._-]|$)`)
+
+// sentryDSNPlaceholder is replaced with the configured web DSN when serving
+// HTML entrypoints. Entrypoint files on disk keep the placeholder, so an
+// empty configuration disables browser monitoring without a rebuild.
+const sentryDSNPlaceholder = "%POMODOROUGH_SENTRY_DSN%"
+
+var entrypointAttributeEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+)
 
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	file, info, err := s.openWebFile("openapi.yaml")
@@ -43,6 +57,10 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	if isServedEntrypoint(relative) {
+		s.serveEntrypoint(w, r, file, info, relative)
+		return
+	}
 	setStaticHeaders(w, relative)
 	http.ServeContent(w, r, filepath.Base(relative), info.ModTime(), file)
 }
@@ -90,6 +108,25 @@ func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, re
 	return nil, nil, "", false
 }
 
+func isServedEntrypoint(relative string) bool {
+	return relative == "index.html" || relative == "app.html" || relative == "privacy.html"
+}
+
+// serveEntrypoint renders an HTML entrypoint with the configured web DSN and
+// serves the rendered bytes. Files without the placeholder pass through
+// unchanged, so existing fixtures and unconfigured deployments behave as before.
+func (s *Server) serveEntrypoint(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, relative string) {
+	encoded, err := io.ReadAll(file)
+	if err != nil {
+		s.logger.Error("read web entrypoint", "path", relative, "error", err)
+		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	rendered := bytes.ReplaceAll(encoded, []byte(sentryDSNPlaceholder), []byte(entrypointAttributeEscaper.Replace(s.cfg.SentryWebDSN)))
+	setStaticHeaders(w, relative)
+	http.ServeContent(w, r, filepath.Base(relative), info.ModTime(), bytes.NewReader(rendered))
+}
+
 func setStaticHeaders(w http.ResponseWriter, relative string) {
 	extension := strings.ToLower(filepath.Ext(relative))
 	contentType := mime.TypeByExtension(extension)
@@ -118,6 +155,8 @@ func publicWebFile(requestPath string) (string, bool) {
 		return "landing.css", true
 	case "/platform-selector.js":
 		return "platform-selector.js", true
+	case "/sentry-client.js":
+		return "sentry-client.js", true
 	case "/landing.js":
 		return "landing.js", true
 	case "/icon.svg":

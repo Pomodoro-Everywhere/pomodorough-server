@@ -253,7 +253,7 @@ func (s *Server) validCSRF(r *http.Request, identity principal) bool {
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self'; script-src 'self'; style-src 'self'; manifest-src 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self' https://*.ingest.sentry.io https://*.ingest.de.sentry.io https://*.ingest.us.sentry.io; script-src 'self' https://browser.sentry-cdn.com; style-src 'self'; manifest-src 'self'; worker-src 'self' blob:")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -289,6 +289,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				s.logger.Error("panic serving request", "error", recovered, "stack", string(debug.Stack()))
+				reportPanicToErrorMonitoring(recovered, r)
 				if strings.HasPrefix(r.URL.Path, "/api/") {
 					writeAPIError(w, http.StatusInternalServerError, "internal server error")
 				} else {

@@ -24,6 +24,8 @@ type Config struct {
 	GoogleWebClientSecret   string
 	GoogleNativeClientIDs   []string
 	GoogleNativeClientIDSet map[string]struct{}
+	SentryDSN               string
+	SentryWebDSN            string
 	TrustedProxyCIDRs       []netip.Prefix
 	TrustedProxyHops        int
 }
@@ -38,6 +40,8 @@ func Load() (Config, error) {
 		AppSecret:             []byte(os.Getenv("APP_SECRET")),
 		GoogleWebClientID:     strings.TrimSpace(os.Getenv("GOOGLE_WEB_CLIENT_ID")),
 		GoogleWebClientSecret: strings.TrimSpace(os.Getenv("GOOGLE_WEB_CLIENT_SECRET")),
+		SentryDSN:             strings.TrimSpace(os.Getenv("SENTRY_DSN")),
+		SentryWebDSN:          strings.TrimSpace(os.Getenv("SENTRY_DSN_WEB")),
 	}
 	if len(cfg.AppSecret) < 32 {
 		return Config{}, errors.New("APP_SECRET must contain at least 32 bytes")

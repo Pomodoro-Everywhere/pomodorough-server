@@ -106,6 +106,8 @@ Default and optional values are documented in
 | `PUBLIC_URL` | No | Production URL | Public origin used for redirects and links |
 | `TRUSTED_PROXY_CIDRS` | No | Empty | Comma-separated proxy networks allowed to supply `X-Forwarded-For` |
 | `TRUSTED_PROXY_HOPS` | With trusted CIDRs | Empty | Exact proxy count between client and server, including direct peer |
+| `SENTRY_DSN` | No | Empty (disabled) | Backend error monitoring DSN, initialized at startup in `cmd/pomodorough` |
+| `SENTRY_DSN_WEB` | No | Empty (disabled) | Browser error monitoring + Session Replay DSN, server-rendered into the `sentry-dsn` meta tag of `index.html`/`app.html` |
 
 `APP_SECRET` must remain stable. Replacing it changes derived user IDs and
 invalidates existing sessions.
