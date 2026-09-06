@@ -2,7 +2,7 @@
 
 Audit date: 2026-08-20
 Implementation status reconciled: 2026-08-21
-Readiness snapshot refreshed: 2026-09-06 — all components at `0.11.1` (Go tag `v0.11.1`).
+Readiness snapshot refreshed: 2026-09-06 — all components at `0.12.0` (Go tag `v0.12.0`).
 
 Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synchronization service. Priorities reflect release/user-data risk rather than implementation size.
 
@@ -10,11 +10,11 @@ Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synch
 
 | Component | Current assessment | Remaining release qualification |
 | --- | --- | --- |
-| Apple iOS/macOS | Unsigned `0.11.1` published and independently verified | Developer signing, TestFlight, Developer ID signing, and notarization are excluded by request |
-| Android | API-36-targeting unsigned `0.11.1` published and independently verified | Production-keystore signing is excluded by request |
-| Desktop | Unsigned `0.11.1` published and independently verified | Windows Authenticode signing is excluded by request |
+| Apple iOS/macOS | Unsigned `0.12.0` published and independently verified | Developer signing, TestFlight, Developer ID signing, and notarization are excluded by request |
+| Android | API-36-targeting unsigned `0.12.0` published and independently verified | Production-keystore signing is excluded by request |
+| Desktop | Unsigned `0.12.0` published and independently verified | Windows Authenticode signing is excluded by request |
 | Web/PWA | Repository release scope complete; public privacy policy live and byte-verified | Browser/PWA termination cannot guarantee an alert; production-server deployment access is externally blocked |
-| Go service | `0.11.1` published and independently verified with archives, SBOM, checksums, and attestations | Production SSH deployment and an authentic encrypted-backup restore remain externally blocked |
+| Go service | `0.12.0` published and independently verified with archives, SBOM, checksums, and attestations | Production SSH deployment and an authentic encrypted-backup restore remain externally blocked |
 
 ## Resolution matrix
 
@@ -38,7 +38,7 @@ Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synch
 | P1.6 | Complete | Versioned byte-identical canonical fixtures and shipping-codec tests cover REST/Iroh domains and omission/null compatibility. |
 | P1.7 | Complete with deployment limitation | Bounded per-IP/per-account limits, SSE caps, trusted-proxy handling, `Retry-After`, and privacy-safe audit events are tested; the limiter is process-local. |
 | P1.8 | Complete except signing | SBOMs, checksums, immutable action pins, exact asset sets, and provenance attestations are implemented; Authenticode/checksum signing is excluded. |
-| P1.9 | Complete for supported unsigned scope | All four `0.11.1` releases passed clean builds, exact-set/checksum/attestation checks, supported clean-install/runtime smoke, publication, and independent fresh-download verification. |
+| P1.9 | Complete for supported unsigned scope | All four `0.12.0` releases passed clean builds, exact-set/checksum/attestation checks, supported clean-install/runtime smoke, publication, and independent fresh-download verification (server `87d12e5`, tag `v0.12.0` pushed, release workflow success). |
 | P1.10 | Complete | Arrivals filtering, totals, resolved/deleted/unassigned task context, and accessible summaries are aligned. |
 | P1.11 | Complete | Desktop timer ownership prevents observer auto-finish/auto-start mutations. |
 | P1.12 | Complete | Desktop Iroh completion advances phase independently of auto-start with ordering protection. |
