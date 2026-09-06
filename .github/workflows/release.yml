@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: ccc62578b621bab5ee4132e604b99371b171f8f1
+          ref: 15cdd9297e837f6c54f983517d0a78b24b5403b5
           path: shared-core
           persist-credentials: false
       - name: Rebuild and verify embedded shared core
@@ -54,9 +54,9 @@ jobs:
           python3 shared-core/scripts/verify_wasm_artifact.py "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 82f114f9907b5f86f19f7cf99ef07b24ff5a0c55e23652f7be038a73c89dd91e
+            --sha256 59b5f540a9c2a5ad98a021d3e18aaafb3877266295a69c2992ba0f4aba4de12e
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 82f114f9907b5f86f19f7cf99ef07b24ff5a0c55e23652f7be038a73c89dd91e \
+            --sha256 59b5f540a9c2a5ad98a021d3e18aaafb3877266295a69c2992ba0f4aba4de12e \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
