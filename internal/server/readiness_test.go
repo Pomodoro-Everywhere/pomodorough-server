@@ -72,6 +72,19 @@ func TestS8ReadinessMetadataDigestMatchesGeneratedAsset(t *testing.T) {
 	}
 }
 
+func TestS6ReadinessAssetDigestsMatchWebDirectory(t *testing.T) {
+	for _, asset := range readinessAssets {
+		contents, err := os.ReadFile(filepath.Join("..", "..", "web", asset.name))
+		if err != nil {
+			t.Fatalf("read web asset %s: %v", asset.name, err)
+		}
+		digest := sha256.Sum256(contents)
+		if actual := fmt.Sprintf("%x", digest); actual != asset.digest {
+			t.Fatalf("stale readiness pin for %s = %s, want %s (update readiness.go)", asset.name, asset.digest, actual)
+		}
+	}
+}
+
 func TestS6NewReadinessRequiresAssetsAndCore(t *testing.T) {
 	fixture := newReadinessTestFixture(t)
 	application, err := New(fixture.application.cfg, fixture.application.store, fixture.application.logger)
