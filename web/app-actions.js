@@ -6,6 +6,9 @@
   "use strict";
 
   const COMPLETION_SOUND_INTERVAL_MS = 1_200;
+  // Westminster first quarter (G#4 F#4 E4 B3): one bell per repeat tick so the
+  // full phrase emerges over successive alerts without overlapping playback.
+  const COMPLETION_CHIME_FREQUENCIES = [415.30, 369.99, 329.63, 246.94];
   const TIMER_OWNER_LEASE_MS = 60_000;
   const TIMER_OWNER_HEARTBEAT_MS = 15_000;
   const MIN_DURATION_MS = 60_000;
@@ -543,15 +546,24 @@
 
     playCompletionTone() {
       if (!this.completionAlertContext || this.completionAlertContext.state !== "running") return false;
+      const chimeIndex = this.completionChimeIndex || 0;
+      this.completionChimeIndex = (chimeIndex + 1) % COMPLETION_CHIME_FREQUENCIES.length;
+      const now = this.completionAlertContext.currentTime;
       const oscillator = this.completionAlertContext.createOscillator();
       const gain = this.completionAlertContext.createGain();
       oscillator.type = "sine";
-      oscillator.frequency.value = 880;
-      gain.gain.value = 0.18;
+      oscillator.frequency.value = COMPLETION_CHIME_FREQUENCIES[chimeIndex];
+      if (typeof gain.gain.setTargetAtTime === "function") {
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.setTargetAtTime(0.12, now, 0.03);
+        gain.gain.setTargetAtTime(0, now + 0.7, 0.09);
+      } else {
+        gain.gain.value = 0.12;
+      }
       oscillator.connect(gain);
       gain.connect(this.completionAlertContext.destination);
       oscillator.start();
-      oscillator.stop(this.completionAlertContext.currentTime + 0.22);
+      oscillator.stop(now + 1.0);
       return true;
     }
 
