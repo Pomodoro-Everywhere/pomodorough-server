@@ -26,6 +26,7 @@ var entrypointAttributeEscaper = strings.NewReplacer(
 	"<", "&lt;",
 	">", "&gt;",
 	`"`, "&quot;",
+	"'", "&#39;",
 )
 
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {

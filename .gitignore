@@ -41,7 +41,7 @@ pomodorough.env
 /coverage.out
 /coverage.xml
 /htmlcov/
-/.audit/
+.audit/
 
 # Release binaries.
 /pomodorough
@@ -49,3 +49,18 @@ pomodorough.env
 
 # Local logs.
 *.log
+
+# Go test and coverage artifacts.
+*.out
+*.test
+
+# Go vendor directory.
+vendor/
+
+# IDE directories.
+.idea/
+.vscode/
+
+# Editor and OS artifacts.
+*~
+Thumbs.db

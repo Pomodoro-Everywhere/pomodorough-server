@@ -42,7 +42,7 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "992e92f68115247edf43c24710e4fcfd56ef38f3d2f6b5d2adc3b75e0538dccf", false},
+	{"index.html", "1f45bb5cca64ad281686a64a8441f748796487fef4abb4073c8b21b9df2a20a1", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
@@ -89,6 +89,8 @@ func (s *Server) handleReady(w http.ResponseWriter, request *http.Request) {
 	if err := s.readiness(ctx); err != nil {
 		code := readinessErrorCode(ctx, err)
 		s.logger.Warn("readiness check failed", "code", code)
+		// Report only the bounded code: raw readiness errors can carry paths.
+		reportInternalErrorToErrorMonitoring(err, request, "readiness check "+code)
 		writeJSON(w, http.StatusServiceUnavailable, readinessResponse{Status: "not_ready", Error: code})
 		return
 	}

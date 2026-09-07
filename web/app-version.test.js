@@ -49,6 +49,10 @@ test("PWA version identity follows package.json", () => {
   const meta = html.match(/<meta name="pomodorough-version" content="([^"]+)">/);
   assert.ok(meta, "app.html must carry a pomodorough-version meta tag");
   assert.equal(meta[1], packageVersion);
+  const landing = fs.readFileSync(path.join(webDirectory, "index.html"), "utf8");
+  const landingMeta = landing.match(/<meta name="pomodorough-version" content="([^"]+)">/);
+  assert.ok(landingMeta, "index.html must carry a pomodorough-version meta tag");
+  assert.equal(landingMeta[1], packageVersion);
   assert.match(html, /<p id="appVersion" class="app-version">/);
   assert.match(html, new RegExp(`Version ${packageVersion.replace(/\./g, "\\.")}`));
   const css = fs.readFileSync(path.join(webDirectory, "app.css"), "utf8");

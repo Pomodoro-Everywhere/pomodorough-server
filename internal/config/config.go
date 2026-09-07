@@ -7,11 +7,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 const defaultPublicURL = "https://pomodorough.egigoka.me"
+
+var sentryDSNPattern = regexp.MustCompile(`^https://[A-Za-z0-9_-]+@[A-Za-z0-9.-]+/[0-9]+$`)
 
 type Config struct {
 	ListenAddr              string
@@ -46,6 +49,12 @@ func Load() (Config, error) {
 	if len(cfg.AppSecret) < 32 {
 		return Config{}, errors.New("APP_SECRET must contain at least 32 bytes")
 	}
+	if !validSentryDSN(cfg.SentryDSN) {
+		return Config{}, errors.New("SENTRY_DSN must be an HTTPS Sentry DSN")
+	}
+	if !validSentryDSN(cfg.SentryWebDSN) {
+		return Config{}, errors.New("SENTRY_DSN_WEB must be an HTTPS Sentry DSN")
+	}
 	if err := normalizeOriginsAndPaths(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -57,6 +66,15 @@ func Load() (Config, error) {
 	cfg.TrustedProxyHops = trustedHops
 	cfg.GoogleNativeClientIDs, cfg.GoogleNativeClientIDSet = nativeClientIDs()
 	return cfg, nil
+}
+
+// validSentryDSN accepts empty (disabled) or an HTTPS DSN matching the
+// browser client shape, so malformed values fail fast at startup.
+func validSentryDSN(value string) bool {
+	if value == "" {
+		return true
+	}
+	return sentryDSNPattern.MatchString(value)
 }
 
 func trustedProxySettings() ([]netip.Prefix, int, error) {

@@ -151,6 +151,15 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		if googleFailure.logMessage != "" {
 			s.logger.Warn(googleFailure.logMessage, "error", googleFailure.err)
 		}
+		if googleFailure.status == http.StatusBadGateway {
+			// Report exchange dependency failures only: 401 verification
+			// stays warn-only as client-driven. Pattern tags only, no PII.
+			reportErr := googleFailure.err
+			if reportErr == nil {
+				reportErr = errors.New("missing Google ID token")
+			}
+			reportInternalErrorToErrorMonitoring(reportErr, r, "Google OAuth exchange failed")
+		}
 		http.Error(w, "Authentication failed", googleFailure.status)
 		return
 	}
@@ -281,6 +290,8 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.verifyGoogleIDToken(googleContext, request.IDToken, s.nativeVerifier, challenge.Nonce, s.cfg.GoogleNativeClientIDSet)
 	if err != nil {
 		s.logger.Warn("native Google ID token verification failed", "error", err)
+		// Pattern tags only: request body holds the raw ID token and challenge.
+		reportInternalErrorToErrorMonitoring(err, r, "native Google ID token verification failed")
 		writeAPIError(w, http.StatusUnauthorized, "invalid Google token")
 		return
 	}

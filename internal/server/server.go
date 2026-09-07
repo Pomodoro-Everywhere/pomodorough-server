@@ -201,7 +201,8 @@ func (s *Server) writeRateLimit(w http.ResponseWriter, r *http.Request, scope st
 		seconds = 1
 	}
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-	s.logger.Warn("request rate limited", "scope", scope, "method", r.Method, "path", r.URL.Path)
+	// Log only the route pattern: raw paths can carry user identity material.
+	s.logger.Warn("request rate limited", "scope", scope, "method", r.Method, "route", metricRoute(r.Method, r.Pattern))
 	writeAPIError(w, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
