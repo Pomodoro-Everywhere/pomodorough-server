@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 2 << 20
-	readinessCoreVersion   = "0.14.0"
+	readinessCoreVersion   = "0.15.0"
 )
 
 type readinessAsset struct {
@@ -48,11 +48,11 @@ var readinessAssets = []readinessAsset{
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
 	{"sentry-client.js", "e7670aa1030270db2fa6171a0b91492cf15129c0de66f086627c2caac0b760f9", false},
-	{"app.html", "df51e18a53dcfa2f5d9fe8b1944b3f2ded1492356fdee6aeaf4e60abb9af7339", false},
+	{"app.html", "213ce0d8f17fead4530b664c3e0cae2f7371db51603b3787d7d494f4cdfac31a", false},
 	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
-	{"pomodorough_core.wasm", "e83b0ed6905317368fd13b4aa8891a305df7132e33bbee1baca6f47056fc15f7", true},
+	{"pomodorough_core.wasm", "7dd0e190a15f429bcc9b942027c9c06dd645c9c550a6a66050f58c9ec3052cdb", true},
 	{"sync-core.js", "22df0bae998505f4ef6c9e399ff845c96bf0c30ad9f937ef19aa4b03c69b5739", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
