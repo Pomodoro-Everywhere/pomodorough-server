@@ -274,9 +274,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(recorder, r)
 		duration := time.Since(started)
 		s.metrics.observe(r.Method, r.Pattern, recorder.status, duration)
+		// Log only the route pattern: raw paths can carry user identity material.
 		s.logger.Info("http request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"route", metricRoute(r.Method, r.Pattern),
 			"status", recorder.status,
 			"bytes", recorder.bytes,
 			"duration_ms", duration.Milliseconds(),

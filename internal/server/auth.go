@@ -359,6 +359,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	access := store.TokenRecord{Hash: accessHash, Kind: "access", CreatedAt: now, ExpiresAt: now.Add(accessTokenLifetime)}
 	refresh := store.TokenRecord{Hash: refreshHash, Kind: "refresh", CreatedAt: now, ExpiresAt: now.Add(refreshTokenLifetime)}
 	if err := store.RotateRefresh(r.Context(), db, oldHash, access, refresh, now); err != nil {
+		// Warn-only: reuse is an expected client-driven 401 (replay/retry) with the
+		// family already revoked in the store; Sentry stays reserved for internal failures below.
 		if errors.Is(err, store.ErrRefreshReuse) {
 			s.logger.Warn("refresh token reuse revoked session family")
 		}

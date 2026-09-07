@@ -42,3 +42,10 @@ pomodorough.env
 /coverage.xml
 /htmlcov/
 /.audit/
+
+# Release binaries.
+/pomodorough
+/pomodorough.exe
+
+# Local logs.
+*.log

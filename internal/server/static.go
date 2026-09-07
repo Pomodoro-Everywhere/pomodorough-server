@@ -32,6 +32,7 @@ func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	file, info, err := s.openWebFile("openapi.yaml")
 	if err != nil {
 		s.logger.Error("open OpenAPI specification", "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "open OpenAPI specification")
 		http.Error(w, "OpenAPI specification unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -93,6 +94,7 @@ func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, re
 			return file, info, "app.html", true
 		}
 		s.logger.Error("open SPA entrypoint", "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "open SPA entrypoint")
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 		return nil, nil, "", false
 	}
@@ -101,6 +103,7 @@ func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, re
 	}
 	if entrypoint {
 		s.logger.Error("open web entrypoint", "path", relative, "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "open web entrypoint")
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 	} else {
 		http.NotFound(w, r)
@@ -119,6 +122,7 @@ func (s *Server) serveEntrypoint(w http.ResponseWriter, r *http.Request, file *o
 	encoded, err := io.ReadAll(file)
 	if err != nil {
 		s.logger.Error("read web entrypoint", "path", relative, "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "read web entrypoint")
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 		return
 	}
