@@ -33,7 +33,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, "read stream revision", err)
+		s.internalAPIError(w, r, "read stream revision", err)
 		return
 	}
 	setStreamHeaders(w)

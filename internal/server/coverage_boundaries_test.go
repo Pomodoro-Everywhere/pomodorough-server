@@ -76,14 +76,18 @@ func TestInternalErrorsKeepDetailsOutOfResponses(t *testing.T) {
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	cause := errors.New("database password leaked")
 
+	plainRequest := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/auth/google/callback", nil)
+	plainRequest.Pattern = "GET /auth/google/callback"
 	plain := httptest.NewRecorder()
-	server.internalError(plain, "load account", cause)
+	server.internalError(plain, plainRequest, "load account", cause)
 	if plain.Code != http.StatusInternalServerError || strings.Contains(plain.Body.String(), cause.Error()) {
 		t.Fatalf("plain internal error leaked details: status=%d body=%q", plain.Code, plain.Body.String())
 	}
 
+	apiRequest := httptest.NewRequest(http.MethodPost, "https://pomodorough.egigoka.me/api/v1/sync", nil)
+	apiRequest.Pattern = "POST /api/v1/sync"
 	api := httptest.NewRecorder()
-	server.internalAPIError(api, "sync account", cause)
+	server.internalAPIError(api, apiRequest, "sync account", cause)
 	if api.Code != http.StatusInternalServerError || strings.Contains(api.Body.String(), cause.Error()) {
 		t.Fatalf("API internal error leaked details: status=%d body=%q", api.Code, api.Body.String())
 	}

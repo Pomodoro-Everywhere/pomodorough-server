@@ -77,7 +77,7 @@ func (s *Server) handleGoogleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	result, failure := s.createOAuthState(safeReturnPath(r.URL.Query().Get("return")))
 	if failure != nil {
-		s.internalError(w, failure.operation, failure.err)
+		s.internalError(w, r, failure.operation, failure.err)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -156,7 +156,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	session, failure := s.persistWebAccount(r.Context(), identity)
 	if failure != nil {
-		s.internalError(w, failure.operation, failure.err)
+		s.internalError(w, r, failure.operation, failure.err)
 		return
 	}
 	setSessionCookie(w, session.sessionToken, session.expiresAt)
@@ -233,7 +233,7 @@ func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	nonce, err := authn.RandomString(32)
 	if err != nil {
-		s.internalAPIError(w, "generate native nonce", err)
+		s.internalAPIError(w, r, "generate native nonce", err)
 		return
 	}
 	issuedAt := time.Now()
@@ -241,12 +241,12 @@ func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 	challenge := authn.NativeChallenge{Nonce: nonce, ExpiresAt: expiresAt.Unix()}
 	sealed, err := s.codec.Seal("native-challenge", challenge)
 	if err != nil {
-		s.internalAPIError(w, "seal native challenge", err)
+		s.internalAPIError(w, r, "seal native challenge", err)
 		return
 	}
 	digest := store.HashNativeChallenge(nativeChallengeDomain, sealed)
 	if err := s.store.CreateNativeChallenge(r.Context(), digest, nativeChallengeDomain, issuedAt, time.Unix(challenge.ExpiresAt, 0)); err != nil {
-		s.internalAPIError(w, "persist native challenge", err)
+		s.internalAPIError(w, r, "persist native challenge", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -291,7 +291,7 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusUnauthorized, "invalid challenge")
 			return
 		}
-		s.internalAPIError(w, failure.operation, failure.err)
+		s.internalAPIError(w, r, failure.operation, failure.err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nativeTokenResponse(session.accessToken, session.refreshToken, session.accessExpiry, session.refreshExpiry))
@@ -348,12 +348,12 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	accessToken, accessHash, err := authn.NewOpaqueToken(userID)
 	if err != nil {
-		s.internalAPIError(w, "generate access token", err)
+		s.internalAPIError(w, r, "generate access token", err)
 		return
 	}
 	refreshToken, refreshHash, err := authn.NewOpaqueToken(userID)
 	if err != nil {
-		s.internalAPIError(w, "generate refresh token", err)
+		s.internalAPIError(w, r, "generate refresh token", err)
 		return
 	}
 	access := store.TokenRecord{Hash: accessHash, Kind: "access", CreatedAt: now, ExpiresAt: now.Add(accessTokenLifetime)}
@@ -366,7 +366,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusUnauthorized, "invalid refresh token")
 			return
 		}
-		s.internalAPIError(w, "rotate refresh token", err)
+		s.internalAPIError(w, r, "rotate refresh token", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nativeTokenResponse(accessToken, refreshToken, access.ExpiresAt, refresh.ExpiresAt))
@@ -486,12 +486,14 @@ func clearSessionCookies(w http.ResponseWriter) {
 	}
 }
 
-func (s *Server) internalError(w http.ResponseWriter, operation string, err error) {
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	s.logger.Error(operation, "error", err)
+	reportInternalErrorToErrorMonitoring(err, r, operation)
 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }
 
-func (s *Server) internalAPIError(w http.ResponseWriter, operation string, err error) {
+func (s *Server) internalAPIError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	s.logger.Error(operation, "error", err)
+	reportInternalErrorToErrorMonitoring(err, r, operation)
 	writeAPIError(w, http.StatusInternalServerError, "internal server error")
 }

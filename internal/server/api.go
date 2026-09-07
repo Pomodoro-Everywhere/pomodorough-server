@@ -15,7 +15,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		s.internalAPIError(w, "validate account generation", err)
+		s.internalAPIError(w, r, "validate account generation", err)
 		return
 	}
 	csrfToken := ""
@@ -30,7 +30,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			var err error
 			csrfToken, err = authn.RandomString(32)
 			if err != nil {
-				s.internalAPIError(w, "generate replacement CSRF token", err)
+				s.internalAPIError(w, r, "generate replacement CSRF token", err)
 				return
 			}
 			hash := authn.HashString(csrfToken)
@@ -40,7 +40,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 					writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 					return
 				}
-				s.internalAPIError(w, "replace CSRF token", err)
+				s.internalAPIError(w, r, "replace CSRF token", err)
 				return
 			}
 			setCSRFCookie(w, csrfToken, time.Now().Add(webSessionLifetime))
@@ -62,7 +62,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity p
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		s.internalAPIError(w, "revoke session", err)
+		s.internalAPIError(w, r, "revoke session", err)
 		return
 	}
 	s.hub.disconnectSession(identity.UserID, identity.Generation, identity.SessionID)
@@ -86,7 +86,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ide
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		s.internalAPIError(w, "delete account", err)
+		s.internalAPIError(w, r, "delete account", err)
 		return
 	}
 	s.hub.disconnect(identity.UserID, identity.Generation)
@@ -112,7 +112,7 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, iden
 			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		s.internalAPIError(w, "revoke device", err)
+		s.internalAPIError(w, r, "revoke device", err)
 		return
 	}
 	s.hub.disconnectDevice(identity.UserID, identity.Generation, request.DeviceID)
@@ -123,7 +123,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 	request, err := parseSyncRequest(w, r, time.Now())
 	if err != nil {
 		if isRequestRuntimeError(err) {
-			s.internalAPIError(w, "validate sync request with shared core", err)
+			s.internalAPIError(w, r, "validate sync request with shared core", err)
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "invalid sync request")
@@ -143,7 +143,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, "sync account mutations", err)
+		s.internalAPIError(w, r, "sync account mutations", err)
 		return
 	}
 	s.logger.Info("sync applied",
@@ -172,7 +172,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identit
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, "read bootstrap snapshot", err)
+		s.internalAPIError(w, r, "read bootstrap snapshot", err)
 		return
 	}
 	writeAccountSnapshot(w, identity, result)
@@ -186,7 +186,7 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 	request, err := parseBootstrapResolutionRequest(w, r, now)
 	if err != nil {
 		if isRequestRuntimeError(err) {
-			s.internalAPIError(w, "validate bootstrap resolution with shared core", err)
+			s.internalAPIError(w, r, "validate bootstrap resolution with shared core", err)
 			return
 		}
 		writeAPIError(w, http.StatusBadRequest, "invalid bootstrap resolution request")
@@ -214,7 +214,7 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, "resolve bootstrap history", err)
+		s.internalAPIError(w, r, "resolve bootstrap history", err)
 		return
 	}
 	writeAccountSnapshot(w, identity, result)
@@ -234,7 +234,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, "read timer history", err)
+		s.internalAPIError(w, r, "read timer history", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": history})

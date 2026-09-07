@@ -40,7 +40,7 @@ func (s *Server) requireAccountDeletion() http.Handler {
 		}
 		receipt, err := s.store.CommittedDeletionReceipt(userID, credential)
 		if err != nil {
-			s.internalAPIError(w, "read deletion receipt", err)
+			s.internalAPIError(w, r, "read deletion receipt", err)
 			return
 		}
 		if receipt.Generation == 0 {
