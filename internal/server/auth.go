@@ -237,7 +237,7 @@ func (s *Server) persistWebAccount(ctx context.Context, identity googleIdentity)
 
 func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.NativeAuthEnabled() {
-		writeAPIError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
+		writeAPIError(w, r, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
 	}
 	nonce, err := authn.RandomString(32)
@@ -258,7 +258,7 @@ func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 		s.internalAPIError(w, r, "persist native challenge", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, r, http.StatusOK, map[string]any{
 		"challenge": sealed,
 		"nonce":     nonce,
 		"expiresAt": expiresAt.UTC().Format(time.RFC3339),
@@ -267,7 +267,7 @@ func (s *Server) handleNativeChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.NativeAuthEnabled() {
-		writeAPIError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
+		writeAPIError(w, r, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
 	}
 	var request struct {
@@ -277,12 +277,12 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 		Platform  string `json:"platform"`
 	}
 	if err := decodeJSON(w, r, 1<<20, &request); err != nil || request.IDToken == "" || request.Challenge == "" || !validID(request.DeviceID) || !validPlatform(request.Platform) {
-		writeAPIError(w, http.StatusBadRequest, "invalid request")
+		writeAPIError(w, r, http.StatusBadRequest, "invalid request")
 		return
 	}
 	challenge, err := s.codec.OpenNativeChallenge(request.Challenge, time.Now())
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "invalid challenge")
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid challenge")
 		return
 	}
 	googleContext, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -292,20 +292,20 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("native Google ID token verification failed", "error", err)
 		// Pattern tags only: request body holds the raw ID token and challenge.
 		reportInternalErrorToErrorMonitoring(err, r, "native Google ID token verification failed")
-		writeAPIError(w, http.StatusUnauthorized, "invalid Google token")
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid Google token")
 		return
 	}
 	digest := store.HashNativeChallenge(nativeChallengeDomain, request.Challenge)
 	session, failure := s.persistNativeAccount(r.Context(), identity, request.DeviceID, request.Platform, digest)
 	if failure != nil {
 		if isUnauthorized(failure.err) {
-			writeAPIError(w, http.StatusUnauthorized, "invalid challenge")
+			writeAPIError(w, r, http.StatusUnauthorized, "invalid challenge")
 			return
 		}
 		s.internalAPIError(w, r, failure.operation, failure.err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nativeTokenResponse(session.accessToken, session.refreshToken, session.accessExpiry, session.refreshExpiry))
+	writeJSON(w, r, http.StatusOK, nativeTokenResponse(session.accessToken, session.refreshToken, session.accessExpiry, session.refreshExpiry))
 }
 
 func (s *Server) persistNativeAccount(ctx context.Context, identity googleIdentity, deviceID, platform string, challengeDigest [32]byte) (nativeSessionResult, *authOperationFailure) {
@@ -340,19 +340,19 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		RefreshToken string `json:"refreshToken"`
 	}
 	if err := decodeJSON(w, r, 64<<10, &request); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid request")
+		writeAPIError(w, r, http.StatusBadRequest, "invalid request")
 		return
 	}
 	userID, oldHash, err := authn.ParseOpaqueToken(request.RefreshToken)
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "invalid refresh token")
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 	unlock := s.store.LockUser(userID)
 	defer unlock()
 	db, err := s.store.OpenExistingUser(r.Context(), userID)
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "invalid refresh token")
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 	defer db.Close()
@@ -376,13 +376,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("refresh token reuse revoked session family")
 		}
 		if isUnauthorized(err) || errors.Is(err, store.ErrRefreshReuse) {
-			writeAPIError(w, http.StatusUnauthorized, "invalid refresh token")
+			writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
 			return
 		}
 		s.internalAPIError(w, r, "rotate refresh token", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nativeTokenResponse(accessToken, refreshToken, access.ExpiresAt, refresh.ExpiresAt))
+	writeJSON(w, r, http.StatusOK, nativeTokenResponse(accessToken, refreshToken, access.ExpiresAt, refresh.ExpiresAt))
 }
 
 func (s *Server) verifyGoogleIDToken(ctx context.Context, rawToken string, verifier *oidc.IDTokenVerifier, expectedNonce string, allowedAudiences map[string]struct{}) (googleIdentity, error) {
@@ -508,5 +508,5 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation
 func (s *Server) internalAPIError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	s.logger.Error(operation, "error", err)
 	reportInternalErrorToErrorMonitoring(err, r, operation)
-	writeAPIError(w, http.StatusInternalServerError, "internal server error")
+	writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
 }

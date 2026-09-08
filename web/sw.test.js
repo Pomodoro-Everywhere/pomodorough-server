@@ -104,8 +104,8 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
     assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
   }
-  assert.match(appSource, /\/app\.js\?v=35/);
-  assert.match(workerSource, /\/app\.js\?v=35/);
+  assert.match(appSource, /\/app\.js\?v=36/);
+  assert.match(workerSource, /\/app\.js\?v=36/);
   assert.match(appSource, /\/shared-core-metadata\.js\?v=1/);
   assert.match(appSource, /\/shared-core\.js\?v=6/);
   assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
@@ -127,15 +127,16 @@ test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["/i18n.js?v=2", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  const reportingScripts = new Set([
-    "app-actions.js", "app-sync.js", "app-bootstrap.js", "app-session.js", "app-view.js"
-  ]);
+  const scriptVersions = {
+    "app-state.js": 1, "app-storage.js": 2, "app-actions.js": 2, "app-sync.js": 2,
+    "app-bootstrap.js": 2, "app-session.js": 3, "app-view.js": 2
+  };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
-    const asset = `/${file}?v=${reportingScripts.has(file) ? 2 : 1}`;
+    const asset = `/${file}?v=${scriptVersions[file] || 1}`;
     assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v50-/);
+  assert.match(workerSource, /pomodorough-shell-v51-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

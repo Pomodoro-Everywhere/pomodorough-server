@@ -234,6 +234,31 @@ test("warn-only sync/session/bootstrap/view/actions sites report with static ope
   }
 });
 
+test("S28 startup/session/storage sites report with static operations", () => {
+  const warnSites = [
+    ["app.js", "Pomodorough localization unavailable; using embedded English:", "startup.localization.unavailable"],
+    ["app.js", "Pomodorough offline shell unavailable:", "startup.offline-shell.unavailable"],
+    ["app-session.js", "Pomodorough remains offline:", "session.restore.offline"],
+    ["app-session.js", "Deleted account local-data cleanup will retry on next launch:", "session.delete-account.cleanup-retry"]
+  ];
+  assert.equal(warnSites.length, 4);
+  for (const [file, message, operation] of warnSites) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    assert.match(source, new RegExp(message.replace(/[.?]/g, "\\$&")),
+      `${file} must keep its warn message`);
+    const call = `reportFrontendError(error, "${operation}")`;
+    assert.ok(source.includes(call), `${file} must report with ${operation}`);
+  }
+  const session = fs.readFileSync(path.join(__dirname, "app-session.js"), "utf8");
+  assert.ok(session.includes('reportFrontendError(failure, "session.stream.error")'),
+    "app-session.js must report stream errors with session.stream.error");
+  assert.match(session, /\.onerror\s*=/, "app-session.js must wire revision stream onerror");
+  const storage = fs.readFileSync(path.join(__dirname, "app-storage.js"), "utf8");
+  assert.ok(storage.includes('reportFrontendError(error, "storage.failure")'),
+    "app-storage.js must report with storage.failure");
+  assert.match(storage, /AccountOwnershipError/, "app-storage.js must keep ownership quarantine");
+});
+
 test("service worker stays silent with a reasoned comment", () => {
   const worker = fs.readFileSync(path.join(__dirname, "sw.js"), "utf8");
   assert.match(worker, /stay silent by design/);

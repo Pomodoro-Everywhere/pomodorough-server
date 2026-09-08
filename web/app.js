@@ -1,6 +1,15 @@
 (() => {
   "use strict";
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   const SINGLE_ELEMENT_IDS = Object.freeze([
     "installButton", "syncStatus", "syncStatusText", "profile", "profileAvatar",
     "logoutButton", "deleteAccountButton", "conflictPanel", "conflictReason",
@@ -113,6 +122,7 @@
       call(application, "setI18nForTest", await externals.translations.loadBrowserI18n());
     } catch (error) {
       host.console.warn("Pomodorough localization unavailable; using embedded English:", error);
+      reportFrontendError(error, "startup.localization.unavailable");
     }
   }
 
@@ -140,6 +150,7 @@
       await host.navigator.serviceWorker.register("/sw.js", { scope: "/app" });
     } catch (error) {
       host.console.warn("Pomodorough offline shell unavailable:", error);
+      reportFrontendError(error, "startup.offline-shell.unavailable");
     }
   }
 

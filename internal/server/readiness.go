@@ -48,7 +48,7 @@ var readinessAssets = []readinessAsset{
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
 	{"sentry-client.js", "a9a77386c8539597b2ddc0dcdfb04886a6baf97343fe172cbbc7532f40ada42e", false},
-	{"app.html", "b3547caf2a6439136165e5177680adcb9a7288e5e27a4501422923383b1975e2", false},
+	{"app.html", "771a58c20ab1ef3b47f6fafdf85dc1be17829c19deeee874de394a43e96bddcd", false},
 	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
@@ -62,16 +62,16 @@ var readinessAssets = []readinessAsset{
 	{"locales/ar-XB.json", "20deded20dff83fe27d035f78ece2322145caf542ec161161ed93d7429ae51fe", false},
 	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
 	{"app-state.js", "409eb06f5ecdb2e4959da956d0542591505309dd0c3dcd0f23c4a43801f7c7e3", false},
-	{"app-storage.js", "95a9ae6f290b0b3bf65cabe3e3379ae1c59c21f771e984886c5772a2d40c5dfa", false},
+	{"app-storage.js", "9c577c586948096be43632305b851539778795132e1cdfe6b08c849e7117cfe7", false},
 	{"app-actions.js", "484db73ba4997649ae74b6c5492987958c65c1b4f5ea611ec3b9464bd68f6efc", false},
 	{"app-sync.js", "9d5640baeb9eaf269b2dba1a21d686335f99ac87446b81478ffc536f5a3a05f1", false},
 	{"app-bootstrap.js", "b701b5ee3cc5aec53459df570ae3d385d27da3f185051d938cf94620754c41c7", false},
-	{"app-session.js", "51ac9c1d5de2da2391dd3e31cb190793fb6a0b3ff8b2b8e9246b960d97ae38ce", false},
+	{"app-session.js", "4184b9bd4c418b845a1af1730caa085d4d7147f5a22b8cbf8314ae1847345f55", false},
 	{"app-view.js", "b2a2f2c0c27697b2f73f992390781a7264c71ce8a8522bf05dd44e96aac807b3", false},
-	{"app.js", "753598d8974bc555810be67b4e5a7e7c5336d60a45025b8254012b390bc298d1", false},
+	{"app.js", "1be37acd0ba59c5fe6b6de3831e54c41b4ee8e6251798dd69769328a8f8c2d17", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "5341f4032beb2d8c1ee56a98cf817b85c70b9b828e1a82e18b09a98ecf0d62c4", false},
+	{"sw.js", "190e9eddd67119da7ebda29e1b8ab911844c7c02932dac6484680c3d13227cff", false},
 	{"openapi.yaml", "8a5db31a006cecf6ec857f938fb0903dd90f13a9a43fa5933cec8132faec2a49", false},
 }
 
@@ -91,10 +91,10 @@ func (s *Server) handleReady(w http.ResponseWriter, request *http.Request) {
 		s.logger.Warn("readiness check failed", "code", code)
 		// Report only the bounded code: raw readiness errors can carry paths.
 		reportInternalErrorToErrorMonitoring(err, request, "readiness check "+code)
-		writeJSON(w, http.StatusServiceUnavailable, readinessResponse{Status: "not_ready", Error: code})
+		writeJSON(w, request, http.StatusServiceUnavailable, readinessResponse{Status: "not_ready", Error: code})
 		return
 	}
-	writeJSON(w, http.StatusOK, readinessResponse{Status: "ready"})
+	writeJSON(w, request, http.StatusOK, readinessResponse{Status: "ready"})
 }
 
 type readinessResponse struct {

@@ -12,7 +12,7 @@ import (
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity principal) {
 	if err := s.store.ValidateAccountGeneration(r.Context(), identity.UserID, identity.Generation); err != nil {
 		if isUnauthorized(err) {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.internalAPIError(w, r, "validate account generation", err)
@@ -37,7 +37,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			err = s.store.UpdateCSRFForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, hash)
 			if err != nil {
 				if isUnauthorized(err) {
-					writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+					writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 					return
 				}
 				s.internalAPIError(w, r, "replace CSRF token", err)
@@ -46,7 +46,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			setCSRFCookie(w, csrfToken, time.Now().Add(webSessionLifetime))
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, r, http.StatusOK, map[string]any{
 		"user": map[string]string{
 			"accountIncarnation": accountIncarnation(identity),
 			"id":                 identity.Profile.ID, "email": identity.Profile.Email, "name": identity.Profile.Name, "avatarUrl": identity.Profile.AvatarURL,
@@ -59,7 +59,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity p
 	err := s.store.RevokeSessionForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, time.Now())
 	if err != nil {
 		if isUnauthorized(err) {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.internalAPIError(w, r, "revoke session", err)
@@ -78,12 +78,12 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ide
 		Confirmation string `json:"confirmation"`
 	}
 	if err := decodeJSON(w, r, 64<<10, &request); err != nil || request.Confirmation != "DELETE" {
-		writeAPIError(w, http.StatusBadRequest, "type DELETE to confirm account deletion")
+		writeAPIError(w, r, http.StatusBadRequest, "type DELETE to confirm account deletion")
 		return
 	}
 	if err := s.store.DeleteUserWithReceipt(r.Context(), identity.UserID, identity.Generation, identity.Credential, identity.CSRFHash); err != nil {
 		if isUnauthorized(err) {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.internalAPIError(w, r, "delete account", err)
@@ -103,13 +103,13 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, iden
 		DeviceID string `json:"deviceId"`
 	}
 	if err := decodeJSON(w, r, 64<<10, &request); err != nil || !validID(request.DeviceID) {
-		writeAPIError(w, http.StatusBadRequest, "invalid request")
+		writeAPIError(w, r, http.StatusBadRequest, "invalid request")
 		return
 	}
 	err := s.store.RevokeDeviceForGeneration(r.Context(), identity.UserID, identity.Generation, request.DeviceID, time.Now())
 	if err != nil {
 		if isUnauthorized(err) {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.internalAPIError(w, r, "revoke device", err)
@@ -126,20 +126,20 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 			s.internalAPIError(w, r, "validate sync request with shared core", err)
 			return
 		}
-		writeAPIError(w, http.StatusBadRequest, "invalid sync request")
+		writeAPIError(w, r, http.StatusBadRequest, "invalid sync request")
 		return
 	}
 	if identity.Method == "bearer" && !authn.EqualString(identity.DeviceID, request.DeviceID) {
-		writeAPIError(w, http.StatusForbidden, "device mismatch")
+		writeAPIError(w, r, http.StatusForbidden, "device mismatch")
 		return
 	}
 	result, err := s.store.SyncForGeneration(r.Context(), identity.UserID, identity.Generation, request, time.Now())
 	if isUnauthorized(err) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
 	if err != nil {
@@ -155,7 +155,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		"auto_start_operations", len(request.AutoStartOperations),
 		"selected_task_operations", len(request.SelectedTaskOperations),
 	)
-	writeAccountSnapshot(w, identity, result)
+	writeAccountSnapshot(w, r, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
@@ -164,18 +164,18 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identity principal) {
 	result, err := s.store.BootstrapForGeneration(r.Context(), identity.UserID, identity.Generation, time.Now())
 	if isUnauthorized(err) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
 	if err != nil {
 		s.internalAPIError(w, r, "read bootstrap snapshot", err)
 		return
 	}
-	writeAccountSnapshot(w, identity, result)
+	writeAccountSnapshot(w, r, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
@@ -189,35 +189,35 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 			s.internalAPIError(w, r, "validate bootstrap resolution with shared core", err)
 			return
 		}
-		writeAPIError(w, http.StatusBadRequest, "invalid bootstrap resolution request")
+		writeAPIError(w, r, http.StatusBadRequest, "invalid bootstrap resolution request")
 		return
 	}
 	if identity.Method == "bearer" && !authn.EqualString(identity.DeviceID, request.DeviceID) {
-		writeAPIError(w, http.StatusForbidden, "device mismatch")
+		writeAPIError(w, r, http.StatusForbidden, "device mismatch")
 		return
 	}
 	result, err := s.store.ResolveBootstrapForGeneration(r.Context(), identity.UserID, identity.Generation, request, now)
 	if isUnauthorized(err) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionConflict) {
-		writeAPIError(w, http.StatusConflict, "revision conflict")
+		writeAPIError(w, r, http.StatusConflict, "revision conflict")
 		return
 	}
 	if errors.Is(err, store.ErrRequestIDConflict) {
-		writeAPIError(w, http.StatusConflict, "request ID conflict")
+		writeAPIError(w, r, http.StatusConflict, "request ID conflict")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
 	if err != nil {
 		s.internalAPIError(w, r, "resolve bootstrap history", err)
 		return
 	}
-	writeAccountSnapshot(w, identity, result)
+	writeAccountSnapshot(w, r, identity, result)
 	if result.Changed {
 		s.hub.publish(identity.UserID, identity.Generation, result.Revision)
 	}
@@ -226,18 +226,18 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity principal) {
 	history, revision, changed, err := s.store.HistoryForGeneration(r.Context(), identity.UserID, identity.Generation, time.Now())
 	if isUnauthorized(err) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
 	if err != nil {
 		s.internalAPIError(w, r, "read timer history", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"history": history})
+	writeJSON(w, r, http.StatusOK, map[string]any{"history": history})
 	if changed {
 		s.hub.publish(identity.UserID, identity.Generation, revision)
 	}

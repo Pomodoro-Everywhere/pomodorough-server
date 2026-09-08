@@ -86,9 +86,11 @@
       };
       this.eventSource.onmessage = receive;
       this.eventSource.addEventListener("revision", receive);
-      this.eventSource.onerror = () => {
-        if (stream === this.eventSource && ownerId === this.syncCore.accountOwnerId(this.state.user)
-          && !this.host.navigator.onLine) this.closeRevisionStream();
+      this.eventSource.onerror = (event) => {
+        if (stream !== this.eventSource || ownerId !== this.syncCore.accountOwnerId(this.state.user)) return;
+        const failure = event instanceof Error ? event : new Error("revision stream error");
+        reportFrontendError(failure, "session.stream.error");
+        if (!this.host.navigator.onLine) this.closeRevisionStream();
       };
     }
 
@@ -334,6 +336,7 @@
         this.use.render();
         this.use.scheduleRetry();
         this.host.console.warn("Pomodorough remains offline:", error);
+        reportFrontendError(error, "session.restore.offline");
       }
     }
 
@@ -470,6 +473,7 @@
         this.clearPendingLogout();
       } catch (error) {
         this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
+        reportFrontendError(error, "session.delete-account.cleanup-retry");
       }
       this.redirectToLogin();
     }

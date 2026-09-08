@@ -29,8 +29,18 @@
     }));
   }
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function storageFailure(error, use) {
-    if (error.name === "AccountOwnershipError") use.quarantineAccountMismatch();
+    if (error?.name !== "AccountOwnershipError") reportFrontendError(error, "storage.failure");
+    if (error?.name === "AccountOwnershipError") use.quarantineAccountMismatch();
     throw error;
   }
 

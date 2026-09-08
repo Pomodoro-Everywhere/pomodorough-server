@@ -35,7 +35,7 @@ func (s *Server) requireAccountDeletion() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID, credential, err := requestCredential(r)
 		if err != nil {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		receipt, err := s.store.CommittedDeletionReceipt(userID, credential)
@@ -56,7 +56,7 @@ func (s *Server) requireAccountDeletion() http.Handler {
 			return
 		}
 		if identity.Method == "cookie" && !s.validCSRF(r, identity) {
-			writeAPIError(w, http.StatusForbidden, "forbidden")
+			writeAPIError(w, r, http.StatusForbidden, "forbidden")
 			return
 		}
 		s.handleDeleteAccount(w, r, identity)

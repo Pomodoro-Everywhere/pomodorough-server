@@ -137,11 +137,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/bootstrap/resolve", s.requireMutation(s.handleBootstrapResolve))
 	mux.Handle("GET /api/v1/history", s.requireAuth(s.handleHistory))
 	mux.Handle("GET /api/v1/stream", s.requireAuth(s.handleStream))
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(w, http.StatusNotFound, "not found")
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeAPIError(w, r, http.StatusNotFound, "not found")
 	})
-	mux.HandleFunc("/api", func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(w, http.StatusNotFound, "not found")
+	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		writeAPIError(w, r, http.StatusNotFound, "not found")
 	})
 	mux.HandleFunc("/auth/", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Not Found", http.StatusNotFound)
@@ -153,15 +153,15 @@ func (s *Server) Handler() http.Handler {
 	return s.recoverMiddleware(s.loggingMiddleware(s.securityMiddleware(mux)))
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, err := s.authenticate(r)
 		if err != nil {
-			writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if allowed, retryAfter := s.accountLimiter.allow(identity.UserID, time.Now()); !allowed {
@@ -178,7 +178,7 @@ func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 func (s *Server) requireMutation(next authenticatedHandler) http.Handler {
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, identity principal) {
 		if identity.Method == "cookie" && !s.validCSRF(r, identity) {
-			writeAPIError(w, http.StatusForbidden, "forbidden")
+			writeAPIError(w, r, http.StatusForbidden, "forbidden")
 			return
 		}
 		next(w, r, identity)
@@ -203,7 +203,7 @@ func (s *Server) writeRateLimit(w http.ResponseWriter, r *http.Request, scope st
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 	// Log only the route pattern: raw paths can carry user identity material.
 	s.logger.Warn("request rate limited", "scope", scope, "method", r.Method, "route", metricRoute(r.Method, r.Pattern))
-	writeAPIError(w, http.StatusTooManyRequests, "rate limit exceeded")
+	writeAPIError(w, r, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
@@ -293,7 +293,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 				s.logger.Error("panic serving request", "error", recovered, "stack", string(debug.Stack()))
 				reportPanicToErrorMonitoring(recovered, r)
 				if strings.HasPrefix(r.URL.Path, "/api/") {
-					writeAPIError(w, http.StatusInternalServerError, "internal server error")
+					writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
 				} else {
 					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 				}
@@ -341,15 +341,17 @@ func (r *responseRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		reportInternalErrorToErrorMonitoring(err, r, "encode JSON response")
+	}
 }
 
-func writeAPIError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+func writeAPIError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	writeJSON(w, r, status, map[string]string{"error": message})
 }
 
 func isUnauthorized(err error) bool {

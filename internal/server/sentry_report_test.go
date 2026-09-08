@@ -98,3 +98,46 @@ func assertEventHasNoPII(t *testing.T, event *sentry.Event, secrets []string) {
 		}
 	}
 }
+
+func TestWriteJSONEncodeFailureReportsPatternOnly(t *testing.T) {
+	transport := &sentry.MockTransport{}
+	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
+		t.Fatal(err)
+	}
+	defer sentry.CurrentHub().BindClient(nil)
+	target := "https://pomodorough.egigoka.me/api/v1/me?token=token-secret-xyz"
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Pattern = "GET /api/v1/me"
+	request.Header.Set("Authorization", "Bearer bearer-secret-123")
+	response := httptest.NewRecorder()
+	writeJSON(response, request, http.StatusOK, map[string]any{"bad": func() {}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	sentry.Flush(2 * time.Second)
+	events := transport.Events()
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want exactly 1", len(events))
+	}
+	if events[0].Tags["error.operation"] != "encode JSON response" {
+		t.Fatalf("error.operation = %q, want encode JSON response", events[0].Tags["error.operation"])
+	}
+	if events[0].Tags["http.method"] != http.MethodGet {
+		t.Fatalf("http.method = %q, want GET", events[0].Tags["http.method"])
+	}
+	if events[0].Tags["http.route"] != "GET /api/v1/me" {
+		t.Fatalf("http.route = %q, want pattern", events[0].Tags["http.route"])
+	}
+	assertEventHasNoPII(t, events[0], []string{"token-secret-xyz", "bearer-secret-123"})
+}
+
+func TestWriteJSONSuccessDoesNotReport(t *testing.T) {
+	transport := initMockSentry(t)
+	request := httptest.NewRequest(http.MethodGet, "https://pomodorough.egigoka.me/healthz", nil)
+	request.Pattern = "GET /healthz"
+	writeJSON(httptest.NewRecorder(), request, http.StatusOK, map[string]string{"status": "ok"})
+	sentry.Flush(2 * time.Second)
+	if events := transport.Events(); len(events) != 0 {
+		t.Fatalf("events = %d, want 0 for encodable payload", len(events))
+	}
+}

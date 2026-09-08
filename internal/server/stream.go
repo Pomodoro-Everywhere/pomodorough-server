@@ -25,11 +25,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 	defer unsubscribe()
 	revision, err := s.currentStreamRevision(r, identity)
 	if isUnauthorized(err) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
-		writeAPIError(w, http.StatusConflict, "revision exhausted")
+		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
 	if err != nil {

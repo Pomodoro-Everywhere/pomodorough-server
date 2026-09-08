@@ -20,12 +20,12 @@ func validAccountIncarnation(w http.ResponseWriter, r *http.Request, identity pr
 	if !present || len(values) == 1 && authn.EqualString(values[0], accountIncarnation(identity)) {
 		return true
 	}
-	writeAPIError(w, http.StatusConflict, "account incarnation changed")
+	writeAPIError(w, r, http.StatusConflict, "account incarnation changed")
 	return false
 }
 
-func writeAccountSnapshot(w http.ResponseWriter, identity principal, result store.SyncResult) {
-	writeJSON(w, http.StatusOK, struct {
+func writeAccountSnapshot(w http.ResponseWriter, r *http.Request, identity principal, result store.SyncResult) {
+	writeJSON(w, r, http.StatusOK, struct {
 		store.SyncResult
 		AccountIncarnation string `json:"accountIncarnation"`
 	}{result, accountIncarnation(identity)})
