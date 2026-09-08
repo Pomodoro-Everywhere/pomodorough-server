@@ -286,6 +286,62 @@ test("S30 storage/locale sites report with static operations", () => {
     "i18n.js must route reports through the frontend error wrapper");
 });
 
+test("S32 actions/bootstrap save-failed sites report with static operations", (t) => {
+  const wiredSites = [
+    ["app-actions.js", "actions.duration.save-failed"],
+    ["app-actions.js", "actions.auto-start.save-failed"],
+    ["app-actions.js", "actions.selected-task.save-failed"],
+    ["app-actions.js", "actions.task.save-failed"],
+    ["app-actions.js", "actions.timer.save-failed"],
+    ["app-actions.js", "actions.timer.clear-failed"],
+    ["app-bootstrap.js", "bootstrap.retry.deferred"],
+    ["app-bootstrap.js", "bootstrap.choice.deferred"]
+  ];
+  assert.equal(wiredSites.length, 8);
+  for (const [file, operation] of wiredSites) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    const call = `reportFrontendError(error, "${operation}")`;
+    assert.ok(source.includes(call), `${file} must report with ${operation}`);
+    assert.match(operation, /^[a-z0-9][a-z0-9.-]*$/,
+      `${operation} must stay a static PII-free operation tag`);
+  }
+  const actions = fs.readFileSync(path.join(__dirname, "app-actions.js"), "utf8");
+  assert.match(actions, /function reportFrontendError\(error, operation\)/,
+    "app-actions.js must route reports through the frontend error wrapper");
+  assert.ok(actions.includes('"notice.durationSaveFailed"'),
+    "app-actions.js must keep the duration save-failed notice");
+  assert.ok(actions.includes('"notice.autoStartSaveFailed"'),
+    "app-actions.js must keep the auto-start save-failed notice");
+  assert.ok(actions.includes('"notice.taskChoiceSaveFailed"'),
+    "app-actions.js must keep the task-choice save-failed notice");
+  assert.ok(actions.includes('"notice.taskSaveFailed"'),
+    "app-actions.js must keep the task save-failed notice");
+  assert.ok(actions.includes('"notice.timerSaveFailed"'),
+    "app-actions.js must keep the timer save-failed notice");
+  assert.match(actions, /AccountOwnershipError/,
+    "app-actions.js must keep ownership quarantine for clear");
+  const bootstrap = fs.readFileSync(path.join(__dirname, "app-bootstrap.js"), "utf8");
+  assert.match(bootstrap, /function reportFrontendError\(error, operation\)/,
+    "app-bootstrap.js must route reports through the frontend error wrapper");
+  assert.ok(bootstrap.includes("handleResolutionLimit(error)"),
+    "app-bootstrap.js must keep resolution-limit handling");
+  assert.ok(bootstrap.includes('"notice.historyChoiceFailed"'),
+    "app-bootstrap.js must keep the history-choice notice");
+  assert.ok(bootstrap.includes("History resolution could not be retried."),
+    "app-bootstrap.js must keep the retry error text");
+  const calls = withFrontendReporting(t);
+  const piiError = new Error("Write release notes https://example.com/sync user@example.com");
+  assert.equal(client.reportFrontendError(piiError, "actions.task.save-failed"), true);
+  assert.equal(calls.length, 1);
+  const { error: reported, context } = calls[0];
+  assert.equal(context.level, "warning");
+  assert.equal(context.tags["error.operation"], "actions.task.save-failed");
+  assert.doesNotMatch(reported.message, /https:\/\/example\.com\/sync/);
+  assert.doesNotMatch(reported.message, /user@example\.com/);
+  assert.match(reported.message, /\[url\]/);
+  assert.match(reported.message, /\[email\]/);
+});
+
 test("service worker stays silent with a reasoned comment", () => {
   const worker = fs.readFileSync(path.join(__dirname, "sw.js"), "utf8");
   assert.match(worker, /stay silent by design/);

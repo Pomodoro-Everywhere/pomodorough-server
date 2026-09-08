@@ -407,6 +407,7 @@
         await this.submitBootstrapResolution();
       } catch (error) {
         if (this.handleResolutionLimit(error)) return;
+        reportFrontendError(error, "bootstrap.retry.deferred");
         this.state.bootstrapSubmitting = false;
         this.state.bootstrapError = error.message || "History resolution could not be retried.";
         this.state.bootstrapFocusTarget = this.elements.bootstrapRetry;
@@ -433,6 +434,7 @@
         await this.persistBootstrapResolution(strategy);
       } catch (error) {
         if (this.handleResolutionLimit(error)) return;
+        reportFrontendError(error, "bootstrap.choice.deferred");
         this.use.showNotice(error.message || this.use.tr(
           "notice.historyChoiceFailed", {}, "History choice could not be saved."
         ));

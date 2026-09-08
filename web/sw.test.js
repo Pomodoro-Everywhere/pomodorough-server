@@ -128,15 +128,15 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 1, "app-storage.js": 2, "app-actions.js": 2, "app-sync.js": 2,
-    "app-bootstrap.js": 2, "app-session.js": 3, "app-view.js": 2
+    "app-state.js": 1, "app-storage.js": 2, "app-actions.js": 3, "app-sync.js": 2,
+    "app-bootstrap.js": 3, "app-session.js": 3, "app-view.js": 2
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
     const asset = `/${file}?v=${scriptVersions[file] || 1}`;
     assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v52-/);
+  assert.match(workerSource, /pomodorough-shell-v53-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

@@ -64,6 +64,8 @@ vendor/
 .vscode/
 
 # Editor and OS artifacts.
+._*
+*.swp
 *~
 Thumbs.db
 

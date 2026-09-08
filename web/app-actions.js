@@ -178,6 +178,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        reportFrontendError(error, "actions.duration.save-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.durationSaveFailed", {}, "Duration change could not be saved."
         ));
@@ -208,6 +209,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        reportFrontendError(error, "actions.auto-start.save-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.autoStartSaveFailed", {}, "Auto-start preference could not be saved."
         ));
@@ -235,6 +237,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        reportFrontendError(error, "actions.selected-task.save-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.taskChoiceSaveFailed", {}, "Task choice could not be saved."
         ));
@@ -256,6 +259,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        reportFrontendError(error, "actions.task.save-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.taskSaveFailed", {}, "Task change could not be saved."
         ));
@@ -309,6 +313,7 @@
         this.use.scheduleSync(0);
         return true;
       } catch (error) {
+        reportFrontendError(error, "actions.timer.save-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));
@@ -342,6 +347,7 @@
         return true;
       } catch (error) {
         if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
+        else reportFrontendError(error, "actions.timer.clear-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));
