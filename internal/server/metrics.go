@@ -120,11 +120,12 @@ func (m *requestMetrics) writeDurationMetrics(w io.Writer) error {
 	return nil
 }
 
-func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if err := s.metrics.writePrometheus(w); err != nil {
 		s.logger.Warn("write metrics response", "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "write metrics response")
 	}
 }

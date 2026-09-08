@@ -104,8 +104,8 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
     assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
   }
-  assert.match(appSource, /\/app\.js\?v=36/);
-  assert.match(workerSource, /\/app\.js\?v=36/);
+  assert.match(appSource, /\/app\.js\?v=37/);
+  assert.match(workerSource, /\/app\.js\?v=37/);
   assert.match(appSource, /\/shared-core-metadata\.js\?v=1/);
   assert.match(appSource, /\/shared-core\.js\?v=6/);
   assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
@@ -123,8 +123,8 @@ test("shell entry assets use cache-busting version URLs", () => {
   assert.match(workerSource, /\/sync-core\.js\?v=25/);
   assert.match(appSource, /\/sync-storage\.js\?v=27/);
   assert.match(workerSource, /\/sync-storage\.js\?v=27/);
-  assert.match(appSource, /\/i18n\.js\?v=2/);
-  for (const asset of ["/i18n.js?v=2", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
+  assert.match(appSource, /\/i18n\.js\?v=3/);
+  for (const asset of ["/i18n.js?v=3", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
@@ -136,7 +136,7 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v51-/);
+  assert.match(workerSource, /pomodorough-shell-v52-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

@@ -7,7 +7,7 @@ if (!CORE_METADATA) throw new Error("Shared core metadata is unavailable");
 // Service-worker fetch failures stay silent by design: the worker has no
 // document/DSN context and must never phone error monitoring itself. Pages
 // report through the frontend error wrapper; offline fallbacks below serve cache.
-const CACHE_NAME = `pomodorough-shell-v51-${CORE_METADATA.cacheVersion}`;
+const CACHE_NAME = `pomodorough-shell-v52-${CORE_METADATA.cacheVersion}`;
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
@@ -25,7 +25,7 @@ const SHELL = [
   "/sync-authority.js?v=1",
   "/sync-storage-uuid.js?v=1",
   "/sync-storage.js?v=27",
-  "/i18n.js?v=2",
+  "/i18n.js?v=3",
   "/locales/en.json?v=2",
   "/locales/ar-XB.json?v=2",
   "/app-runtime.js?v=1",
@@ -36,7 +36,7 @@ const SHELL = [
   "/app-bootstrap.js?v=2",
   "/app-session.js?v=3",
   "/app-view.js?v=2",
-  "/app.js?v=36",
+  "/app.js?v=37",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

@@ -127,7 +127,7 @@
   }
 
   async function initializeStorage(application) {
-    const { state, externals } = application;
+    const { host, state, externals } = application;
     try {
       externals.syncStorage.setSharedCore(await call(application, "loadSharedCore"));
       await call(application, "loadLocalState");
@@ -136,6 +136,8 @@
       call(application, "render");
       return true;
     } catch (error) {
+      host.console.warn("Pomodorough durable storage unavailable:", error);
+      reportFrontendError(error, "startup.storage.unavailable");
       call(application, "showNotice", call(application, "tr", "storage.unavailable",
         { error: error.message }, `Durable timer storage unavailable: ${error.message}`));
       call(application, "renderSyncStatus");

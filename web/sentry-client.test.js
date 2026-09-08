@@ -259,6 +259,33 @@ test("S28 startup/session/storage sites report with static operations", () => {
   assert.match(storage, /AccountOwnershipError/, "app-storage.js must keep ownership quarantine");
 });
 
+test("S30 storage/locale sites report with static operations", () => {
+  const warnSites = [
+    ["i18n.js", "Pomodorough locale fallback:", "i18n.locale.fallback"],
+    ["app.js", "Pomodorough durable storage unavailable:", "startup.storage.unavailable"]
+  ];
+  assert.equal(warnSites.length, 2);
+  for (const [file, message, operation] of warnSites) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    assert.match(source, new RegExp(message.replace(/[.?]/g, "\\$&")),
+      `${file} must keep its warn message`);
+    const call = `reportFrontendError(error, "${operation}")`;
+    assert.ok(source.includes(call), `${file} must report with ${operation}`);
+  }
+  const composition = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  assert.ok(composition.includes('call(application, "tr", "storage.unavailable"'),
+    "app.js must keep the resource-backed storage notice");
+  assert.ok(composition.includes('call(application, "renderSyncStatus")'),
+    "app.js must keep rendering sync status after storage failure");
+  const storage = fs.readFileSync(path.join(__dirname, "app-storage.js"), "utf8");
+  assert.ok(storage.includes('reportFrontendError(error, "storage.failure")'),
+    "app-storage.js must report with storage.failure");
+  assert.match(storage, /AccountOwnershipError/, "app-storage.js must keep ownership quarantine");
+  const i18n = fs.readFileSync(path.join(__dirname, "i18n.js"), "utf8");
+  assert.match(i18n, /function reportFrontendError\(error, operation\)/,
+    "i18n.js must route reports through the frontend error wrapper");
+});
+
 test("service worker stays silent with a reasoned comment", () => {
   const worker = fs.readFileSync(path.join(__dirname, "sw.js"), "utf8");
   assert.match(worker, /stay silent by design/);

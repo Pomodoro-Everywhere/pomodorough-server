@@ -5,6 +5,15 @@
   const SUPPORTED_LOCALES = ["en", "ar-XB"];
   const PLACEHOLDER_PATTERN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function placeholders(message) {
     return [...String(message).matchAll(PLACEHOLDER_PATTERN)].map((match) => match[1]).sort();
   }
@@ -141,6 +150,7 @@
         selectedLocale = locale;
       } catch (error) {
         console.warn("Pomodorough locale fallback:", error);
+        reportFrontendError(error, "i18n.locale.fallback");
       }
     }
     const catalogs = { [DEFAULT_LOCALE]: english, [selectedLocale]: selected };
