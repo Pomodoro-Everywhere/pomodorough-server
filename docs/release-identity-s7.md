@@ -19,11 +19,11 @@ binary before deployment:
 pomodorough --version
 ```
 
-A `v0.20.0` build from commit
+A `v0.21.0` build from commit
 `0123456789abcdef0123456789abcdef01234567` prints exactly:
 
 ```text
-pomodorough version=0.20.0 commit=0123456789abcdef0123456789abcdef01234567
+pomodorough version=0.21.0 commit=0123456789abcdef0123456789abcdef01234567
 ```
 
 Release automation supports Linux amd64, Linux arm64, macOS amd64, macOS arm64,
