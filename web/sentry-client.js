@@ -11,6 +11,11 @@
   const SESSION_SAMPLE_RATE = 0.1;
   const ERROR_SAMPLE_RATE = 1.0;
   const ENVIRONMENT = "production";
+  const FRONTEND_ERROR_WINDOW_MS = 60_000;
+  const FRONTEND_ERROR_MAX_PER_WINDOW = 10;
+  const FRONTEND_ERROR_MESSAGE_MAX = 500;
+
+  const frontendErrorTimestamps = [];
 
   function isUsableDsn(value) {
     return typeof value === "string" &&
@@ -63,7 +68,16 @@
     script.integrity = SDK_INTEGRITY;
     script.crossOrigin = "anonymous";
     script.onload = () => onload(settings);
-    script.onerror = () => {};
+    script.onerror = () => {
+      try {
+        const scope = typeof globalThis === "undefined" ? null : globalThis;
+        const consoleRef = (scope && scope.console)
+          || (typeof console !== "undefined" ? console : null);
+        if (consoleRef && typeof consoleRef.warn === "function") {
+          consoleRef.warn("Pomodorough error monitoring unavailable");
+        }
+      } catch { /* monitoring failure must never break the app */ }
+    };
     document.head.appendChild(script);
   }
 
@@ -80,9 +94,76 @@
     return { enabled: true };
   }
 
+  function scrubFrontendErrorMessage(value) {
+    if (typeof value !== "string" || !value) return "";
+    let scrubbed = value.slice(0, FRONTEND_ERROR_MESSAGE_MAX * 2);
+    scrubbed = scrubbed.replace(/https?:\/\/\S+/g, "[url]");
+    scrubbed = scrubbed.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]");
+    return scrubbed.slice(0, FRONTEND_ERROR_MESSAGE_MAX);
+  }
+
+  function frontendErrorRateLimited(nowMs) {
+    const windowStart = nowMs - FRONTEND_ERROR_WINDOW_MS;
+    while (frontendErrorTimestamps.length > 0 && frontendErrorTimestamps[0] <= windowStart) {
+      frontendErrorTimestamps.shift();
+    }
+    if (frontendErrorTimestamps.length >= FRONTEND_ERROR_MAX_PER_WINDOW) return true;
+    frontendErrorTimestamps.push(nowMs);
+    return false;
+  }
+
+  function resetFrontendErrorRateLimitForTest() {
+    frontendErrorTimestamps.length = 0;
+  }
+
+  function canReportFrontendError() {
+    try {
+      const scope = typeof globalThis === "undefined" ? null : globalThis;
+      const sentry = scope && scope.Sentry;
+      if (!sentry || typeof sentry.captureException !== "function") return false;
+      const documentRef = typeof document !== "undefined"
+        ? document
+        : (scope && scope.document) || null;
+      const settings = collectSettings({ document: documentRef, window: scope || {} });
+      return Boolean(settings && settings.dsn);
+    } catch {
+      return false;
+    }
+  }
+
+  // reportFrontendError forwards an already-warned frontend failure to error
+  // monitoring at warning level. Rate-safe (bounded per minute), PII-free
+  // (static operation tag plus scrubbed error name/message only, never raw
+  // URLs, emails, task content, or credentials), and a no-op when no usable
+  // DSN is configured or the SDK failed to load.
+  function reportFrontendError(error, operation) {
+    try {
+      if (typeof operation !== "string" || !operation) return false;
+      if (error === null || error === undefined) return false;
+      if (frontendErrorRateLimited(Date.now())) return false;
+      if (!canReportFrontendError()) return false;
+      const scope = typeof globalThis === "undefined" ? null : globalThis;
+      if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
+      const name = (error && typeof error.name === "string" && error.name) || "Error";
+      const rawMessage = (error && typeof error.message === "string") ? error.message : String(error);
+      const scrubbed = scrubFrontendErrorMessage(rawMessage);
+      const wrapped = new Error(scrubbed ? `${operation}: ${scrubbed}` : operation);
+      wrapped.name = String(name).slice(0, 100) || "Error";
+      scope.Sentry.captureException(wrapped, {
+        level: "warning",
+        tags: { "error.operation": operation }
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   const api = Object.freeze({
     SDK_VERSION, SDK_URL, SDK_INTEGRITY, SESSION_SAMPLE_RATE, ERROR_SAMPLE_RATE, ENVIRONMENT,
-    isUsableDsn, readMetaContent, releaseFromDocument, collectSettings, initializeSdk, start
+    FRONTEND_ERROR_WINDOW_MS, FRONTEND_ERROR_MAX_PER_WINDOW, FRONTEND_ERROR_MESSAGE_MAX,
+    isUsableDsn, readMetaContent, releaseFromDocument, collectSettings, initializeSdk, start,
+    scrubFrontendErrorMessage, reportFrontendError, resetFrontendErrorRateLimitForTest
   });
 
   if (typeof document !== "undefined" && typeof document.querySelector === "function") {

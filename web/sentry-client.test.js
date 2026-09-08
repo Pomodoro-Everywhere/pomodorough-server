@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const client = require("./sentry-client.js");
 
 const WEB_DSN = "https://web-key@o1.ingest.sentry.io/2";
@@ -114,4 +116,127 @@ test("sentry start loads the SDK on script load and stays silent without a DSN",
   assert.equal(idle.appended.length, 0);
   assert.deepEqual(client.start({ document: fakeDocument({ meta: { "sentry-dsn": WEB_DSN }, withHead: false }), window: {} }), { enabled: false });
   assert.deepEqual(client.start(null), { enabled: false });
+});
+
+function withFrontendReporting(t, { dsn = WEB_DSN } = {}) {
+  const calls = [];
+  const previousSentry = globalThis.Sentry;
+  const previousDocument = globalThis.document;
+  const hadDsnSlot = Object.hasOwn(globalThis, "__SENTRY_DSN__");
+  const previousDsnSlot = globalThis.__SENTRY_DSN__;
+  globalThis.Sentry = { captureException: (error, context) => calls.push({ error, context }) };
+  globalThis.document = fakeDocument({ meta: dsn ? { "sentry-dsn": dsn } : {} });
+  delete globalThis.__SENTRY_DSN__;
+  client.resetFrontendErrorRateLimitForTest();
+  t.after(() => {
+    if (previousSentry === undefined) delete globalThis.Sentry;
+    else globalThis.Sentry = previousSentry;
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    if (hadDsnSlot) globalThis.__SENTRY_DSN__ = previousDsnSlot;
+    else delete globalThis.__SENTRY_DSN__;
+    client.resetFrontendErrorRateLimitForTest();
+  });
+  return calls;
+}
+
+test("frontend errors stay silent without a usable DSN or SDK", (t) => {
+  client.resetFrontendErrorRateLimitForTest();
+  t.after(() => client.resetFrontendErrorRateLimitForTest());
+  assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), false);
+  const calls = withFrontendReporting(t, { dsn: "" });
+  assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), false);
+  assert.equal(calls.length, 0);
+});
+
+test("frontend errors reject missing operations and empty errors", (t) => {
+  const calls = withFrontendReporting(t);
+  assert.equal(client.reportFrontendError(new Error("boom"), ""), false);
+  assert.equal(client.reportFrontendError(new Error("boom")), false);
+  assert.equal(client.reportFrontendError(null, "sync.deferred"), false);
+  assert.equal(client.reportFrontendError(undefined, "sync.deferred"), false);
+  assert.equal(calls.length, 0);
+});
+
+test("frontend errors report warning-level PII-free events with the operation tag", (t) => {
+  const calls = withFrontendReporting(t);
+  const error = new TypeError("Sync failed (503) at https://example.com/sync user@example.com");
+  assert.equal(client.reportFrontendError(error, "sync.deferred"), true);
+  assert.equal(calls.length, 1);
+  const { error: reported, context } = calls[0];
+  assert.equal(reported.name, "TypeError");
+  assert.equal(context.level, "warning");
+  assert.equal(context.tags["error.operation"], "sync.deferred");
+  assert.match(reported.message, /sync\.deferred: Sync failed \(503\)/);
+  assert.doesNotMatch(reported.message, /https:\/\/example\.com\/sync/);
+  assert.doesNotMatch(reported.message, /user@example\.com/);
+  assert.match(reported.message, /\[url\]/);
+  assert.match(reported.message, /\[email\]/);
+  assert.ok(reported.message.length <= "sync.deferred: ".length + client.FRONTEND_ERROR_MESSAGE_MAX);
+});
+
+test("frontend errors are rate-safe within a minute window", (t) => {
+  const calls = withFrontendReporting(t);
+  for (let index = 0; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
+    assert.equal(client.reportFrontendError(new Error(`failure ${index}`), "sync.deferred"), true);
+  }
+  assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
+  assert.equal(client.reportFrontendError(new Error("overflow"), "sync.deferred"), false);
+  assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
+});
+
+test("frontend scrubber truncates and redacts URLs and emails", () => {
+  assert.equal(client.scrubFrontendErrorMessage(""), "");
+  assert.equal(client.scrubFrontendErrorMessage(null), "");
+  const long = `https://example.com/${"x".repeat(2000)} user@example.com ${"y".repeat(2000)}`;
+  const scrubbed = client.scrubFrontendErrorMessage(long);
+  assert.ok(scrubbed.length <= client.FRONTEND_ERROR_MESSAGE_MAX);
+  assert.doesNotMatch(scrubbed, /user@example\.com/);
+});
+
+test("SDK load failure warns instead of staying silent", () => {
+  const document = fakeDocument({ meta: { "sentry-dsn": WEB_DSN } });
+  assert.deepEqual(client.start({ document, window: {} }), { enabled: true });
+  const warnings = [];
+  const previousConsole = globalThis.console;
+  globalThis.console = { warn: (...args) => warnings.push(args) };
+  try {
+    document.appended[0].onerror();
+  } finally {
+    globalThis.console = previousConsole;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(String(warnings[0][0]), /error monitoring unavailable/);
+});
+
+test("warn-only sync/session/bootstrap/view/actions sites report with static operations", () => {
+  const wiredSites = [
+    ["app-sync.js", "Pomodorough bootstrap gate unavailable:", "sync.preflight.bootstrap-gate"],
+    ["app-sync.js", "Pomodorough pending queues unavailable:", "sync.preflight.pending-queues"],
+    ["app-sync.js", "Pomodorough sync deferred:", "sync.deferred"],
+    ["app-session.js", "Pomodorough session deferred:", "session.initialize.deferred"],
+    ["app-session.js", "Pomodorough pending queues unavailable before logout:", "session.logout.pending-queues"],
+    ["app-session.js", "Pomodorough server revocation deferred until reconnect:", "session.logout.revocation-deferred"],
+    ["app-session.js", "Pomodorough local sign-out cleanup was incomplete:", "session.logout.cleanup-incomplete"],
+    ["app-bootstrap.js", "Pomodorough bootstrap restart deferred:", "bootstrap.restart.deferred"],
+    ["app-bootstrap.js", "Pomodorough bootstrap resolution deferred:", "bootstrap.resolution.deferred"],
+    ["app-view.js", "Cross-tab sign-out cleanup was incomplete:", "view.cross-tab-logout.cleanup-incomplete"],
+    ["app-view.js", "Timer ownership release failed:", "view.timer-ownership.release-failed"],
+    ["app-actions.js", "Timer ownership renewal failed:", "actions.timer-ownership.renewal-failed"]
+  ];
+  assert.equal(wiredSites.length, 12);
+  for (const [file, message, operation] of wiredSites) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    assert.match(source, new RegExp(message.replace(/[.?]/g, "\\$&")),
+      `${file} must keep its warn message`);
+    const call = `reportFrontendError(error, "${operation}")`;
+    assert.ok(source.includes(call), `${file} must report with ${operation}`);
+  }
+});
+
+test("service worker stays silent with a reasoned comment", () => {
+  const worker = fs.readFileSync(path.join(__dirname, "sw.js"), "utf8");
+  assert.match(worker, /stay silent by design/);
+  assert.doesNotMatch(worker, /reportFrontendError/);
+  assert.doesNotMatch(worker, /captureException/);
 });

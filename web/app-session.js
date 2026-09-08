@@ -8,6 +8,15 @@
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
       owner[name] = owner[name].bind(owner);
@@ -414,6 +423,7 @@
         this.use.scheduleRetry();
         this.use.showNotice(error.message);
         this.host.console.warn("Pomodorough session deferred:", error);
+        reportFrontendError(error, "session.initialize.deferred");
       }
     }
 
@@ -503,6 +513,7 @@
         await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
       } catch (error) {
         this.host.console.warn("Pomodorough pending queues unavailable before logout:", error);
+        reportFrontendError(error, "session.logout.pending-queues");
         return;
       }
       context.assertCurrent();
@@ -522,6 +533,7 @@
         serverRevoked = await this.requestSessionRevocation(this.state.csrfToken, context.ownerId);
       } catch (error) {
         this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
+        reportFrontendError(error, "session.logout.revocation-deferred");
       }
       this.use.assertCleanupIdentity(identity);
       this.stream.closeRevisionStream();
@@ -531,6 +543,7 @@
         localDataCleared = true;
       } catch (error) {
         this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
+        reportFrontendError(error, "session.logout.cleanup-incomplete");
       }
       if (serverRevoked && localDataCleared) {
         this.use.assertCleanupIdentity(identity);

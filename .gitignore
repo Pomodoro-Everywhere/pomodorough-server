@@ -44,8 +44,10 @@ pomodorough.env
 .audit/
 
 # Release binaries.
+# Operator-fetched Windows binaries must never be committed.
 /pomodorough
 /pomodorough.exe
+*.exe
 
 # Local logs.
 *.log
@@ -64,3 +66,8 @@ vendor/
 # Editor and OS artifacts.
 *~
 Thumbs.db
+
+# Build output and local Python environments for script checks.
+build/
+.pytest_cache/
+.venv/

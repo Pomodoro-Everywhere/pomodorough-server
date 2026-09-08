@@ -9,6 +9,15 @@
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
       owner[name] = owner[name].bind(owner);
@@ -857,7 +866,10 @@
         if (event.key !== PENDING_LOGOUT_KEY || event.newValue !== "1") return;
         use.closeRevisionStreamForIdentityChange();
         use.clearLocalData()
-          .catch((error) => host.console.warn("Cross-tab sign-out cleanup was incomplete:", error))
+          .catch((error) => {
+            host.console.warn("Cross-tab sign-out cleanup was incomplete:", error);
+            reportFrontendError(error, "view.cross-tab-logout.cleanup-incomplete");
+          })
           .finally(use.redirectToLogin);
       });
       elements.conflictDismiss.addEventListener("click", () => {
@@ -896,7 +908,10 @@
           deviceId: state.deviceId, tabId: use.tabId(), nowMs: Date.now()
         }).catch((error) => {
           if (error.name === "AccountOwnershipError") use.quarantineAccountMismatch();
-          else host.console.warn("Timer ownership release failed:", error);
+          else {
+            host.console.warn("Timer ownership release failed:", error);
+            reportFrontendError(error, "view.timer-ownership.release-failed");
+          }
         });
       });
       document.addEventListener("visibilitychange", () => {

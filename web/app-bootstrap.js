@@ -9,6 +9,15 @@
   const TIMER_OWNER_LEASE_MS = 60_000;
   const ACK_SUCCESS = new Set(["accepted", "acknowledged", "applied", "duplicate", "ok"]);
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
       owner[name] = owner[name].bind(owner);
@@ -92,6 +101,7 @@
         this.state.retrying = true;
         this.use.scheduleRetry();
         this.host.console.warn("Pomodorough bootstrap restart deferred:", error);
+        reportFrontendError(error, "bootstrap.restart.deferred");
       }), 0);
     }
 
@@ -372,6 +382,7 @@
         this.state.bootstrapError = `${error.message || "History resolution was interrupted."} Retry sends the exact saved request.`;
         this.state.bootstrapFocusTarget = this.elements.bootstrapRetry;
         this.host.console.warn("Pomodorough bootstrap resolution deferred:", error);
+        reportFrontendError(error, "bootstrap.resolution.deferred");
       } finally {
         this.state.bootstrapSubmitting = false;
         this.use.render();

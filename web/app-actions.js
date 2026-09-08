@@ -27,6 +27,15 @@
     ...DEPENDENT_FINISH_COMMAND_KEYS, "generatedBreak"
   ].sort());
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function hasExactKeys(value, expectedKeys) {
     if (!value || Object.getPrototypeOf(value) !== Object.prototype) return false;
     const actualKeys = Object.keys(value).sort();
@@ -633,7 +642,10 @@
         nowMs: Date.now(), leaseMs: TIMER_OWNER_LEASE_MS
       }).catch((error) => {
         if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
-        else this.host.console.warn("Timer ownership renewal failed:", error);
+        else {
+          this.host.console.warn("Timer ownership renewal failed:", error);
+          reportFrontendError(error, "actions.timer-ownership.renewal-failed");
+        }
       });
     }
 

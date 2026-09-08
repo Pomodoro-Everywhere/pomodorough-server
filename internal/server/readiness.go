@@ -42,13 +42,13 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "a2b85aa97bae74bed5df90f1bbec077e42a40dd34ba2ca7893f34650886983dc", false},
+	{"index.html", "f5fecce8a6cfae41982250ec3c3d442d432a14a16f0740c5bd2bb1a8a9a89c5e", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
-	{"sentry-client.js", "e7670aa1030270db2fa6171a0b91492cf15129c0de66f086627c2caac0b760f9", false},
-	{"app.html", "5ff710675b6baac24d7cfca8b0eea612e90ce1b47fa8ff52f0f1ed221f8bb530", false},
+	{"sentry-client.js", "a9a77386c8539597b2ddc0dcdfb04886a6baf97343fe172cbbc7532f40ada42e", false},
+	{"app.html", "c2dc66385fd80aede682c214f104b2c856acb457219c6c0a3741b8fb945b3c2f", false},
 	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
@@ -63,15 +63,15 @@ var readinessAssets = []readinessAsset{
 	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
 	{"app-state.js", "409eb06f5ecdb2e4959da956d0542591505309dd0c3dcd0f23c4a43801f7c7e3", false},
 	{"app-storage.js", "95a9ae6f290b0b3bf65cabe3e3379ae1c59c21f771e984886c5772a2d40c5dfa", false},
-	{"app-actions.js", "fa0a78e54437aa5f50d02bfd4a0762d87e576d0afabec5b209a8054dfbc92921", false},
-	{"app-sync.js", "3fa6beaba550fbb455e03602a9b262b85773654c01080e8e7a60e1d2f18a1061", false},
-	{"app-bootstrap.js", "7dce5b16ba3f6cf27c7ce4887e07ce2cee55228830670686a2c9620cfe94814d", false},
-	{"app-session.js", "cadbf5d431a39e89f99cd68abdcc58ea69f3ec2d77f05bd2f40d408148e870c1", false},
-	{"app-view.js", "09face79e43da5bfa4ee406794d4de17f10adf7c7d79326d31c51517bff38320", false},
+	{"app-actions.js", "484db73ba4997649ae74b6c5492987958c65c1b4f5ea611ec3b9464bd68f6efc", false},
+	{"app-sync.js", "9d5640baeb9eaf269b2dba1a21d686335f99ac87446b81478ffc536f5a3a05f1", false},
+	{"app-bootstrap.js", "b701b5ee3cc5aec53459df570ae3d385d27da3f185051d938cf94620754c41c7", false},
+	{"app-session.js", "51ac9c1d5de2da2391dd3e31cb190793fb6a0b3ff8b2b8e9246b960d97ae38ce", false},
+	{"app-view.js", "b2a2f2c0c27697b2f73f992390781a7264c71ce8a8522bf05dd44e96aac807b3", false},
 	{"app.js", "753598d8974bc555810be67b4e5a7e7c5336d60a45025b8254012b390bc298d1", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "d55098fa1ce41f43954a284e3fb28944bac6cb470992d6d15ce0a2b3071bbffc", false},
+	{"sw.js", "5341f4032beb2d8c1ee56a98cf817b85c70b9b828e1a82e18b09a98ecf0d62c4", false},
 	{"openapi.yaml", "8a5db31a006cecf6ec857f938fb0903dd90f13a9a43fa5933cec8132faec2a49", false},
 }
 

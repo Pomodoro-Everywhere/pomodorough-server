@@ -189,8 +189,13 @@ test("HTML loads declared modules before composition and service worker caches e
   const html = source("app.html");
   const worker = source("sw.js");
   let priorIndex = -1;
+  const scriptVersions = {
+    "app.js": 35,
+    "app-actions.js": 2, "app-sync.js": 2, "app-bootstrap.js": 2,
+    "app-session.js": 2, "app-view.js": 2
+  };
   for (const file of ["app-runtime.js", ...moduleFiles, "app.js"]) {
-    const version = file === "app.js" ? 35 : 1;
+    const version = scriptVersions[file] || 1;
     const asset = `/${file}?v=${version}`;
     const index = html.indexOf(asset);
     assert.ok(index > priorIndex, `${asset} must load after its dependencies`);

@@ -9,6 +9,15 @@
   const REMOTE_SYNC_INTERVAL_MS = 15_000;
   const TIMER_OWNER_LEASE_MS = 60_000;
 
+  function reportFrontendError(error, operation) {
+    try {
+      const reporter = typeof globalThis !== "undefined"
+        ? globalThis.PomodoroughSentryClient?.reportFrontendError
+        : null;
+      if (typeof reporter === "function") reporter(error, operation);
+    } catch { /* error monitoring must never break the app */ }
+  }
+
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
       owner[name] = owner[name].bind(owner);
@@ -241,6 +250,7 @@
         this.use.renderSyncStatus();
         this.scheduleRetry();
         this.host.console.warn("Pomodorough bootstrap gate unavailable:", error);
+        reportFrontendError(error, "sync.preflight.bootstrap-gate");
         return false;
       }
       try {
@@ -251,6 +261,7 @@
         this.use.renderSyncStatus();
         this.scheduleRetry();
         this.host.console.warn("Pomodorough pending queues unavailable:", error);
+        reportFrontendError(error, "sync.preflight.pending-queues");
         return false;
       }
       if (!force && !this.hasPendingOperations()) {
@@ -314,6 +325,7 @@
         this.state.retrying = true;
         this.scheduleRetry();
         this.host.console.warn("Pomodorough sync deferred:", error);
+        reportFrontendError(error, "sync.deferred");
       } finally {
         this.use.setInFlightDurationOperationIds([]);
         this.state.syncing = false;
