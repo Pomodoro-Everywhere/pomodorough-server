@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Verify release
+  verify-core:
+    name: Verify embedded shared core
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -41,6 +41,17 @@ jobs:
           ref: 70169bb05c1e046c54c6be3b0760ef0015243bb7
           path: shared-core
           persist-credentials: false
+      - name: Restore Rust toolchain and cargo cache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            ~/.rustup/toolchains
+            shared-core/target
+          key: release-rust-${{ runner.os }}-1.97.1-${{ hashFiles('shared-core/Cargo.lock') }}
+          restore-keys: |
+            release-rust-${{ runner.os }}-1.97.1-
       - name: Rebuild and verify embedded shared core
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -60,16 +71,33 @@ jobs:
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
+
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
       - name: Test server
         run: go test ./...
       - name: Cross-build Windows server and store tests
@@ -113,6 +141,33 @@ jobs:
           python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE probe(value TEXT NOT NULL)"); db.execute("INSERT INTO probe VALUES (?)", ("restore-ready",)); db.commit(); db.close()' "$source_db"
           python3 scripts/restore_drill.py "$source_db" "$restored_db"
           test "$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM probe").fetchone()[0])' "$restored_db")" = "restore-ready"
+
+  verify-web:
+    name: Verify PWA
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
       - name: Install PWA dependencies
         run: npm ci
       - name: Test PWA
@@ -122,7 +177,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.goos }} ${{ matrix.goarch }}
-    needs: verify
+    needs: [verify, verify-core, verify-web]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
@@ -362,9 +417,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for asset in binary/*; do
-            gh attestation verify "$asset" --repo "$GH_REPO"
-          done
+          printf '%s\0' binary/* | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
       - name: Build reproducible archive
         env:
           GOOS: ${{ matrix.goos }}
@@ -475,9 +528,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for asset in dist/*.tar.gz dist/*.identity.json; do
-            gh attestation verify "$asset" --repo "$GH_REPO"
-          done
+          printf '%s\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
       - name: Export SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -492,9 +543,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for record in trusted-native-records/*.native.json; do
-            gh attestation verify "$record" --repo "$GH_REPO"
-          done
+          printf '%s\0' trusted-native-records/*.native.json | xargs -0 -P 5 -I{} sh -c 'record="{}"; gh attestation verify "$record" --repo "$GH_REPO"'
           cp -- trusted-native-records/*.native.json dist/
       - name: Finalize release identity and checksums
         run: |
@@ -561,11 +610,13 @@ jobs:
             --commit "$GITHUB_SHA" \
             --directory "$verified" \
             --checksums "$verified/SHA256SUMS"
-          for asset in "$verified"/*.tar.gz "$verified"/*.identity.json "$verified"/*.native.json; do
-            gh attestation verify "$asset" --repo "$GH_REPO"
-          done
-          gh attestation verify "$verified/pomodorough-server.spdx.json" --repo "$GH_REPO"
-          gh attestation verify "$verified/SHA256SUMS" --repo "$GH_REPO"
+          printf '%s\0' "$verified"/*.tar.gz "$verified"/*.identity.json "$verified"/*.native.json | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
+          gh attestation verify "$verified/pomodorough-server.spdx.json" --repo "$GH_REPO" &
+          spdx_pid=$!
+          gh attestation verify "$verified/SHA256SUMS" --repo "$GH_REPO" &
+          sums_pid=$!
+          wait "$spdx_pid"
+          wait "$sums_pid"
       - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}
