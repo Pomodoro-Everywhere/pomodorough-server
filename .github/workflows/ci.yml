@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: a8bcd1553239821a892dd2fab029b2aa2e8f3a08
+          ref: 238ef9fb9bff60d541da00b9b58b72b0d68d1f4d
           path: shared-core
           persist-credentials: false
       - name: Rebuild and verify embedded shared core
@@ -42,14 +42,14 @@ jobs:
             "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 f119e7d374e33e1ad2822554ebf93c836263c9b81bae2480b20523aeefa6a55e
+            --sha256 659a492ee2543e8166526b8bb7a7b4b51aef43447aba4c97b5baa841f924cbfa
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 f119e7d374e33e1ad2822554ebf93c836263c9b81bae2480b20523aeefa6a55e \
+            --sha256 659a492ee2543e8166526b8bb7a7b4b51aef43447aba4c97b5baa841f924cbfa \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
           cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm
-          test "$(cat internal/sharedcore/CORE_COMMIT)" = "a8bcd1553239821a892dd2fab029b2aa2e8f3a08"
+          test "$(cat internal/sharedcore/CORE_COMMIT)" = "238ef9fb9bff60d541da00b9b58b72b0d68d1f4d"
           (cd internal/sharedcore && sha256sum --check pomodorough_core.wasm.sha256)
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
