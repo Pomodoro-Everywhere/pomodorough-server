@@ -66,7 +66,7 @@ var readinessAssets = []readinessAsset{
 	{"app-actions.js", "cb1634375368d7b1016026c2136fcb52355ebfd8e5b1a0dfdfc6f2d21603067b", false},
 	{"app-sync.js", "9d5640baeb9eaf269b2dba1a21d686335f99ac87446b81478ffc536f5a3a05f1", false},
 	{"app-bootstrap.js", "08f17448ba35fe4bc1c74febe20d2d59e0d57da6e842bb2cb058354031a63e7b", false},
-	{"app-session.js", "4184b9bd4c418b845a1af1730caa085d4d7147f5a22b8cbf8314ae1847345f55", false},
+	{"app-session.js", "c81d23363aead63afe6515b8e0bbf1df43d9bb01d47a77c018bbdcdef78a901f", false},
 	{"app-view.js", "b2a2f2c0c27697b2f73f992390781a7264c71ce8a8522bf05dd44e96aac807b3", false},
 	{"app.js", "ebcdba391080213410593e9e0c937fb444d734aa704e2d78df934fad3536f572", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},

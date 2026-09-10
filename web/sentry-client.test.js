@@ -216,6 +216,8 @@ test("warn-only sync/session/bootstrap/view/actions sites report with static ope
     ["app-sync.js", "Pomodorough sync deferred:", "sync.deferred"],
     ["app-session.js", "Pomodorough session deferred:", "session.initialize.deferred"],
     ["app-session.js", "Pomodorough pending queues unavailable before logout:", "session.logout.pending-queues"],
+    ["app-session.js", "Pomodorough pending logout cleanup failed:", "session.logout-recovery.cleanup-failed"],
+    ["app-session.js", "Pomodorough account deletion request failed:", "session.delete-account.request-failed"],
     ["app-session.js", "Pomodorough server revocation deferred until reconnect:", "session.logout.revocation-deferred"],
     ["app-session.js", "Pomodorough local sign-out cleanup was incomplete:", "session.logout.cleanup-incomplete"],
     ["app-bootstrap.js", "Pomodorough bootstrap restart deferred:", "bootstrap.restart.deferred"],
@@ -224,7 +226,7 @@ test("warn-only sync/session/bootstrap/view/actions sites report with static ope
     ["app-view.js", "Timer ownership release failed:", "view.timer-ownership.release-failed"],
     ["app-actions.js", "Timer ownership renewal failed:", "actions.timer-ownership.renewal-failed"]
   ];
-  assert.equal(wiredSites.length, 12);
+  assert.equal(wiredSites.length, 14);
   for (const [file, message, operation] of wiredSites) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     assert.match(source, new RegExp(message.replace(/[.?]/g, "\\$&")),

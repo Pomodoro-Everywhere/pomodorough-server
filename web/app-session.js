@@ -394,6 +394,8 @@
           "account.logout.cleanupFailed", { error: error.message },
           `Signed-out local data could not be cleared: ${error.message}`
         ));
+        this.host.console.warn("Pomodorough pending logout cleanup failed:", error);
+        reportFrontendError(error, "session.logout-recovery.cleanup-failed");
         this.use.render();
         return false;
       }
@@ -500,6 +502,8 @@
         this.use.showNotice(error.message || this.use.tr(
           "account.delete.failed", {}, "Account deletion failed. Your local data was kept."
         ));
+        this.host.console.warn("Pomodorough account deletion request failed:", error);
+        reportFrontendError(error, "session.delete-account.request-failed");
         return false;
       }
     }
