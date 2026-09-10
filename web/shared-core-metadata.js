@@ -5,9 +5,9 @@
   if (typeof module === "object" && module.exports) module.exports = metadata;
   if (root) root.PomodoroughSharedCoreMetadata = metadata;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const sha256 = "659a492ee2543e8166526b8bb7a7b4b51aef43447aba4c97b5baa841f924cbfa";
+  const sha256 = "0878d0e7297971dbe5a84208c3b9c7817f3648207b6ac78f0962c011ef34eec6";
   return Object.freeze({
-    coreCommit: "238ef9fb9bff60d541da00b9b58b72b0d68d1f4d",
+    coreCommit: "cf818b8636a71a2b1470df12b844e48481f051e8",
     sha256,
     wasmURL: `/pomodorough_core.wasm?sha256=${sha256}`,
     cacheVersion: `core-${sha256.slice(0, 16)}`
