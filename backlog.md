@@ -2,7 +2,7 @@
 
 Audit date: 2026-08-20
 Implementation status reconciled: 2026-08-21
-Readiness snapshot refreshed: 2026-09-08 — suite published at `0.24.0` (tag `v0.24.0` at `7f66125`, Core `cf818b8…`/`0878d0e7…`); `0.25.0` target.
+Readiness snapshot refreshed: 2026-09-08 — suite published at `0.25.0` (tag `v0.25.0` at `92d9c5e`, Core `b0de238…`/`bd0a00ae…`); `0.26.0` target.
 
 Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synchronization service. Priorities reflect release/user-data risk rather than implementation size.
 
@@ -10,11 +10,11 @@ Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synch
 
 | Component | Current assessment | Remaining release qualification |
 | --- | --- | --- |
-| Apple iOS/macOS | Unsigned `0.24.0` published and independently verified; `0.25.0` target | Developer signing, TestFlight, Developer ID signing, and notarization are excluded by request |
-| Android | API-36-targeting unsigned `0.24.0` published and independently verified; `0.25.0` target | Production-keystore signing is excluded by request |
-| Desktop | Unsigned `0.24.0` published and independently verified; `0.25.0` target | Windows Authenticode signing is excluded by request |
+| Apple iOS/macOS | Unsigned `0.25.0` published and independently verified; `0.26.0` target | Developer signing, TestFlight, Developer ID signing, and notarization are excluded by request |
+| Android | API-36-targeting unsigned `0.25.0` published and independently verified; `0.26.0` target | Production-keystore signing is excluded by request |
+| Desktop | Unsigned `0.25.0` published and independently verified; `0.26.0` target | Windows Authenticode signing is excluded by request |
 | Web/PWA | Repository release scope complete; public privacy policy live and byte-verified | Browser/PWA termination cannot guarantee an alert; production-server deployment access is externally blocked |
-| Go service | `0.24.0` published and independently verified with archives, SBOM, checksums, and attestations (tag `v0.24.0` at `7f66125`, Core `cf818b8…`/`0878d0e7…`) | Production SSH deployment and an authentic encrypted-backup restore remain externally blocked |
+| Go service | `0.25.0` published and independently verified with archives, SBOM, checksums, and attestations (tag `v0.25.0` at `92d9c5e`, Core `b0de238…`/`bd0a00ae…`) | Production SSH deployment and an authentic encrypted-backup restore remain externally blocked |
 
 ## Resolution matrix
 
@@ -38,7 +38,7 @@ Scope: Apple iOS/macOS, Android, Desktop (Qt/CLI/TUI), Web/PWA, and the Go synch
 | P1.6 | Complete | Versioned byte-identical canonical fixtures and shipping-codec tests cover REST/Iroh domains and omission/null compatibility. |
 | P1.7 | Complete with deployment limitation | Bounded per-IP/per-account limits, SSE caps, trusted-proxy handling, `Retry-After`, and privacy-safe audit events are tested; the limiter is process-local. |
 | P1.8 | Complete except signing | SBOMs, checksums, immutable action pins, exact asset sets, and provenance attestations are implemented; Authenticode/checksum signing is excluded. |
-| P1.9 | Complete for supported unsigned scope | All four `0.24.0` releases passed clean builds, exact-set/checksum/attestation checks, supported clean-install/runtime smoke, publication, and independent fresh-download verification (server `7f66125`, tag `v0.24.0` pushed, release workflow success); `0.25.0` target. |
+| P1.9 | Complete for supported unsigned scope | All four `0.25.0` releases passed clean builds, exact-set/checksum/attestation checks, supported clean-install/runtime smoke, publication, and independent fresh-download verification (server `92d9c5e`, tag `v0.25.0` pushed, release workflow success); `0.26.0` target. |
 | P1.10 | Complete | Arrivals filtering, totals, resolved/deleted/unassigned task context, and accessible summaries are aligned. |
 | P1.11 | Complete | Desktop timer ownership prevents observer auto-finish/auto-start mutations. |
 | P1.12 | Complete | Desktop Iroh completion advances phase independently of auto-start with ordering protection. |

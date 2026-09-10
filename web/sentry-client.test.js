@@ -296,10 +296,11 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
     ["app-actions.js", "actions.task.save-failed"],
     ["app-actions.js", "actions.timer.save-failed"],
     ["app-actions.js", "actions.timer.clear-failed"],
+    ["app-actions.js", "actions.timer.finish-failed"],
     ["app-bootstrap.js", "bootstrap.retry.deferred"],
     ["app-bootstrap.js", "bootstrap.choice.deferred"]
   ];
-  assert.equal(wiredSites.length, 8);
+  assert.equal(wiredSites.length, 9);
   for (const [file, operation] of wiredSites) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     const call = `reportFrontendError(error, "${operation}")`;
@@ -342,6 +343,64 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
   assert.doesNotMatch(reported.message, /user@example\.com/);
   assert.match(reported.message, /\[url\]/);
   assert.match(reported.message, /\[email\]/);
+});
+
+function finishTimerFixture(overrides = {}) {
+  const actionsModule = require("./app-actions.js");
+  const incarnation = require("./test/incarnation-fixture.js");
+  const state = {
+    actionLocked: false, autoStartBreaks: false, deviceId: "device-1",
+    timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 60_000 },
+    user: incarnation.accountUser("user-1"), localOwnerId: incarnation.ownerId("user-1")
+  };
+  const calls = [];
+  const host = {
+    crypto: { randomUUID: () => "break-1" },
+    console: { warn: (...args) => calls.push(["warn", ...args]) },
+    clearTimeout: () => {}, setTimeout: () => 0, clearInterval: () => {}, setInterval: () => 0
+  };
+  const syncStorage = {
+    AccountOwnershipError: incarnation.storage.AccountOwnershipError,
+    finishTimer: async () => { throw new Error("finish offline"); }, ...overrides.syncStorage
+  };
+  const use = {
+    captureAccountContext: () => incarnation.captureAccountContext(state, host),
+    controlsBlocked: () => false, clone: structuredClone, trustedNow: () => 5,
+    elapsedFor: () => 1000, tabId: () => "tab-1", settingsValue: () => ({}),
+    database: () => ({}), assertExpectedAccount: () => {},
+    quarantineAccountMismatch: () => calls.push("quarantine"),
+    tr: (_key, _values, fallback) => fallback, showNotice: (message) => calls.push(["notice", message]),
+    rebuildOptimisticState: () => {}, render: () => {}, scheduleSync: () => {},
+    phaseConfig: () => ({ focus: {}, short_break: {}, long_break: {} }), phaseLabel: (phase) => phase
+  };
+  const actions = actionsModule.create({
+    state, external: { host, syncCore: incarnation.sync, syncStorage }, use
+  });
+  return { actions, calls, incarnation, state, syncStorage };
+}
+
+test("S40 rejected timer finish warns, notices, and reports with static operation", async (t) => {
+  const fixture = finishTimerFixture();
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.PomodoroughSentryClient;
+    else globalThis.PomodoroughSentryClient = previous;
+  });
+  assert.equal(await fixture.actions.finishTimer(false), false);
+  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /finish offline/.test(entry[1])));
+  assert.ok(fixture.calls.some((entry) => entry[0] === "warn" && /Pomodorough timer finish failed:/.test(entry[1])));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.timer.finish-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  fixture.calls.length = 0;
+  reports.length = 0;
+  const owned = new fixture.incarnation.storage.AccountOwnershipError("stale owner");
+  fixture.syncStorage.finishTimer = async () => { throw owned; };
+  assert.equal(await fixture.actions.finishTimer(false), false);
+  assert.ok(fixture.calls.includes("quarantine"));
+  assert.equal(reports.length, 0);
 });
 
 test("service worker stays silent with a reasoned comment", () => {

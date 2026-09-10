@@ -497,6 +497,10 @@
         return true;
       } catch (error) {
         if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
+        else {
+          this.host.console.warn("Pomodorough timer finish failed:", error);
+          reportFrontendError(error, "actions.timer.finish-failed");
+        }
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));

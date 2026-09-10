@@ -342,6 +342,7 @@ function actionBranchFixture(overrides = {}) {
   const timers = [];
   const host = {
     crypto: { randomUUID: () => "break" }, Notification: undefined,
+    console: { warn: (...args) => calls.push(["warn", ...args]) },
     clearTimeout: (id) => calls.push(["clearTimeout", id]), clearInterval: (id) => calls.push(["clearInterval", id]),
     setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
     setInterval: (callback, delay) => { calls.push(["interval", callback, delay]); return 4; }, ...overrides.host
