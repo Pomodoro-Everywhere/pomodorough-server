@@ -282,6 +282,8 @@
         if (message.includes("512") || message.includes("too long")) {
           throw new Error(this.use.tr("notice.taskTooLong", {}, "Task name is too long."));
         }
+        this.host.console.warn("Pomodorough task identity failed:", error);
+        reportFrontendError(error, "actions.task.identity-failed");
         throw error;
       }
       const { id, title: normalized } = identity;

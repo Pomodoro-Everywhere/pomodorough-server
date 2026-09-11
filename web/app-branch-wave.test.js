@@ -405,6 +405,29 @@ test("task identity distinguishes duplicates and validation failures", async () 
   await assert.rejects(() => unexpected.actions.addTask("bad"), /core unavailable/);
 });
 
+test("S43 unexpected task identity failure warns and reports while validation stays silent", async (t) => {
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.PomodoroughSentryClient;
+    else globalThis.PomodoroughSentryClient = previous;
+  });
+  for (const message of ["title must not be empty or non-printable", "title exceeds 512 bytes"]) {
+    const invalid = actionBranchFixture({ use: { sharedTaskIdentity: async () => { throw new Error(message); } } });
+    await assert.rejects(() => invalid.actions.addTask("bad"));
+    assert.ok(!invalid.calls.some((entry) => Array.isArray(entry) && entry[0] === "warn"));
+  }
+  assert.equal(reports.length, 0);
+  const unexpected = actionBranchFixture({ use: { sharedTaskIdentity: async () => { throw new Error("core unavailable"); } } });
+  await assert.rejects(() => unexpected.actions.addTask("bad"), /core unavailable/);
+  assert.ok(unexpected.calls.some((entry) => Array.isArray(entry) && entry[0] === "warn"
+    && /Pomodorough task identity failed:/.test(entry[1])));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.task.identity-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+});
+
 function finishResultCommand(overrides = {}) {
   return {
     id: "finish", deviceId: "device", deviceSequence: 8, timerId: "timer", type: "finish",
