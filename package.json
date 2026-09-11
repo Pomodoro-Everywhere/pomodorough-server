@@ -1,6 +1,6 @@
 {
   "private": true,
-  "version": "0.27.0",
+  "version": "0.28.0",
   "scripts": {
     "test:web": "node --test web/*.test.js",
     "check:web": "node --check web/shared-core.js && node --check web/sync-core.js && node --check web/sync-authority.js && node --check web/sync-storage-uuid.js && node --check web/sync-storage.js && node --check web/i18n.js && node --check web/sentry-client.js && node --check web/app-runtime.js && node --check web/app-state.js && node --check web/app-storage.js && node --check web/app-actions.js && node --check web/app-sync.js && node --check web/app-bootstrap.js && node --check web/app-session.js && node --check web/app-view.js && node --check web/app.js && node --check web/sw.js && node --check web/platform-selector.js && node --check web/landing.js"
