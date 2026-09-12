@@ -252,7 +252,7 @@ test("view task selector preserves an unavailable selection without enabling it"
 
   fixture.state.selectedPhase = "short_break";
   fixture.view.renderTaskSelector();
-  assert.equal(fixture.elements.taskSelector.disabled, true);
+  assert.equal(fixture.elements.taskSelector.disabled, false);
 });
 
 test("view timer instructions and controls distinguish active and terminal states", () => {
@@ -274,6 +274,89 @@ test("view timer instructions and controls distinguish active and terminal state
   assert.equal(fixture.elements.finishButton.disabled, true);
   assert.equal(fixture.elements.clearButton.disabled, false);
   assert.deepEqual(updates.at(-1), [timer, "completed", 0, false]);
+
+  fixture.view.renderTimerInstruction(timer, "cancelled");
+  assert.equal(fixture.elements.timerInstruction.textContent, "Run cancelled. Start another.");
+});
+
+test("view clear control is stop-sound only and never dismisses terminal timers", () => {
+  const ringing = viewFixture({ use: { activeCompletionAlertTimerId: () => "ringing" } });
+  ringing.view.renderTimerControls({ phase: "focus" }, { status: "completed", remaining: 0 });
+  assert.equal(ringing.elements.clearButton.disabled, false);
+
+  const silent = viewFixture();
+  for (const status of ["idle", "running", "paused", "completed", "cancelled", "superseded"]) {
+    silent.view.renderTimerControls({ phase: "focus" }, { status, remaining: 0 });
+    assert.equal(silent.elements.clearButton.disabled, true, status);
+  }
+});
+
+function dialFixture() {
+  const lines = [];
+  const dialTicks = {
+    children: [],
+    replaceChildren(...children) { this.children = children; },
+    append(fragment) { this.children.push(...fragment.children); }
+  };
+  const document = {
+    createDocumentFragment() {
+      return { children: [], append(line) { this.children.push(line); } };
+    },
+    createElementNS: () => ({
+      attributes: {},
+      classList: { add() {} },
+      setAttribute(name, value) { this.attributes[name] = value; }
+    }),
+    createElement: () => fakeElement()
+  };
+  const elements = {
+    taskSelector: fakeElement(), timerToggle: fakeElement(), timerInstruction: fakeElement(),
+    finishButton: fakeElement(), cancelButton: fakeElement(), clearButton: fakeElement(),
+    dialTicks, dialProgress: { style: {} }, dial: { dataset: {} },
+    phaseLabel: fakeElement(), timerDisplay: fakeElement(), timerDetail: fakeElement(),
+    longBreakProgress: fakeElement()
+  };
+  const state = baseState({
+    timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 },
+    tasks: [], selectedTaskId: null
+  });
+  const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, {}),
+    controlsBlocked: () => false, tr: (_key, _args, fallback) => fallback,
+    phaseLabel: (phase) => phase, phaseShortLabel: (phase) => phase,
+    timerStatusLabel: (status) => status,
+    activeCompletionAlertTimerId: () => null, updateTimerCompletion: () => {},
+    elapsedFor: () => 0, emptyTimer: (phase, plannedDurationMs) => ({ phase, plannedDurationMs }),
+    selectedDurationMs: () => 1_500_000, completedFocusCountForDay: () => 0,
+    longBreakProgress: () => 0, positiveNumber: (value, fallback) => Number(value) || fallback,
+    startCompletionAlert: () => {}
+  };
+  const view = require("./app-view.js").create({
+    state, external: { host: { document }, syncCore: {}, syncStorage: {}, elements }, use
+  });
+  return { elements, state, use, view, lines };
+}
+
+test("view dial renders one tick per minute of the displayed timer", () => {
+  const fixture = dialFixture();
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 1_500_000 }), 25);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 90_000 }), 2);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 60_000 }), 1);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 0 }), 1);
+
+  fixture.view.createDialTicks(25);
+  assert.equal(fixture.elements.dialTicks.children.length, 25);
+  fixture.view.createDialTicks(5);
+  assert.equal(fixture.elements.dialTicks.children.length, 5);
+
+  fixture.view.renderTimer();
+  assert.equal(fixture.elements.dialTicks.children.length, 25);
+
+  fixture.state.timer = { id: null, phase: "short_break", status: "idle", plannedDurationMs: 300_000 };
+  fixture.state.selectedPhase = "short_break";
+  fixture.use.selectedDurationMs = () => 300_000;
+  fixture.view.renderTimer();
+  assert.equal(fixture.elements.dialTicks.children.length, 5);
 });
 
 test("view timer projection clamps elapsed time and formats accessible clock text", () => {

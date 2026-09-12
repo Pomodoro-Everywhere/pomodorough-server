@@ -190,10 +190,11 @@ test("HTML loads declared modules before composition and service worker caches e
   const worker = source("sw.js");
   let priorIndex = -1;
   const scriptVersions = {
-    "app.js": 37,
+    "app.js": 38,
+    "app-state.js": 2,
     "app-storage.js": 2,
-    "app-actions.js": 3, "app-sync.js": 2, "app-bootstrap.js": 3,
-    "app-session.js": 3, "app-view.js": 2
+    "app-actions.js": 4, "app-sync.js": 2, "app-bootstrap.js": 3,
+    "app-session.js": 3, "app-view.js": 3
   };
   for (const file of ["app-runtime.js", ...moduleFiles, "app.js"]) {
     const version = scriptVersions[file] || 1;

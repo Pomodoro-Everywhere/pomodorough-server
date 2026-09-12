@@ -29,14 +29,14 @@ const SHELL = [
   "/locales/en.json?v=2",
   "/locales/ar-XB.json?v=2",
   "/app-runtime.js?v=1",
-  "/app-state.js?v=1",
+  "/app-state.js?v=2",
   "/app-storage.js?v=2",
-  "/app-actions.js?v=3",
+  "/app-actions.js?v=4",
   "/app-sync.js?v=2",
   "/app-bootstrap.js?v=3",
   "/app-session.js?v=3",
-  "/app-view.js?v=2",
-  "/app.js?v=37",
+  "/app-view.js?v=3",
+  "/app.js?v=38",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

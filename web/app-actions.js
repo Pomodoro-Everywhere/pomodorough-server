@@ -220,6 +220,27 @@
       }
     }
 
+    retargetRunningFocusTimer(taskId) {
+      const timer = this.state.timer;
+      if (!timer?.id || !["running", "paused"].includes(timer.status) || timer.phase !== "focus") return;
+      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) return;
+      // Local-only retarget marker: display follows the newly picked task at
+      // once, even post-ack. Remote selected-task syncs never write here, so
+      // they cannot hijack the active timer.
+      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
+        this.state.retargetedTaskByTimerId = {};
+      }
+      this.state.retargetedTaskByTimerId[timer.id] = taskId;
+      // Rewrite the still-pending start command so eventual history follows
+      // the newly selected task with no duplicate identity.
+      for (const command of this.state.pending) {
+        if (command?.timerId === timer.id && command.type === "start") {
+          if (taskId === null) delete command.taskId;
+          else command.taskId = taskId;
+        }
+      }
+    }
+
     async issueSelectedTaskOperation(taskId, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked()) return false;
       await this.waitForUnlockedAction();
@@ -231,6 +252,7 @@
       try {
         const operation = await this.use.persistSelectedTaskOperation(taskId, expectedUserId);
         this.state.pendingSelectedTaskOperations.push(operation);
+        this.retargetRunningFocusTimer(taskId);
         this.use.rebuildOptimisticState();
         this.use.renderTaskSelector();
         this.use.renderSyncStatus();

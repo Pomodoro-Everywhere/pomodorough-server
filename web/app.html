@@ -21,14 +21,14 @@
   <script src="/sync-storage.js?v=27" defer></script>
   <script src="/i18n.js?v=3" defer></script>
   <script src="/app-runtime.js?v=1" defer></script>
-  <script src="/app-state.js?v=1" defer></script>
+  <script src="/app-state.js?v=2" defer></script>
   <script src="/app-storage.js?v=2" defer></script>
-  <script src="/app-actions.js?v=3" defer></script>
+  <script src="/app-actions.js?v=4" defer></script>
   <script src="/app-sync.js?v=2" defer></script>
   <script src="/app-bootstrap.js?v=3" defer></script>
   <script src="/app-session.js?v=3" defer></script>
-  <script src="/app-view.js?v=2" defer></script>
-  <script src="/app.js?v=37" defer></script>
+  <script src="/app-view.js?v=3" defer></script>
+  <script src="/app.js?v=38" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
@@ -179,8 +179,8 @@
 
         <label class="task-selector-row" for="taskSelector">
           <span>
-            <strong data-i18n="pattern.nextTask">Next focus task</strong>
-            <small data-i18n="pattern.nextTask.detail">Optional. Changes affect the next focus; the active timer keeps its assignment.</small>
+            <strong data-i18n="pattern.nextTask">Focus task</strong>
+            <small data-i18n="pattern.nextTask.detail">Applies to the current running focus timer and the next timer.</small>
           </span>
           <select id="taskSelector">
             <option value="" data-i18n="pattern.noTask">No task</option>

@@ -552,13 +552,16 @@ test("task projection clears unavailable selection and restores it when task rea
   assert.equal(state.selectedTaskId, null);
 });
 
-test("paused focus keeps active assignment while next-task selector remains editable", () => {
+test("focus task selection retargets the running timer while the selector stays enabled", async () => {
   const app = loadTaskProjection();
+  app.setDatabaseForTest({});
   app.state.ready = true;
   app.state.bootstrapBlocked = false;
   app.state.selectedPhase = "focus";
-  app.state.tasks = [{ id: "next-task", title: "Next task" }];
-  app.state.selectedTaskId = "next-task";
+  app.state.tasks = [{ id: "active-task", title: "Active task" }, { id: "next-task", title: "Next task" }];
+  app.state.baseTasks = structuredClone(app.state.tasks);
+  app.state.selectedTaskId = "active-task";
+  app.state.baseSelectedTaskId = "active-task";
   app.state.timer = {
     id: "active-timer",
     status: "paused",
@@ -567,14 +570,50 @@ test("paused focus keeps active assignment while next-task selector remains edit
     plannedDurationMs: 1_500_000,
     elapsedAtAnchorMs: 60_000
   };
+  app.state.baseTimer = structuredClone(app.state.timer);
+  app.state.pending = [{
+    id: "start-active", deviceId: "test-device", deviceSequence: 1, timerId: "active-timer",
+    type: "start", phase: "focus", plannedDurationMs: 1_500_000,
+    occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 0,
+    observedElapsedMs: 0, taskId: "active-task"
+  }];
 
   app.renderTaskSelector();
-
   assert.equal(app.taskSelectorDisabled(), false);
-  assert.equal(app.state.timer.taskId, "active-task");
+
+  assert.equal(await app.issueSelectedTaskOperation("next-task"), true);
+  assert.equal(app.state.selectedTaskId, "next-task");
+  assert.equal(app.state.timer.taskId, "next-task");
+  assert.equal(app.state.pending.find((command) => command.id === "start-active").taskId, "next-task");
+  assert.equal(app.displayTimer().taskId, "next-task");
+  assert.equal(
+    app.historyTaskContext({ timerId: "active-timer", taskId: "active-task" }, app.state.tasks),
+    "Next task"
+  );
+
+  app.state.selectedPhase = "short_break";
+  app.renderTaskSelector();
+  assert.equal(app.taskSelectorDisabled(), false);
 });
 
-test("No task selection persists nullable operation and schedules sync without changing timer", async () => {
+test("start replaces a finished timer while retaining it in history", () => {
+  const app = loadTaskProjection();
+  const finished = timer("completed", "timer-old");
+  const history = [terminalHistory("completed", "timer-old")];
+  const started = {
+    id: "start-new", deviceId: "test-device", deviceSequence: 2, timerId: "timer-new",
+    type: "start", phase: "focus", plannedDurationMs: 1_500_000,
+    occurredAt: new Date(baseTime + 60_000).toISOString(),
+    hlcWallMs: baseTime + 60_000, hlcCounter: 0, observedElapsedMs: 0
+  };
+  const reduced = app.reduceCommand(finished, history, started, new Map());
+  assert.equal(reduced.timer.id, "timer-new");
+  assert.equal(reduced.timer.status, "running");
+  assert.ok(reduced.history.some((item) => item.timerId === "timer-old" && item.status === "completed"));
+  assert.equal(reduced.history.some((item) => item.timerId === "timer-new"), false);
+});
+
+test("No task selection persists nullable operation and retargets the running timer", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
   app.state.ready = true;
@@ -584,7 +623,6 @@ test("No task selection persists nullable operation and schedules sync without c
   app.state.pendingSelectedTaskOperations = [];
   app.state.timer = timer("running", "canonical-active");
   app.state.baseTimer = structuredClone(app.state.timer);
-  const activeTimer = structuredClone(app.state.timer);
 
   assert.equal(await app.issueSelectedTaskOperation(null), true);
 
@@ -598,7 +636,8 @@ test("No task selection persists nullable operation and schedules sync without c
     hlcCounter: 0
   }]);
   assert.equal(app.state.selectedTaskId, null);
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.timer)), activeTimer);
+  assert.equal(app.state.timer.taskId, null);
+  assert.equal(app.displayTimer().taskId, null);
   assert.equal(app.scheduledTimeoutDelay(), 0);
 });
 

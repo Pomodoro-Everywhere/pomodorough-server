@@ -25,6 +25,36 @@
     }));
   }
 
+  function dialTickCountForTimer(timer) {
+    return Math.max(1, Math.ceil((timer?.plannedDurationMs || 0) / 60_000));
+  }
+
+  function renderDialTickMarks(document, elements, count = 60) {
+    if (!elements?.dialTicks) return;
+    const total = Math.max(1, Math.min(240, Math.round(count) || 0));
+    elements.dialTicks.replaceChildren();
+    const namespace = "http://www.w3.org/2000/svg";
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < total; index += 1) {
+      const angle = (index * 360 / total - 90) * (Math.PI / 180);
+      const major = index % 5 === 0;
+      const innerRadius = major ? 117 : 122;
+      const outerRadius = 128;
+      const line = document.createElementNS(namespace, "line");
+      line.setAttribute("x1", String(140 + Math.cos(angle) * innerRadius));
+      line.setAttribute("y1", String(140 + Math.sin(angle) * innerRadius));
+      line.setAttribute("x2", String(140 + Math.cos(angle) * outerRadius));
+      line.setAttribute("y2", String(140 + Math.sin(angle) * outerRadius));
+      if (major) line.classList.add("major");
+      fragment.append(line);
+    }
+    elements.dialTicks.append(fragment);
+    if (elements.dialProgress?.style) {
+      elements.dialProgress.style.strokeDasharray = String(DIAL_CIRCUMFERENCE);
+      elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE);
+    }
+  }
+
   const manifest = Object.freeze({
     name: "view",
     externals: ["host", "syncCore", "syncStorage", "elements"],
@@ -44,11 +74,11 @@
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
       "renderDurations", "renderVersion", "renderTaskSelector", "displayTimer", "timerDisplayView",
-      "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderTimer",
+      "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderDialTicks", "renderTimer",
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
       "renderTasks", "formatTaskDuration", "formatHistoryDate", "renderProfile",
       "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice",
-      "createDialTicks", "clampInput", "setupPreferenceEvents", "setupTaskEvents",
+      "createDialTicks", "dialTickCountFor", "clampInput", "setupPreferenceEvents", "setupTaskEvents",
       "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice",
       "setupBootstrapEvents", "setupConnectivityEvents", "setupInstallEvents", "setupEvents"
     ],
@@ -70,7 +100,8 @@
     actions() {
       return super.actions([
         "renderScreens", "activateScreen", "handleScreenKeydown", "renderDurations",
-        "renderVersion", "renderTaskSelector", "renderDeviceMark", "createDialTicks", "clampInput"
+        "renderVersion", "renderTaskSelector", "renderDeviceMark", "createDialTicks",
+        "dialTickCountFor", "clampInput"
       ]);
     }
 
@@ -174,29 +205,15 @@
         elements.taskSelector.append(option);
       }
       elements.taskSelector.value = selectedTaskId;
-      elements.taskSelector.disabled = use.controlsBlocked() || state.selectedPhase !== "focus";
+      elements.taskSelector.disabled = use.controlsBlocked();
     }
 
-    createDialTicks() {
-      const { elements, document } = this;
-      const namespace = "http://www.w3.org/2000/svg";
-      const fragment = document.createDocumentFragment();
-      for (let index = 0; index < 60; index += 1) {
-        const angle = (index * 6 - 90) * (Math.PI / 180);
-        const major = index % 5 === 0;
-        const innerRadius = major ? 117 : 122;
-        const outerRadius = 128;
-        const line = document.createElementNS(namespace, "line");
-        line.setAttribute("x1", String(140 + Math.cos(angle) * innerRadius));
-        line.setAttribute("y1", String(140 + Math.sin(angle) * innerRadius));
-        line.setAttribute("x2", String(140 + Math.cos(angle) * outerRadius));
-        line.setAttribute("y2", String(140 + Math.sin(angle) * outerRadius));
-        if (major) line.classList.add("major");
-        fragment.append(line);
-      }
-      elements.dialTicks.append(fragment);
-      elements.dialProgress.style.strokeDasharray = String(DIAL_CIRCUMFERENCE);
-      elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE);
+    dialTickCountFor(timer) {
+      return dialTickCountForTimer(timer);
+    }
+
+    createDialTicks(count = 60) {
+      renderDialTickMarks(this.document, this.elements, count);
     }
 
     clampInput(input) {
@@ -213,13 +230,27 @@
     actions() {
       return super.actions([
         "displayTimer", "timerDisplayView", "renderTimerClock", "renderTimerInstruction",
-        "renderTimerControls", "renderTimer"
+        "renderTimerControls", "renderDialTicks", "renderTimer"
       ]);
+    }
+
+    renderDialTicks(timer) {
+      renderDialTickMarks(this.document, this.elements, dialTickCountForTimer(timer));
     }
 
     displayTimer() {
       const { state, use } = this;
-      if (!["idle", "completed"].includes(state.timer.status)) return state.timer;
+      if (!["idle", "completed"].includes(state.timer.status)) {
+        // Retarget marker wins while a focus timer runs: the single task
+        // selector applies to the running timer, never a separate label.
+        const markers = state.retargetedTaskByTimerId;
+        if (markers && typeof markers === "object" && typeof state.timer.id === "string"
+          && ["running", "paused"].includes(state.timer.status) && state.timer.phase === "focus"
+          && Object.hasOwn(markers, state.timer.id)) {
+          return { ...state.timer, taskId: markers[state.timer.id] ?? null };
+        }
+        return state.timer;
+      }
       return use.emptyTimer(state.selectedPhase, use.selectedDurationMs());
     }
 
@@ -285,7 +316,7 @@
         "timer.instruction.completed", {}, "Run complete. Stop the sound or start another."
       );
       if (status === "cancelled") return use.tr(
-        "timer.instruction.cancelled", {}, "Run cancelled. Clear it or start again."
+        "timer.instruction.cancelled", {}, "Run cancelled. Start another."
       );
       if (status === "superseded") return use.tr(
         "timer.instruction.superseded", {}, "Another device is carrying this timer."
@@ -300,9 +331,10 @@
       elements.timerToggle.disabled = blocked;
       elements.finishButton.disabled = blocked || !active;
       elements.cancelButton.disabled = blocked || !active;
-      elements.clearButton.disabled = blocked || (
-        ["idle", "running", "paused"].includes(view.status) && !use.activeCompletionAlertTimerId()
-      );
+      // Finished timers offer Start only: the clear control stops the
+      // completion sound while it rings and never dismisses the terminal
+      // timer. The next Start replaces it.
+      elements.clearButton.disabled = blocked || !use.activeCompletionAlertTimerId();
       use.updateTimerCompletion(timer, view.status, view.remaining, blocked);
     }
 
@@ -312,6 +344,7 @@
       const status = state.timer.status;
       if (status === "completed") use.startCompletionAlert(state.timer);
       const view = this.timerDisplayView(timer, status);
+      this.renderDialTicks(timer);
       this.renderTimerClock(timer, view);
       this.renderTimerInstruction(timer, status);
       this.renderTimerControls(timer, view);
@@ -407,10 +440,20 @@
       return history.filter((item) => !item.status || terminalStatuses.has(item.status));
     }
 
+    effectiveHistoryTaskId(item) {
+      const markers = this.state?.retargetedTaskByTimerId;
+      if (markers && typeof markers === "object" && typeof item?.timerId === "string"
+        && Object.hasOwn(markers, item.timerId)) {
+        return markers[item.timerId] ?? null;
+      }
+      return item?.taskId || null;
+    }
+
     historyTaskContext(item, tasks) {
       const { use } = this;
-      if (!item.taskId) return use.tr("history.unassigned", {}, "Unassigned");
-      return tasks.find((candidate) => candidate.id === item.taskId)?.title
+      const taskId = this.effectiveHistoryTaskId(item);
+      if (!taskId) return use.tr("history.unassigned", {}, "Unassigned");
+      return tasks.find((candidate) => candidate.id === taskId)?.title
         || use.tr("history.deletedTask", {}, "Deleted task");
     }
 
@@ -498,15 +541,17 @@
       end.setDate(end.getDate() + 1);
       const summaries = new Map();
       for (const item of state.history) {
-        if (item.phase !== "focus" || (item.status && item.status !== "completed") || !item.taskId) continue;
+        if (item.phase !== "focus" || (item.status && item.status !== "completed")) continue;
+        const taskId = this.effectiveHistoryTaskId(item);
+        if (!taskId) continue;
         const completedAt = use.historyDateMs(item);
         if (completedAt < start.getTime() || completedAt >= end.getTime()) continue;
-        const summary = summaries.get(item.taskId) || { count: 0, durationMs: 0 };
+        const summary = summaries.get(taskId) || { count: 0, durationMs: 0 };
         summary.count += 1;
         summary.durationMs += use.positiveNumber(
           item.plannedDurationMs ?? item.durationMs ?? item.timer?.plannedDurationMs, 0
         );
-        summaries.set(item.taskId, summary);
+        summaries.set(taskId, summary);
       }
       return summaries;
     }
@@ -849,10 +894,10 @@
       elements.finishButton.addEventListener("click", () => use.finishTimer(false));
       elements.cancelButton.addEventListener("click", use.cancelAndClearTimer);
       elements.clearButton.addEventListener("click", () => {
-        const terminal = ["completed", "cancelled", "superseded"].includes(state.timer.status);
+        // Stop-sound only: terminal timers are never dismissed here. The
+        // next Start replaces the finished timer.
         use.stopCompletionAlert();
-        if (terminal) use.issueCommand("clear");
-        else view.renderTimer();
+        view.renderTimer();
       });
     }
 

@@ -31,7 +31,7 @@ test("dynamic presentation sinks do not bypass localization", () => {
   assert.match(notification, /completionAlertTitle\(/, "notification title must be resource-backed");
   assert.match(notification, /body:\s*this\.use\.tr\("timer\.notification\.body"/, "notification body must be resource-backed");
   for (const phrase of [
-    "Run cancelled. Clear it or start again.",
+    "Run cancelled. Start another.",
     "Another device is carrying this timer.",
     "Time not recorded",
     "Durable timer storage unavailable:"

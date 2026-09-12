@@ -77,6 +77,7 @@
       baseTimer: emptyTimerValue("focus", DEFAULT_DURATIONS_MS.focus),
       timer: emptyTimerValue("focus", DEFAULT_DURATIONS_MS.focus),
       baseHistory: [], history: [], baseTasks: [], tasks: [],
+      retargetedTaskByTimerId: {},
       pending: [], pendingTaskOperations: [], pendingDurationOperations: [],
       pendingAutoStartOperations: [], pendingSelectedTaskOperations: []
     };
@@ -115,7 +116,7 @@
     provides: [
       "clone", "emptyTimer", "controlsBlocked", "normalizeTimer", "loadSharedCore",
       "sharedTaskIdentity", "positiveNumber", "clampNumber", "selectedDurationMs",
-      "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
+      "selectedTaskIdForNextFocus", "applyTaskRetarget", "normalizeDurationsMs", "compareDurationOperations",
       "compareTimerCommands", "trustedNow", "monotonicNow", "elapsedFor", "projectOwnerState",
       "rebuildOptimisticState", "ownerStateValue", "resetOwnerState", "quarantineOwnerState",
       "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "tr", "phaseLabel", "phaseShortLabel", "timerStatusLabel",
@@ -245,7 +246,7 @@
     actions() {
       return bindActions(this, [
         "emptyTimer", "controlsBlocked", "normalizeTimer", "selectedDurationMs",
-        "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
+        "selectedTaskIdForNextFocus", "applyTaskRetarget", "normalizeDurationsMs", "compareDurationOperations",
         "projectOwnerState", "rebuildOptimisticState", "ownerStateValue", "resetOwnerState",
         "quarantineOwnerState", "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "phaseConfig", "defaultDurationsMs", "tabId"
       ]);
@@ -276,6 +277,28 @@
     selectedTaskIdForNextFocus() {
       return this.state.tasks.some((task) => task.id === this.state.selectedTaskId)
         ? this.state.selectedTaskId : null;
+    }
+
+    applyTaskRetarget() {
+      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
+        this.state.retargetedTaskByTimerId = {};
+      }
+      const markers = this.state.retargetedTaskByTimerId;
+      const timer = this.state.timer;
+      if (timer && typeof timer.id === "string" && timer.id
+        && ["running", "paused"].includes(timer.status) && timer.phase === "focus"
+        && Object.hasOwn(markers, timer.id)) {
+        timer.taskId = markers[timer.id] ?? null;
+      }
+      const live = new Set();
+      if (timer?.id) live.add(timer.id);
+      for (const item of this.state.history || []) {
+        if (item?.timerId) live.add(item.timerId);
+      }
+      for (const key of Object.keys(markers)) {
+        if (!live.has(key)) delete markers[key];
+      }
+      return markers;
     }
 
     emptyTimer(phase, plannedDurationMs) {
@@ -338,6 +361,7 @@
         history: projection.history, tasks: projection.tasks, durationsMs: projection.durationsMs,
         autoStartBreaks: projection.autoStartBreaks, selectedTaskId: projection.selectedTaskId
       });
+      if (local === this.state) this.applyTaskRetarget();
     }
 
     rebuildOptimisticState() {
@@ -350,6 +374,8 @@
     ownerStateValue() {
       return {
         revision: this.state.revision, selectedPhase: this.state.selectedPhase,
+        retargetedTaskByTimerId: this.state.retargetedTaskByTimerId
+          ? JSON.parse(JSON.stringify(this.state.retargetedTaskByTimerId)) : {},
         baseSelectedTaskId: this.state.baseSelectedTaskId, selectedTaskId: this.state.selectedTaskId,
         baseAutoStartBreaks: this.state.baseAutoStartBreaks, autoStartBreaks: this.state.autoStartBreaks,
         baseDurationsMs: clone(this.state.baseDurationsMs), durationsMs: clone(this.state.durationsMs),
@@ -409,13 +435,16 @@
 
     restoreOwnerState(local) {
       const fields = [
-        "revision", "selectedPhase", "baseSelectedTaskId", "selectedTaskId",
+        "revision", "selectedPhase", "retargetedTaskByTimerId", "baseSelectedTaskId", "selectedTaskId",
         "baseAutoStartBreaks", "autoStartBreaks", "baseDurationsMs", "durationsMs",
         "baseTimer", "timer", "baseHistory", "history", "baseTasks", "tasks", "pending",
         "pendingTaskOperations", "pendingDurationOperations", "pendingAutoStartOperations",
         "pendingSelectedTaskOperations", "user"
       ];
       for (const field of fields) this.state[field] = local[field];
+      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
+        this.state.retargetedTaskByTimerId = {};
+      }
     }
 
     phaseConfig() { return PHASES; }

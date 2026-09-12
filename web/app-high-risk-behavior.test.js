@@ -423,7 +423,7 @@ test("bootstrap acceptance atomically applies the canonical snapshot before resu
 
 function element() {
   return {
-    children: [], dataset: {}, style: {}, listeners: new Map(), hidden: false,
+    children: [], classList: { add() {} }, dataset: {}, style: {}, listeners: new Map(), hidden: false,
     addEventListener(name, listener) { this.listeners.set(name, listener); },
     append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
     setAttribute(name, value) { this[name] = value; }, removeAttribute(name) { delete this[name]; },

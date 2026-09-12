@@ -31,7 +31,7 @@
   const COMPATIBILITY_ACTIONS = Object.freeze([
     "phaseLabel", "timerStatusLabel", "formatTaskDuration", "formatHistoryDate", "setI18nForTest",
     "emptyTimer", "displayTimer", "elapsedFor", "trustedNow", "responseClockOffset",
-    "rebuildOptimisticState", "selectedTaskIdForNextFocus", "refreshAllPendingOperations",
+    "rebuildOptimisticState", "selectedTaskIdForNextFocus", "applyTaskRetarget", "refreshAllPendingOperations",
     "renderTaskSelector", "issueSelectedTaskOperation", "ownerStateValue", "resetOwnerState",
     "restoreOwnerState", "activateCachedOwnerOffline", "requestResult", "transactionDone",
     "openDatabase", "readLocalRecords", "restoreLocalRecords", "persistNewLocalIdentity",
@@ -52,7 +52,7 @@
     "restartBootstrapForCurrentAccount", "loadBootstrapPreview", "validateBootstrapSubmission",
     "localBootstrapState", "buildBootstrapPlan", "setFetchForTest", "setStorageMethodForTest",
     "setRevisionStreamForTest", "hasRevisionStreamForTest", "render", "renderTimer", "syncNow",
-    "showNotice", "loadLocalState", "loadSharedCore", "setupEvents", "createDialTicks",
+    "showNotice", "loadLocalState", "loadSharedCore", "setupEvents", "createDialTicks", "dialTickCountFor", "renderDialTicks",
     "renderSyncStatus", "heartbeatTimerOwnership", "timerOwnerHeartbeatMs"
   ]);
 

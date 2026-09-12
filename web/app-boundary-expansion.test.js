@@ -532,7 +532,8 @@ test("view event failures and timer states fail safely while the full renderer s
   await fixture.elements.taskForm.listeners.get("submit")({ preventDefault() {} });
   assert.match(fixture.elements.notice.textContent, /Task could not be added/);
 
-  for (const [status, command] of [["running", "pause"], ["paused", "resume"], ["idle", "start"]]) {
+  for (const [status, command] of [["running", "pause"], ["paused", "resume"], ["idle", "start"],
+    ["completed", "start"], ["cancelled", "start"], ["superseded", "start"]]) {
     fixture.state.timer.status = status;
     fixture.elements.timerToggle.listeners.get("click")();
     assert.ok(fixture.calls.some((entry) => Array.isArray(entry) && entry[0] === "command" && entry[1] === command));
@@ -541,6 +542,8 @@ test("view event failures and timer states fail safely while the full renderer s
   fixture.elements.clearButton.listeners.get("click")();
   fixture.state.timer.status = "idle";
   fixture.elements.clearButton.listeners.get("click")();
+  assert.ok(fixture.calls.includes("stop"));
+  assert.equal(fixture.calls.some((entry) => Array.isArray(entry) && entry[0] === "command" && entry[1] === "clear"), false);
 
   fixture.host.storage({ key: "pomodoroughPendingLogout", newValue: "1" });
   await new Promise((resolve) => setImmediate(resolve));
