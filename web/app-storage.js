@@ -17,6 +17,7 @@
   const TIMER_OWNER_LEASE_MS = 60_000;
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
+  const RETARGET_MARKERS_KEY = "retargetedTaskByTimerId";
   const ALL_STORES = Object.freeze([
     META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE,
     AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE
@@ -44,6 +45,28 @@
     throw error;
   }
 
+  function sanitizeRetargetMarkers(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const markers = {};
+    for (const [timerId, taskId] of Object.entries(value)) {
+      if (typeof timerId !== "string" || timerId.length === 0) continue;
+      if (taskId === null) markers[timerId] = null;
+      else if (typeof taskId === "string" && taskId.length > 0) markers[timerId] = taskId;
+    }
+    return markers;
+  }
+
+  function rewritePendingStartsForRetarget(pending, markers) {
+    if (!markers || typeof markers !== "object") return;
+    for (const command of pending || []) {
+      if (command?.type !== "start" || typeof command.timerId !== "string") continue;
+      if (!Object.hasOwn(markers, command.timerId)) continue;
+      const taskId = markers[command.timerId];
+      if (taskId === null || taskId === undefined) delete command.taskId;
+      else command.taskId = taskId;
+    }
+  }
+
   const manifest = Object.freeze({
     name: "storage",
     externals: ["host", "syncCore", "syncStorage"],
@@ -60,8 +83,9 @@
       "migrateDurationQueueFromSettings", "bootstrapLegacyDurations", "readPendingDurationOperations",
       "refreshPendingDurationOperations", "readLocalRecords", "restoreLocalRecords",
       "persistNewLocalIdentity", "loadLocalState", "acquireBootstrapGate",
-      "refreshMigratedPreferences", "persistSettings", "persistCommand", "persistTaskOperation",
+      "refreshMigratedPreferences",       "persistSettings", "persistCommand", "persistTaskOperation",
       "persistAutoStartOperation", "persistSelectedTaskOperation", "persistDurationOperation",
+      "persistRetargetState", "reapplyRetargetToPending",
       "reloadPersistedState", "clearLocalData", "database", "setDatabaseForTest",
       "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity"
     ],
@@ -223,7 +247,8 @@
       return bindActions(this, [
         "settingsValue", "snapshotValue", "migrateDurationQueueFromSettings",
         "bootstrapLegacyDurations", "readPendingDurationOperations", "refreshPendingDurationOperations",
-        "readLocalRecords", "restoreLocalRecords", "persistNewLocalIdentity", "loadLocalState",
+        "readLocalRecords", "restoreLocalRecords", "reapplyRetargetToPending",
+        "persistNewLocalIdentity", "loadLocalState",
         "acquireBootstrapGate", "refreshMigratedPreferences", "persistSettings", "reloadPersistedState"
       ]);
     }
@@ -318,12 +343,13 @@
         this.connection.requestResult(transaction.objectStore(TASK_PENDING_STORE).getAll()),
         this.connection.requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
         this.connection.requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll()),
-        this.connection.requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll())
+        this.connection.requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()),
+        this.connection.requestResult(metaStore.get(RETARGET_MARKERS_KEY))
       ]);
       const names = [
         "deviceId", "deviceSequence", "hlc", "clockOffset", "settings", "snapshot",
         "bootstrapResolution", "pending", "pendingTaskOperations", "pendingDurationOperations",
-        "pendingAutoStartOperations", "pendingSelectedTaskOperations"
+        "pendingAutoStartOperations", "pendingSelectedTaskOperations", "retargetMarkers"
       ];
       return Object.fromEntries(names.map((name, index) => [name, values[index]]));
     }
@@ -356,6 +382,11 @@
       this.state.pendingDurationOperations = (records.pendingDurationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = records.pendingAutoStartOperations || [];
       this.state.pendingSelectedTaskOperations = records.pendingSelectedTaskOperations || [];
+      // Durable retarget marker: reloads re-apply it to the restored pending
+      // starts (same rewrite as the live retarget) so the wire keeps the
+      // newly selected task with no duplicate command identity.
+      this.state.retargetedTaskByTimerId = sanitizeRetargetMarkers(records.retargetMarkers?.value);
+      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
       this.state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
       this.state.autoStartSyncBootstrapped = settings?.value?.autoStartSyncBootstrapped === true;
       this.state.selectedTaskSyncBootstrapped = settings?.value?.selectedTaskSyncBootstrapped === true;
@@ -367,6 +398,10 @@
         (value, command) => Math.max(value, Number(command.deviceSequence) || 0), 0
       );
       this.state.deviceSequence = Math.max(this.state.deviceSequence, highest);
+    }
+
+    reapplyRetargetToPending() {
+      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
     }
 
     async persistNewLocalIdentity(records) {
@@ -474,6 +509,7 @@
       this.state.pendingDurationOperations = (syncState.durationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = syncState.autoStartOperations || [];
       this.state.pendingSelectedTaskOperations = syncState.selectedTaskOperations || [];
+      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
       this.use.rebuildOptimisticState();
     }
   }
@@ -487,7 +523,8 @@
     actions() {
       return bindActions(this, [
         "persistCommand", "persistTaskOperation", "persistAutoStartOperation",
-        "persistSelectedTaskOperation", "persistDurationOperation", "setInFlightDurationOperationIds"
+        "persistSelectedTaskOperation", "persistDurationOperation", "persistRetargetState",
+        "setInFlightDurationOperationIds"
       ]);
     }
 
@@ -581,6 +618,25 @@
       ));
       this.recordOperationHlc(operation);
       return operation;
+    }
+
+    async persistRetargetState() {
+      const markers = sanitizeRetargetMarkers(this.state.retargetedTaskByTimerId);
+      this.state.retargetedTaskByTimerId = markers;
+      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+      const context = this.use.captureAccountContext();
+      await this.syncStorage.guardedMutation(this.connection.database(), [PENDING_STORE], (transaction) => {
+        const pendingStore = transaction.objectStore(PENDING_STORE);
+        const request = pendingStore.getAll();
+        request.onsuccess = () => {
+          const commands = request.result || [];
+          rewritePendingStartsForRetarget(commands, markers);
+          for (const command of commands) {
+            if (command?.type === "start" && Object.hasOwn(markers, command.timerId)) pendingStore.put(command);
+          }
+          transaction.objectStore(META_STORE).put({ key: RETARGET_MARKERS_KEY, value: markers });
+        };
+      }, { ...context, expectedUserId }).catch((error) => storageFailure(error, this.use));
     }
 
     async persistSelectedTaskOperation(taskId, expectedUserId) {

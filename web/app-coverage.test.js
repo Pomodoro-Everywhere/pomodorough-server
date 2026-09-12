@@ -3,6 +3,8 @@
 const test = require("node:test");
 const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 function baseState(overrides = {}) {
   return {
@@ -29,6 +31,7 @@ function actionFixture(overrides = {}) {
     persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}` }),
     persistTaskOperation: async (type, task) => ({ id: `${type}-${task.id}` }),
     persistCommand: async (type) => ({ id: `command-${type}` }),
+    persistRetargetState: async () => {}, reapplyRetargetToPending: () => {},
     rebuildOptimisticState: () => calls.push("rebuild"), render: () => calls.push("render"),
     renderDurations: () => calls.push("durations"), renderTaskSelector: () => calls.push("selector"),
     renderSyncStatus: () => calls.push("status"), scheduleSync: (delay) => calls.push(`sync:${delay}`),
@@ -357,6 +360,65 @@ test("view dial renders one tick per minute of the displayed timer", () => {
   fixture.use.selectedDurationMs = () => 300_000;
   fixture.view.renderTimer();
   assert.equal(fixture.elements.dialTicks.children.length, 5);
+});
+
+test("startup sizes the first dial paint instead of flashing the 60-tick default", () => {
+  const composition = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  assert.doesNotMatch(composition, /call\(application, "createDialTicks"\)/);
+  assert.match(composition, /call\(application, "createDialTicks", call\(application, "dialTickCountFor"/);
+  assert.match(composition, /const initialDialTimer = call\(application, "displayTimer"\)/);
+  assert.match(composition, /dialTickCountFor", initialDialTimer/);
+});
+
+test("dial tick sizing stays bounded for edge durations and render clamps", () => {
+  const fixture = dialFixture();
+  assert.equal(fixture.view.dialTickCountFor(undefined), 1);
+  assert.equal(fixture.view.dialTickCountFor(null), 1);
+  assert.equal(fixture.view.dialTickCountFor({}), 1);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: -60_000 }), 1);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: Number.NaN }), 1);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 90_001 }), 2);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 14_400_000 }), 240);
+  assert.equal(fixture.view.dialTickCountFor({ plannedDurationMs: 15_000_000 }), 250);
+
+  fixture.view.createDialTicks(0);
+  assert.equal(fixture.elements.dialTicks.children.length, 1);
+  fixture.view.createDialTicks(-5);
+  assert.equal(fixture.elements.dialTicks.children.length, 1);
+  fixture.view.createDialTicks(Number.NaN);
+  assert.equal(fixture.elements.dialTicks.children.length, 1);
+  fixture.view.createDialTicks(1000);
+  assert.equal(fixture.elements.dialTicks.children.length, 240);
+  fixture.view.createDialTicks();
+  assert.equal(fixture.elements.dialTicks.children.length, 60);
+});
+
+test("retarget persist failure keeps the selection and reports statically", async (t) => {
+  const fixture = actionFixture();
+  fixture.state.tasks = [{ id: "task-new", title: "New" }];
+  fixture.state.selectedTaskId = "task-old";
+  fixture.state.timer = { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 };
+  fixture.state.pending = [];
+  fixture.state.pendingSelectedTaskOperations = [];
+  fixture.use.persistSelectedTaskOperation = async (taskId) => ({ id: `selected-${taskId}`, taskId });
+  fixture.use.persistRetargetState = async () => { throw new Error("retarget offline"); };
+  fixture.use.reapplyRetargetToPending = () => {};
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.PomodoroughSentryClient;
+    else globalThis.PomodoroughSentryClient = previous;
+  });
+  assert.equal(await fixture.actions.issueSelectedTaskOperation("task-new"), true);
+  assert.deepEqual(fixture.state.pendingSelectedTaskOperations, [{ id: "selected-task-new", taskId: "task-new" }]);
+  assert.deepEqual(fixture.state.retargetedTaskByTimerId, { "timer-1": "task-new" });
+  assert.equal(fixture.state.actionLocked, false);
+  assert.ok(fixture.calls.includes("rebuild"));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.retarget.persist-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.match(String(reports[0][0]?.message || reports[0][0]), /retarget offline/);
 });
 
 test("view timer projection clamps elapsed time and formats accessible clock text", () => {

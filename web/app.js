@@ -31,7 +31,8 @@
   const COMPATIBILITY_ACTIONS = Object.freeze([
     "phaseLabel", "timerStatusLabel", "formatTaskDuration", "formatHistoryDate", "setI18nForTest",
     "emptyTimer", "displayTimer", "elapsedFor", "trustedNow", "responseClockOffset",
-    "rebuildOptimisticState", "selectedTaskIdForNextFocus", "applyTaskRetarget", "refreshAllPendingOperations",
+    "rebuildOptimisticState", "selectedTaskIdForNextFocus", "applyTaskRetarget", "reapplyRetargetToPending",
+    "persistRetargetState", "refreshAllPendingOperations",
     "renderTaskSelector", "issueSelectedTaskOperation", "ownerStateValue", "resetOwnerState",
     "restoreOwnerState", "activateCachedOwnerOffline", "requestResult", "transactionDone",
     "openDatabase", "readLocalRecords", "restoreLocalRecords", "persistNewLocalIdentity",
@@ -158,7 +159,10 @@
 
   async function initializeApplication(application) {
     await initializeLocalization(application);
-    call(application, "createDialTicks");
+    // Size the first dial paint from the displayed timer so startup never
+    // flashes the 60-tick default before the first render overwrites it.
+    const initialDialTimer = call(application, "displayTimer");
+    call(application, "createDialTicks", call(application, "dialTickCountFor", initialDialTimer));
     call(application, "setupEvents");
     call(application, "render");
     registerServiceWorker(application);

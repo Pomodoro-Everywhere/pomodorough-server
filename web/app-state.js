@@ -280,6 +280,11 @@
     }
 
     applyTaskRetarget() {
+      // Display/projection-only overlay for the local retarget marker (see
+      // retargetRunningFocusTimer): the canonical projected timer keeps its
+      // core taskId, and only the live running/paused focus timer renders
+      // with the marker. Markers for finished timers are pruned here so the
+      // divergence never outlives its timer or leaks across devices.
       if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
         this.state.retargetedTaskByTimerId = {};
       }

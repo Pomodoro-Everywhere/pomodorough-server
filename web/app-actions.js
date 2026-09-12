@@ -55,7 +55,8 @@
     externals: ["host", "syncCore", "syncStorage"],
     requires: [
       "controlsBlocked", "persistDurationOperation", "persistAutoStartOperation",
-      "persistSelectedTaskOperation", "persistTaskOperation", "persistCommand", "database",
+      "persistSelectedTaskOperation", "persistTaskOperation", "persistCommand",
+      "persistRetargetState", "reapplyRetargetToPending", "database",
       "settingsValue", "rebuildOptimisticState", "sharedTaskIdentity", "clone", "trustedNow",
       "elapsedFor", "tr", "phaseLabel", "phaseConfig", "tabId", "render", "renderDurations",
       "renderTaskSelector", "renderTimer", "renderSyncStatus", "showNotice", "scheduleSync",
@@ -222,22 +223,33 @@
 
     retargetRunningFocusTimer(taskId) {
       const timer = this.state.timer;
-      if (!timer?.id || !["running", "paused"].includes(timer.status) || timer.phase !== "focus") return;
-      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) return;
-      // Local-only retarget marker: display follows the newly picked task at
-      // once, even post-ack. Remote selected-task syncs never write here, so
-      // they cannot hijack the active timer.
+      if (!timer?.id || !["running", "paused"].includes(timer.status) || timer.phase !== "focus") return false;
+      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) return false;
+      // Intentional local-only divergence (Apple parity): the single task
+      // selector applies to the running focus timer at once, even post-ack.
+      // The canonical timer taskId in core is unchanged, so other devices
+      // keep the old task until a new Start converges them. Only this local
+      // selected-task path writes markers; peer syncs never do, so they
+      // cannot hijack the active timer. Markers die with their timer (see
+      // applyTaskRetarget) and never reach the wire: only the rewritten
+      // pre-ack start command syncs, keeping its command identity.
       if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
         this.state.retargetedTaskByTimerId = {};
       }
       this.state.retargetedTaskByTimerId[timer.id] = taskId;
-      // Rewrite the still-pending start command so eventual history follows
-      // the newly selected task with no duplicate identity.
-      for (const command of this.state.pending) {
-        if (command?.timerId === timer.id && command.type === "start") {
-          if (taskId === null) delete command.taskId;
-          else command.taskId = taskId;
-        }
+      this.use.reapplyRetargetToPending();
+      return true;
+    }
+
+    async saveRetargetState() {
+      // Best-effort durability for the marker and rewritten starts. A failure
+      // never fails the selection: the in-memory retarget still applies and
+      // the persisted selected-task operation still converges next-task
+      // state. The next retarget retries the write.
+      try {
+        await this.use.persistRetargetState();
+      } catch (error) {
+        reportFrontendError(error, "actions.retarget.persist-failed");
       }
     }
 
@@ -252,7 +264,7 @@
       try {
         const operation = await this.use.persistSelectedTaskOperation(taskId, expectedUserId);
         this.state.pendingSelectedTaskOperations.push(operation);
-        this.retargetRunningFocusTimer(taskId);
+        if (this.retargetRunningFocusTimer(taskId)) await this.saveRetargetState();
         this.use.rebuildOptimisticState();
         this.use.renderTaskSelector();
         this.use.renderSyncStatus();

@@ -104,8 +104,8 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
     assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
   }
-  assert.match(appSource, /\/app\.js\?v=38/);
-  assert.match(workerSource, /\/app\.js\?v=38/);
+  assert.match(appSource, /\/app\.js\?v=39/);
+  assert.match(workerSource, /\/app\.js\?v=39/);
   assert.match(appSource, /\/shared-core-metadata\.js\?v=1/);
   assert.match(appSource, /\/shared-core\.js\?v=6/);
   assert.match(workerSource, /\/shared-core-metadata\.js\?v=1/);
@@ -128,8 +128,8 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 2, "app-storage.js": 2, "app-actions.js": 4, "app-sync.js": 2,
-    "app-bootstrap.js": 3, "app-session.js": 3, "app-view.js": 3
+    "app-state.js": 3, "app-storage.js": 3, "app-actions.js": 5, "app-sync.js": 3,
+    "app-bootstrap.js": 3, "app-session.js": 3, "app-view.js": 4
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
     const asset = `/${file}?v=${scriptVersions[file] || 1}`;

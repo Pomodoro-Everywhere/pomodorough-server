@@ -359,6 +359,7 @@ function actionBranchFixture(overrides = {}) {
     assertExpectedAccount: (expectedUserId) => assert.equal(incarnationFixture.sync.accountOwnerId(state.user) || state.localOwnerId || null, expectedUserId),
     persistAutoStartOperation: async () => operation("auto"), persistSelectedTaskOperation: async () => operation("selected"),
     persistTaskOperation: async () => operation("task"), persistCommand: async () => operation("command"),
+    persistRetargetState: async () => {}, reapplyRetargetToPending: () => {},
     database: () => ({}), settingsValue: () => ({}), rebuildOptimisticState: () => calls.push("rebuild"),
     sharedTaskIdentity: async (title) => ({ id: title.toLowerCase(), title }), clone: structuredClone,
     trustedNow: () => 2000, elapsedFor: () => 1000, tr: (_key, _values, fallback) => fallback,

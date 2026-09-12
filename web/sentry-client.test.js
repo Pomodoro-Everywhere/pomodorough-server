@@ -297,10 +297,12 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
     ["app-actions.js", "actions.timer.save-failed"],
     ["app-actions.js", "actions.timer.clear-failed"],
     ["app-actions.js", "actions.timer.finish-failed"],
+    ["app-actions.js", "actions.retarget.persist-failed"],
+    ["app-view.js", "view.phase.save-failed"],
     ["app-bootstrap.js", "bootstrap.retry.deferred"],
     ["app-bootstrap.js", "bootstrap.choice.deferred"]
   ];
-  assert.equal(wiredSites.length, 9);
+  assert.equal(wiredSites.length, 11);
   for (const [file, operation] of wiredSites) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     const call = `reportFrontendError(error, "${operation}")`;

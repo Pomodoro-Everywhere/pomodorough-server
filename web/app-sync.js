@@ -31,6 +31,7 @@
     requires: [
       "captureAccountContext",
       "clone", "normalizeTimer", "emptyTimer", "selectedDurationMs", "normalizeDurationsMs",
+      "reapplyRetargetToPending",
       "selectedPhaseAfterCommandAcknowledgements", "snapshotValue", "settingsValue", "tabId",
       "reloadPersistedState", "database", "setInFlightDurationOperationIds", "stopCompletionAlert",
       "closeRevisionStream", "quarantineOwnerState", "render", "renderSyncStatus", "tr",
@@ -228,6 +229,9 @@
       this.state.pendingDurationOperations = (queues.durationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = queues.autoStartOperations || [];
       this.state.pendingSelectedTaskOperations = queues.selectedTaskOperations || [];
+      // Re-apply the local retarget marker: a refresh that raced the retarget
+      // write must not resurrect the stale taskId on the pending start.
+      this.use.reapplyRetargetToPending();
       this.use.rebuildOptimisticState();
     }
 

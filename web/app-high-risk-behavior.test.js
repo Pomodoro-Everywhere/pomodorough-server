@@ -183,6 +183,7 @@ function actionFixture(overrides = {}) {
     showNotice: (value) => calls.push(["notice", value]), scheduleSync: (delay) => calls.push(["sync", delay]),
     persistAutoStartOperation: async (enabled) => ({ id: `auto-${enabled}` }),
     persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}`, taskId }),
+    persistRetargetState: async () => {}, reapplyRetargetToPending: () => {},
     persistTaskOperation: async (type, task) => ({ id: `${type}-${task.id}`, type, taskId: task.id }),
     persistCommand: async (type) => ({ id: `command-${type}`, type }),
     tr: (_key, _args, fallback) => fallback, ...overrides.use
@@ -269,7 +270,7 @@ function syncFixture(overrides = {}) {
     render: () => calls.push("render"), renderSyncStatus: () => calls.push("status"),
     tr: (_key, _args, fallback) => fallback, redirectToLogin: () => calls.push("login"),
     queueSessionRevalidation: () => calls.push("revalidate"), restoreSessionAndSync: () => calls.push("restore"),
-    compareDurationOperations: () => 0, rebuildOptimisticState: () => {},
+    compareDurationOperations: () => 0, rebuildOptimisticState: () => {}, reapplyRetargetToPending: () => {},
     postMutation: async () => ({ response: { ok: true, status: 200, json: async () => ({
       revision: 3, serverTime: "now", serverHlcWallMs: 1, serverHlcCounter: 2, accountIncarnation: current.user.accountIncarnation
     }) }, timing: { requestAtMs: 1, receivedAtMs: 2, requestSequence: 3 } }), ...overrides.use

@@ -561,6 +561,31 @@ test("view event failures and timer states fail safely while the full renderer s
   assert.ok(fixture.calls.includes("online"));
 });
 
+test("phase choice save failure warns, notices, and reports with static operation", async (t) => {
+  const phase = Object.assign(element(), { dataset: { phase: "short_break" } });
+  const fixture = viewFixture({ phaseButtons: [phase], use: {
+    persistSettings: async () => { throw new Error("phase offline"); }
+  } });
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.PomodoroughSentryClient;
+    else globalThis.PomodoroughSentryClient = previous;
+  });
+  fixture.view.setupPreferenceEvents();
+  phase.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.state.selectedPhase, "short_break");
+  assert.match(fixture.elements.notice.textContent, /Phase choice could not be saved/);
+  assert.ok(fixture.calls.some((entry) => Array.isArray(entry) && entry[0] === "warn"
+    && entry.some((value) => /Pomodorough phase choice save failed:/.test(String(value)))));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "view.phase.save-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.match(String(reports[0][0]?.message || reports[0][0]), /phase offline/);
+});
+
 test("bootstrap conflict retry rotates requests and handles invalid or oversized persisted choices", async () => {
   const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
   const invalid = bootstrapFixture({ state: {

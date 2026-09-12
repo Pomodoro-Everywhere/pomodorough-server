@@ -241,8 +241,11 @@
     displayTimer() {
       const { state, use } = this;
       if (!["idle", "completed"].includes(state.timer.status)) {
-        // Retarget marker wins while a focus timer runs: the single task
-        // selector applies to the running timer, never a separate label.
+        // Local-only retarget marker wins while a focus timer runs (Apple
+        // parity, display-only): the single task selector applies to the
+        // running timer, never a separate label. Canonical state is
+        // untouched; history and summaries follow the same marker below so
+        // every surface agrees on this device.
         const markers = state.retargetedTaskByTimerId;
         if (markers && typeof markers === "object" && typeof state.timer.id === "string"
           && ["running", "paused"].includes(state.timer.status) && state.timer.phase === "focus"
@@ -441,6 +444,9 @@
     }
 
     effectiveHistoryTaskId(item) {
+      // Same local-only marker as displayTimer: history entries and per-task
+      // summaries follow the retarget so they stay consistent with the
+      // displayed timer on this device. Other devices keep canonical taskIds.
       const markers = this.state?.retargetedTaskByTimerId;
       if (markers && typeof markers === "object" && typeof item?.timerId === "string"
         && Object.hasOwn(markers, item.timerId)) {
@@ -835,7 +841,7 @@
     }
 
     setupPreferenceEvents() {
-      const { state, use, elements, document, view } = this;
+      const { state, use, elements, document, view, host } = this;
       elements.durationForm.addEventListener("submit", (event) => event.preventDefault());
       for (const button of elements.phaseButtons) {
         button.addEventListener("click", () => {
@@ -844,9 +850,13 @@
           view.renderDurations();
           view.renderTaskSelector();
           view.renderTimer();
-          use.persistSettings().catch(() => view.showNotice(use.tr(
-            "notice.phaseSaveFailed", {}, "Phase choice could not be saved."
-          )));
+          use.persistSettings().catch((error) => {
+            host.console.warn("Pomodorough phase choice save failed:", error);
+            reportFrontendError(error, "view.phase.save-failed");
+            view.showNotice(use.tr(
+              "notice.phaseSaveFailed", {}, "Phase choice could not be saved."
+            ));
+          });
         });
       }
       for (const input of elements.durationInputs) {
