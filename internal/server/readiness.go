@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 2 << 20
-	readinessCoreVersion   = "0.31.0"
+	readinessCoreVersion   = "0.32.0"
 )
 
 type readinessAsset struct {
@@ -42,17 +42,17 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "a4aa28281499c9cc46044c3c5c09d99876237fe3e53bf5488e30ea67e851d7ef", false},
+	{"index.html", "fdd9bada78b1ee34ee8d95039e607fdec6a9024cb874dd0683b3e2783b9b871c", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
 	{"sentry-client.js", "a9a77386c8539597b2ddc0dcdfb04886a6baf97343fe172cbbc7532f40ada42e", false},
-	{"app.html", "d72effc0a6adc664d5e2ab586de77f46a131711bb23e6c1892c0f065873e078d", false},
+	{"app.html", "392fd9dbae8b51227acfa230f0c93074508098894da317d253c5c56ca435a714", false},
 	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "da463bfa117c404587d6009f426077898655df0cf620cdc145b1859b1e4b3461", false},
-	{"pomodorough_core.wasm", "7b1436dc24e7fedb52f52bd193be78a775f062bdfc4fcef25bb41caf5325e379", true},
+	{"pomodorough_core.wasm", "ac96b0581acb7b877e6ffc356b307b75779a00ff538fe6d59b39ca0d5e146466", true},
 	{"sync-core.js", "22df0bae998505f4ef6c9e399ff845c96bf0c30ad9f937ef19aa4b03c69b5739", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
@@ -61,17 +61,17 @@ var readinessAssets = []readinessAsset{
 	{"locales/en.json", "41647741780faa35490b35e676a6e49278559377f01a32cab89eede5e0b24085", false},
 	{"locales/ar-XB.json", "24f101db121d782f354eeb35b6ae2e705391ee6fd3c9fece8fad33da1ae73711", false},
 	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
-	{"app-state.js", "78d7b89cdcaf7c1b5c4bdb2b4f18ba8655caee776dc96a183d19c98bcb7ae174", false},
-	{"app-storage.js", "9c577c586948096be43632305b851539778795132e1cdfe6b08c849e7117cfe7", false},
-	{"app-actions.js", "d45e5d420860ee40a6b65a023b1e9129dc6f27c1bf93417621b430592b42a213", false},
-	{"app-sync.js", "9d5640baeb9eaf269b2dba1a21d686335f99ac87446b81478ffc536f5a3a05f1", false},
+	{"app-state.js", "b60aae8fe01b980ae8982e7767b982bbad1523dce8cd2ca4b673d7855fbd4ffc", false},
+	{"app-storage.js", "88aecdeebc83e23dd9b5adcd25599dc6b162afaa11cc8eead29e361c82edab48", false},
+	{"app-actions.js", "7c4fd6dfba33bd280e621a89254d3e97a571c23dada07d235d45aea62535d34d", false},
+	{"app-sync.js", "dd4415cc4faf6b3e38bff2efbbe3dde5860993e05bb76c38d32ca4eecd09e807", false},
 	{"app-bootstrap.js", "08f17448ba35fe4bc1c74febe20d2d59e0d57da6e842bb2cb058354031a63e7b", false},
 	{"app-session.js", "c81d23363aead63afe6515b8e0bbf1df43d9bb01d47a77c018bbdcdef78a901f", false},
-	{"app-view.js", "2059febbfcb6ccfd06b7449b7e9a71bc3eb4be79949f64e4f98c08af94c5e5b7", false},
-	{"app.js", "94b851bde9c49b79e24e50e9ac4e301cd60bdd4161903e87c9b7494b48debb10", false},
+	{"app-view.js", "a12da3c6788b7c363142b9987e4f9b1a9d3183d4364dfc20584003da9ea3062f", false},
+	{"app.js", "026641b865600a451e8682c557a2f9fb50b8daa8c31068d4bfc4beac11df5b50", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "fa7976b0e68b061a3ca02dd37e86eb93b42b94f6bac693b19dce8efdd04c970b", false},
+	{"sw.js", "42e8e01bfc89017c69b0875fac0920d2e665bf36dbfba128f90f063e3d457f95", false},
 	{"openapi.yaml", "8a5db31a006cecf6ec857f938fb0903dd90f13a9a43fa5933cec8132faec2a49", false},
 }
 
