@@ -245,7 +245,9 @@
       // Best-effort durability for the marker and rewritten starts. A failure
       // never fails the selection: the in-memory retarget still applies and
       // the persisted selected-task operation still converges next-task
-      // state. The next retarget retries the write.
+      // state. The next retarget retries the write. Single-report contract
+      // (S50): persistRetargetState rethrows without reporting, so this is
+      // the only Sentry event for the failure.
       try {
         await this.use.persistRetargetState();
       } catch (error) {

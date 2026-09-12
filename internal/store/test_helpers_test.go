@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"pomodorough/internal/authn"
+	"pomodorough/internal/task"
 	"pomodorough/internal/timer"
 )
 
@@ -52,4 +53,15 @@ func testTimerCommand(id, deviceID, timerID, commandType string, sequence int64,
 		ID: id, DeviceID: deviceID, DeviceSequence: sequence, TimerID: timerID, Type: commandType,
 		Phase: "focus", PlannedDurationMs: 25 * 60_000, OccurredAt: at, HLCWallMs: at.UnixMilli(), ObservedElapsedMs: observed,
 	}
+}
+
+// canonicalTaskID derives the task identity core v0.33.0 requires for an
+// upsert title, mirroring the production parse path.
+func canonicalTaskID(t *testing.T, title string) string {
+	t.Helper()
+	identity, err := task.SharedIdentity(context.Background(), title)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity.ID
 }

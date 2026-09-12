@@ -34,7 +34,7 @@ func TestSharedUUIDv7FixtureMixedIDsAndImmutableCollisionContract(t *testing.T) 
 			ctx := context.Background()
 			userStore, db, userID, now := openTestUser(t, "uuidv7-collision-"+domain)
 			defer db.Close()
-			winner, loser := domainRequests(domain, now)
+			winner, loser := domainRequests(t, domain, now)
 			setDomainRequestID(&winner, domain, domainUUIDv7ID(domain, fixture.RFC9562.UUID))
 			setDomainRequestID(&loser, domain, domainLegacyID(domain))
 
@@ -100,9 +100,10 @@ func TestUUIDv7TimestampCannotOverrideHybridClockOrRevision(t *testing.T) {
 			higherID := domainUUIDv7ID(domain, fixture.RFC9562.UUID)
 			switch domain {
 			case "task":
+				winner := canonicalTaskID(t, "HLC winner")
 				request.TaskOperations = []task.Operation{
-					{ID: lowerID, TaskID: "task-uuid-order", Type: "delete", OccurredAt: base, HLCWallMs: base.UnixMilli() - 1},
-					{ID: higherID, TaskID: "task-uuid-order", Type: "upsert", Title: "HLC winner", OccurredAt: base, HLCWallMs: base.UnixMilli()},
+					{ID: lowerID, TaskID: winner, Type: "delete", OccurredAt: base, HLCWallMs: base.UnixMilli() - 1},
+					{ID: higherID, TaskID: winner, Type: "upsert", Title: "HLC winner", OccurredAt: base, HLCWallMs: base.UnixMilli()},
 				}
 			case "duration":
 				request.DurationOperations = []DurationOperation{

@@ -225,8 +225,13 @@
 
     async loadSharedCore() {
       if (!this.sharedCoreHost?.SharedCore) throw new Error("Shared core is unavailable.");
-      this.promise ||= this.sharedCoreHost.SharedCore.load();
-      return this.promise;
+      const pending = (this.promise ||= this.sharedCoreHost.SharedCore.load());
+      try {
+        return await pending;
+      } catch (error) {
+        if (this.promise === pending) this.promise = null;
+        throw error;
+      }
     }
 
     async sharedTaskIdentity(title) {

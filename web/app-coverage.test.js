@@ -439,3 +439,74 @@ test("view timer projection clamps elapsed time and formats accessible clock tex
   assert.equal(view.timerDisplayView({ plannedDurationMs: 0 }, "paused").progress, 0);
   assert.deepEqual(view.displayTimer(), { phase: "focus", plannedDurationMs: 90_000 });
 });
+
+function retargetStorageFixture(guardedMutation) {
+  const state = baseState({ retargetedTaskByTimerId: { "timer-1": "task-new" } });
+  const host = { setTimeout, clearTimeout };
+  const syncStorage = { guardedMutation };
+  const quarantines = [];
+  const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    quarantineAccountMismatch: () => quarantines.push("quarantine")
+  };
+  const storage = require("./app-storage.js").create({
+    state, external: { host, syncCore: incarnationFixture.sync, syncStorage }, use
+  });
+  return { host, quarantines, state, storage };
+}
+
+function withSentryCapture(t) {
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.PomodoroughSentryClient;
+    else globalThis.PomodoroughSentryClient = previous;
+  });
+  return reports;
+}
+
+test("S50 persistRetargetState rethrows without an inner Sentry report", async (t) => {
+  const fixture = retargetStorageFixture(async () => { throw new Error("retarget offline"); });
+  const reports = withSentryCapture(t);
+  await assert.rejects(() => fixture.storage.persistRetargetState(), /retarget offline/);
+  assert.equal(reports.length, 0);
+  assert.deepEqual(fixture.quarantines, []);
+  const owned = retargetStorageFixture(async () => {
+    throw new incarnationFixture.storage.AccountOwnershipError("stale owner");
+  });
+  await assert.rejects(() => owned.storage.persistRetargetState(), /stale owner/);
+  assert.equal(reports.length, 0);
+  assert.deepEqual(owned.quarantines, ["quarantine"]);
+});
+
+test("S50 retarget failure surfaces a single operation tag end to end", async (t) => {
+  const storageFixture = retargetStorageFixture(async () => { throw new Error("retarget offline"); });
+  const state = storageFixture.state;
+  Object.assign(state, {
+    tasks: [{ id: "task-new", title: "New" }], selectedTaskId: "task-old",
+    timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 },
+    pending: [], pendingSelectedTaskOperations: []
+  });
+  const calls = [];
+  const actions = require("./app-actions.js").create({
+    state,
+    external: { host: storageFixture.host, syncCore: incarnationFixture.sync, syncStorage: {} },
+    use: {
+      controlsBlocked: () => false,
+      persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}`, taskId }),
+      persistRetargetState: (...args) => storageFixture.storage.persistRetargetState(...args),
+      reapplyRetargetToPending: () => {},
+      rebuildOptimisticState: () => calls.push("rebuild"),
+      renderTaskSelector: () => calls.push("selector"),
+      renderSyncStatus: () => calls.push("status"),
+      scheduleSync: () => calls.push("sync")
+    }
+  });
+  const reports = withSentryCapture(t);
+  assert.equal(await actions.issueSelectedTaskOperation("task-new"), true);
+  assert.deepEqual(state.retargetedTaskByTimerId, { "timer-1": "task-new" });
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.retarget.persist-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+});

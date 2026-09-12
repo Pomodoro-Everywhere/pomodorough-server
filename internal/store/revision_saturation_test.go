@@ -90,7 +90,7 @@ func TestBootstrapResolutionRevisionSaturationRollsBackEntireResolution(t *testi
 	defer db.Close()
 	setTestRevision(t, db, MaxSafeRevision)
 	operation := task.Operation{
-		ID: "task-saturated-bootstrap", TaskID: "task-saturated-bootstrap", Type: "upsert", Title: "Saturated",
+		ID: "task-saturated-bootstrap", TaskID: canonicalTaskID(t, "Saturated"), Type: "upsert", Title: "Saturated",
 		OccurredAt: now, HLCWallMs: now.UnixMilli(),
 	}
 

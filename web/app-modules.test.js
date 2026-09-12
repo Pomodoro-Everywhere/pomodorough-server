@@ -205,3 +205,21 @@ test("HTML loads declared modules before composition and service worker caches e
     priorIndex = index;
   }
 });
+
+test("S48 loadSharedCore retries after rejection and caches success", async () => {
+  const stateModule = require("./app-state.js");
+  const core = { taskIdentity: ({ title }) => ({ id: "task-1", title }) };
+  let loads = 0;
+  const sharedCoreHost = { SharedCore: { load: async () => {
+    loads += 1;
+    if (loads === 1) throw new Error("core offline");
+    return core;
+  } } };
+  const actions = stateModule.create({
+    state: {}, external: { host: {}, sharedCoreHost, syncCore: { compareTimerCommands: () => 0 }, syncStorage: {} }, use: {}
+  });
+  await assert.rejects(() => actions.loadSharedCore(), /core offline/);
+  assert.strictEqual(await actions.loadSharedCore(), core);
+  assert.strictEqual(await actions.loadSharedCore(), core);
+  assert.equal(loads, 2);
+});

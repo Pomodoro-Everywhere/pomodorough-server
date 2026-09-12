@@ -60,9 +60,9 @@ func TestSharedCoreReducersSatisfyCompatibilityFixtures(t *testing.T) {
 	}
 
 	taskOps := []task.Operation{
-		{ID: "op-a", DeviceID: "device-a", TaskID: "task-a", Type: "upsert", Title: "A", OccurredAt: now, HLCWallMs: 1},
-		{ID: "op-b", DeviceID: "device-b", TaskID: "task-a", Type: "delete", OccurredAt: now, HLCWallMs: 2},
-		{ID: "op-c", DeviceID: "device-a", TaskID: "task-b", Type: "upsert", Title: "B", OccurredAt: now, HLCWallMs: 3},
+		{ID: "op-a", DeviceID: "device-a", TaskID: canonicalTaskID(t, "A"), Type: "upsert", Title: "A", OccurredAt: now, HLCWallMs: 1},
+		{ID: "op-b", DeviceID: "device-b", TaskID: canonicalTaskID(t, "A"), Type: "delete", OccurredAt: now, HLCWallMs: 2},
+		{ID: "op-c", DeviceID: "device-a", TaskID: canonicalTaskID(t, "B"), Type: "upsert", Title: "B", OccurredAt: now, HLCWallMs: 3},
 	}
 	wantTasks, wantTaskWinners := reduceTasks(taskOps)
 	gotTasks, gotTaskWinners, err := reduceTasksWithSharedCore(ctx, taskOps)
@@ -93,7 +93,7 @@ func TestSharedCoreReducersSatisfyCompatibilityFixtures(t *testing.T) {
 		t.Fatalf("shared auto-start mismatch: err=%v got %v/%q want %v/%q", err, gotAuto, gotAutoWinner, wantAuto, wantAutoWinner)
 	}
 
-	selected := "task-b"
+	selected := canonicalTaskID(t, "B")
 	selectedOps := []SelectedTaskOperation{
 		{ID: "selected-a", DeviceID: "device-a", TaskID: &selected, OccurredAt: now, HLCWallMs: 1},
 	}

@@ -19,10 +19,11 @@ func TestSyncLWWConvergesAcrossEveryInputArrivalPermutation(t *testing.T) {
 	base := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 
 	t.Run("tasks", func(t *testing.T) {
+		arrived := canonicalTaskID(t, "Arrived")
 		operations := []task.Operation{
-			{ID: "task-arrival-old", DeviceID: "device-task-a", TaskID: "task-arrival", Type: "upsert", Title: "Old", OccurredAt: base, HLCWallMs: 100},
-			{ID: "task-arrival-middle", DeviceID: "device-task-b", TaskID: "task-arrival", Type: "delete", OccurredAt: base, HLCWallMs: 200},
-			{ID: "task-arrival-new", DeviceID: "device-task-c", TaskID: "task-arrival", Type: "upsert", Title: "New", OccurredAt: base, HLCWallMs: 300},
+			{ID: "task-arrival-old", DeviceID: "device-task-a", TaskID: arrived, Type: "upsert", Title: "Arrived", OccurredAt: base, HLCWallMs: 100},
+			{ID: "task-arrival-middle", DeviceID: "device-task-b", TaskID: arrived, Type: "delete", OccurredAt: base, HLCWallMs: 200},
+			{ID: "task-arrival-new", DeviceID: "device-task-c", TaskID: arrived, Type: "upsert", Title: "Arrived", OccurredAt: base, HLCWallMs: 300},
 		}
 		for permutationIndex, permutation := range permutations {
 			permutationIndex, permutation := permutationIndex, permutation
@@ -39,7 +40,7 @@ func TestSyncLWWConvergesAcrossEveryInputArrivalPermutation(t *testing.T) {
 					}
 				}
 				result, err := userStore.Sync(context.Background(), db, userID, SyncRequest{DeviceID: "device-pull", LastRevision: 3}, base)
-				if err != nil || len(result.Tasks) != 1 || result.Tasks[0] != (task.Task{ID: "task-arrival", Title: "New"}) {
+				if err != nil || len(result.Tasks) != 1 || result.Tasks[0] != (task.Task{ID: arrived, Title: "Arrived"}) {
 					t.Fatalf("final task state = %#v, %v", result.Tasks, err)
 				}
 			})
@@ -140,7 +141,7 @@ func TestSyncLWWTupleTieBoundariesAreArrivalIndependent(t *testing.T) {
 							if clockIndex == 1 {
 								operationType, title = "upsert", "Winner"
 							}
-							request.TaskOperations = []task.Operation{{ID: value.id, TaskID: "task-tie", Type: operationType, Title: title, OccurredAt: base, HLCWallMs: value.wall, HLCCounter: value.counter}}
+							request.TaskOperations = []task.Operation{{ID: value.id, TaskID: canonicalTaskID(t, "Winner"), Type: operationType, Title: title, OccurredAt: base, HLCWallMs: value.wall, HLCCounter: value.counter}}
 						case "duration":
 							duration := int64(1_200_000)
 							if clockIndex == 1 {
@@ -261,7 +262,7 @@ func TestSyncExactLostResponseRetriesAndIgnoredStoredBatchesByDomain(t *testing.
 			ctx := context.Background()
 			userStore, db, userID, now := openTestUser(t, "retry-domain-"+domain)
 			defer db.Close()
-			winner, loser := domainRequests(domain, now)
+			winner, loser := domainRequests(t, domain, now)
 
 			first, err := userStore.Sync(ctx, db, userID, winner, now)
 			firstAck := domainAck(first, domain)
@@ -302,7 +303,7 @@ func TestSyncAcknowledgesEveryTerminalOutcomeInEveryDomain(t *testing.T) {
 			ctx := context.Background()
 			userStore, db, userID, now := openTestUser(t, "ack-outcomes-"+domain)
 			defer db.Close()
-			winner, loser := domainRequests(domain, now)
+			winner, loser := domainRequests(t, domain, now)
 			applied, err := userStore.Sync(ctx, db, userID, winner, now)
 			appliedAck := domainAck(applied, domain)
 			if err != nil || appliedAck.Count != 1 || appliedAck.ID != domainRequestID(winner, domain) || appliedAck.Outcome != "applied" || appliedAck.Reason != "" {
@@ -372,7 +373,7 @@ func TestSyncOperationAndProjectionChangeAdvanceRevisionOnce(t *testing.T) {
 	}
 
 	operation := task.Operation{
-		ID: "task-operation-projection", DeviceID: start.DeviceID, TaskID: "task-operation-projection",
+		ID: "task-operation-projection", DeviceID: start.DeviceID, TaskID: canonicalTaskID(t, "Projection"),
 		Type: "upsert", Title: "Projection", OccurredAt: now.Add(time.Minute), HLCWallMs: now.Add(time.Minute).UnixMilli(),
 	}
 	result, err := userStore.Sync(ctx, db, userID, SyncRequest{
@@ -394,7 +395,8 @@ type anyAcknowledgement struct {
 	Reason  string
 }
 
-func domainRequests(domain string, now time.Time) (SyncRequest, SyncRequest) {
+func domainRequests(t *testing.T, domain string, now time.Time) (SyncRequest, SyncRequest) {
+	t.Helper()
 	winner := SyncRequest{DeviceID: "device-domain"}
 	loser := SyncRequest{DeviceID: "device-domain"}
 	switch domain {
@@ -402,8 +404,8 @@ func domainRequests(domain string, now time.Time) (SyncRequest, SyncRequest) {
 		winner.Commands = []timer.Command{testTimerCommand("command-domain-winner", winner.DeviceID, "timer-domain", "start", 1, now)}
 		loser.Commands = []timer.Command{testTimerCommand("command-domain-loser", loser.DeviceID, "timer-domain", "start", 2, now.Add(time.Second))}
 	case "task":
-		winner.TaskOperations = []task.Operation{{ID: "task-domain-winner", TaskID: "task-domain", Type: "upsert", Title: "Winner", OccurredAt: now, HLCWallMs: 200}}
-		loser.TaskOperations = []task.Operation{{ID: "task-domain-loser", TaskID: "task-domain", Type: "delete", OccurredAt: now.Add(-time.Second), HLCWallMs: 100}}
+		winner.TaskOperations = []task.Operation{{ID: "task-domain-winner", TaskID: canonicalTaskID(t, "Winner"), Type: "upsert", Title: "Winner", OccurredAt: now, HLCWallMs: 200}}
+		loser.TaskOperations = []task.Operation{{ID: "task-domain-loser", TaskID: canonicalTaskID(t, "Winner"), Type: "delete", OccurredAt: now.Add(-time.Second), HLCWallMs: 100}}
 	case "duration":
 		winner.DurationOperations = []DurationOperation{{ID: "duration-domain-winner", Phase: "focus", DurationMs: 1_800_000, OccurredAt: now, HLCWallMs: 200}}
 		loser.DurationOperations = []DurationOperation{{ID: "duration-domain-loser", Phase: "focus", DurationMs: 1_200_000, OccurredAt: now.Add(-time.Second), HLCWallMs: 100}}

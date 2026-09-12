@@ -636,7 +636,14 @@
           }
           transaction.objectStore(META_STORE).put({ key: RETARGET_MARKERS_KEY, value: markers });
         };
-      }, { ...context, expectedUserId }).catch((error) => storageFailure(error, this.use));
+      }, { ...context, expectedUserId }).catch((error) => {
+        // Single-report contract (S50): the caller (saveRetargetState)
+        // owns the `actions.retarget.persist-failed` Sentry event, so this
+        // layer only quarantines ownership drift and rethrows without
+        // reporting to avoid a duplicate `storage.failure` event.
+        if (error?.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
+        throw error;
+      });
     }
 
     async persistSelectedTaskOperation(taskId, expectedUserId) {
