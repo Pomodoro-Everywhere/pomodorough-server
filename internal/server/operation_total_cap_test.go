@@ -69,3 +69,42 @@ func TestS67BootstrapEnvelopeRejectsTotalOverflow(t *testing.T) {
 		t.Fatal("empty bootstrap envelope rejected; want acceptance")
 	}
 }
+
+// S67 boundary: the cross-domain total is twice the per-domain maximum.
+// 512 passes, 513 fails; per-domain caps stay green on both sides.
+func TestS67SyncTotalBoundary512Accepts513Rejects(t *testing.T) {
+	atLimit := operationBatch{
+		commands:       make([]syncCommandJSON, 256),
+		taskOperations: make([]syncTaskOperationJSON, 256),
+		maximum:        256,
+	}
+	if atLimit.operationCount() != 512 {
+		t.Fatalf("operationCount = %d, want 512", atLimit.operationCount())
+	}
+	if !atLimit.validCount() {
+		t.Fatal("512 total operations rejected; want acceptance")
+	}
+	overLimit := operationBatch{
+		commands:           make([]syncCommandJSON, 256),
+		taskOperations:     make([]syncTaskOperationJSON, 256),
+		durationOperations: make([]syncDurationOperationJSON, 1),
+		maximum:            256,
+	}
+	if overLimit.operationCount() != 513 {
+		t.Fatalf("operationCount = %d, want 513", overLimit.operationCount())
+	}
+	if overLimit.validCount() {
+		t.Fatal("513 total operations accepted; want rejection")
+	}
+	envelope := syncRequestJSON{
+		DeviceID: "device-0001", LastRevision: int64Pointer(0),
+		Commands: make([]syncCommandJSON, 256), TaskOperations: make([]syncTaskOperationJSON, 256),
+	}
+	if !validSyncEnvelope(envelope) {
+		t.Fatal("sync envelope with 512 operations rejected; want acceptance")
+	}
+	envelope.DurationOperations = make([]syncDurationOperationJSON, 1)
+	if validSyncEnvelope(envelope) {
+		t.Fatal("sync envelope with 513 operations accepted; want rejection")
+	}
+}
