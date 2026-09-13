@@ -10,6 +10,11 @@ import (
 	"pomodorough/internal/timer"
 )
 
+// defaultRetargetPlannedDurationMs is the echo-only default for omitted
+// retarget plannedDurationMs. Core ignores retarget lifecycle fields; the
+// value only satisfies the shared 1min-4h wire bounds.
+const defaultRetargetPlannedDurationMs = int64(1_500_000)
+
 type operationBatch struct {
 	deviceID               string
 	commands               []syncCommandJSON
@@ -90,31 +95,49 @@ func parseCommand(deviceID string, input syncCommandJSON, now time.Time) (timer.
 	if _, valid := validTypes[input.Type]; !valid {
 		return timer.Command{}, fmt.Errorf("invalid command type")
 	}
-	if input.TaskID != "" && (!validID(input.TaskID) || input.Type != "start" || input.Phase != "focus") {
+	if input.TaskID != "" && (!validID(input.TaskID) || (input.Type != "start" && input.Type != "retarget") || input.Phase != "focus") {
 		return timer.Command{}, fmt.Errorf("invalid task association")
+	}
+	if input.Type == "retarget" && (input.Phase != "focus" || (input.TaskID == "" && !input.TaskIDExplicitNull)) {
+		return timer.Command{}, fmt.Errorf("retarget requires explicit taskId or null and focus phase")
 	}
 	if _, valid := validPhases[input.Phase]; !valid {
 		return timer.Command{}, fmt.Errorf("invalid command phase")
 	}
-	if input.PlannedDurationMs == nil || *input.PlannedDurationMs < int64(time.Minute/time.Millisecond) ||
-		*input.PlannedDurationMs > int64(4*time.Hour/time.Millisecond) {
+	// S59: retarget lifecycle fields are echo-only; Core ignores them.
+	// Accept omission with deterministic defaults so clients never fabricate
+	// values. Present values still validate like other commands.
+	plannedDurationMs := input.PlannedDurationMs
+	observedElapsedMs := input.ObservedElapsedMs
+	if input.Type == "retarget" {
+		if plannedDurationMs == nil {
+			defaultPlanned := defaultRetargetPlannedDurationMs
+			plannedDurationMs = &defaultPlanned
+		}
+		if observedElapsedMs == nil {
+			defaultObserved := int64(0)
+			observedElapsedMs = &defaultObserved
+		}
+	}
+	if plannedDurationMs == nil || *plannedDurationMs < int64(time.Minute/time.Millisecond) ||
+		*plannedDurationMs > int64(4*time.Hour/time.Millisecond) {
 		return timer.Command{}, fmt.Errorf("invalid timer duration")
 	}
 	occurredAt, err := parseOperationClock(input.OccurredAt, input.HLCWallMs, input.HLCCounter, false, now)
 	if err != nil {
 		return timer.Command{}, fmt.Errorf("invalid hybrid clock: %w", err)
 	}
-	if input.ObservedElapsedMs == nil {
+	if observedElapsedMs == nil {
 		return timer.Command{}, fmt.Errorf("missing observed elapsed")
 	}
-	if *input.ObservedElapsedMs < -maxSafeInteger || *input.ObservedElapsedMs > maxSafeInteger {
+	if *observedElapsedMs < -maxSafeInteger || *observedElapsedMs > maxSafeInteger {
 		return timer.Command{}, fmt.Errorf("observed elapsed is outside the safe integer range")
 	}
 	return timer.Command{
 		ID: input.ID, DeviceID: deviceID, DeviceSequence: *input.DeviceSequence, TimerID: input.TimerID,
-		TaskID: input.TaskID, Type: input.Type, Phase: input.Phase, PlannedDurationMs: *input.PlannedDurationMs,
+		TaskID: input.TaskID, Type: input.Type, Phase: input.Phase, PlannedDurationMs: *plannedDurationMs,
 		OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
-		ObservedElapsedMs: *input.ObservedElapsedMs,
+		ObservedElapsedMs: *observedElapsedMs,
 	}, nil
 }
 

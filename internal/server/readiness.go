@@ -72,7 +72,7 @@ var readinessAssets = []readinessAsset{
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
 	{"sw.js", "783e3d53a4e2079e3bc0c940d4e5f245dcae04af59bf7b329162f8284d203436", false},
-	{"openapi.yaml", "8a5db31a006cecf6ec857f938fb0903dd90f13a9a43fa5933cec8132faec2a49", false},
+	{"openapi.yaml", "c014b69b5c0c18daefac9dfd97be92e2594d901fe0aa4e3d06c9f8c5c1f6224d", false},
 }
 
 func readinessKeyDigest(secret []byte) [sha256.Size]byte {

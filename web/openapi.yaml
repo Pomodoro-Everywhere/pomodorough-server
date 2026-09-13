@@ -1087,7 +1087,7 @@ components:
 
     CommandType:
       type: string
-      enum: [start, pause, resume, finish, cancel, clear]
+      enum: [start, pause, resume, finish, cancel, clear, retarget]
 
     TimerCommand:
       type: object
@@ -1098,11 +1098,9 @@ components:
         - timerId
         - type
         - phase
-        - plannedDurationMs
         - occurredAt
         - hlcWallMs
         - hlcCounter
-        - observedElapsedMs
       properties:
         id:
           $ref: "#/components/schemas/CommandID"
@@ -1115,8 +1113,17 @@ components:
         timerId:
           $ref: "#/components/schemas/TimerID"
         taskId:
-          $ref: "#/components/schemas/TaskID"
-          description: Optional task association. Valid only for a `start` command whose phase is `focus`.
+          type: string
+          allOf:
+            - $ref: "#/components/schemas/TaskID"
+          nullable: true
+          description: |
+            Optional task association. Valid only when phase is `focus` and
+            type is `start` or `retarget`.
+            For `start`: a task-ID string assigns, omission leaves unassigned.
+            For `retarget` (focus-only): an explicit task-ID string assigns,
+            explicit `null` unassigns, omission is rejected — null-vs-omitted
+            is significant. Other types must omit `taskId`.
         type:
           $ref: "#/components/schemas/CommandType"
         phase:
@@ -1126,7 +1133,11 @@ components:
           format: int64
           minimum: 60000
           maximum: 14400000
-          description: Planned timer duration from one minute through four hours.
+          description: |
+            Planned timer duration from one minute through four hours.
+            Required for all types except `retarget`. For `retarget` it is
+            echo-only (Core ignores it) and may be omitted; the server
+            defaults omitted retarget values to 1500000.
         occurredAt:
           type: string
           format: date-time
@@ -1152,7 +1163,11 @@ components:
           format: int64
           minimum: -9007199254740991
           maximum: 9007199254740991
-          description: Client-observed elapsed time within JavaScript's safe integer range; reducer clamps it to timer bounds.
+          description: |
+            Client-observed elapsed time within JavaScript's safe integer range; reducer clamps it to timer bounds.
+            Required for all types except `retarget`. For `retarget` it is
+            echo-only (Core ignores it) and may be omitted; the server
+            defaults omitted retarget values to 0.
       example:
         id: command-01J2YKCP7G5A3F9D8S6H4J2K1L
         deviceSequence: 12

@@ -18,7 +18,7 @@ const (
 var (
 	idPattern                = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 	platformPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
-	validTypes               = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}}
+	validTypes               = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}, "retarget": {}}
 	validPhases              = map[string]struct{}{"focus": {}, "short_break": {}, "long_break": {}}
 	validTaskOperationTypes  = map[string]struct{}{"upsert": {}, "delete": {}}
 	validBootstrapStrategies = map[string]struct{}{
@@ -37,17 +37,18 @@ type syncRequestJSON struct {
 }
 
 type syncCommandJSON struct {
-	ID                string `json:"id"`
-	DeviceSequence    *int64 `json:"deviceSequence"`
-	TimerID           string `json:"timerId"`
-	TaskID            string `json:"taskId,omitempty"`
-	Type              string `json:"type"`
-	Phase             string `json:"phase"`
-	PlannedDurationMs *int64 `json:"plannedDurationMs"`
-	OccurredAt        string `json:"occurredAt"`
-	HLCWallMs         *int64 `json:"hlcWallMs"`
-	HLCCounter        *int64 `json:"hlcCounter"`
-	ObservedElapsedMs *int64 `json:"observedElapsedMs"`
+	ID                 string `json:"id"`
+	DeviceSequence     *int64 `json:"deviceSequence"`
+	TimerID            string `json:"timerId"`
+	TaskID             string `json:"taskId,omitempty"`
+	TaskIDExplicitNull bool   `json:"-"`
+	Type               string `json:"type"`
+	Phase              string `json:"phase"`
+	PlannedDurationMs  *int64 `json:"plannedDurationMs"`
+	OccurredAt         string `json:"occurredAt"`
+	HLCWallMs          *int64 `json:"hlcWallMs"`
+	HLCCounter         *int64 `json:"hlcCounter"`
+	ObservedElapsedMs  *int64 `json:"observedElapsedMs"`
 }
 
 type syncTaskOperationJSON struct {

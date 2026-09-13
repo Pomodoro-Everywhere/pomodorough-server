@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -69,6 +70,23 @@ type coreHLCHeadOutput struct {
 }
 
 func hlcHeadWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed []coreHLC) (coreHLC, error) {
+	head := coreHLC{WallMs: physicalNowMs}
+	for len(observed) > 9999 {
+		batch := append([]coreHLC{head}, observed[:9999]...)
+		var err error
+		head, err = hlcHeadPageWithCore(ctx, call, physicalNowMs, batch)
+		if err != nil {
+			return coreHLC{}, err
+		}
+		observed = observed[9999:]
+	}
+	if head != (coreHLC{WallMs: physicalNowMs}) {
+		observed = append([]coreHLC{head}, observed...)
+	}
+	return hlcHeadPageWithCore(ctx, call, physicalNowMs, observed)
+}
+
+func hlcHeadPageWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed []coreHLC) (coreHLC, error) {
 	input := coreHLCHeadInput{PhysicalNowMs: physicalNowMs, Observed: observed}
 	var output coreHLCHeadOutput
 	if err := call(ctx, "hlc.head.v1", input, &output); err != nil {
@@ -163,7 +181,7 @@ type coreTimerCommand struct {
 	DeviceID          string  `json:"deviceId"`
 	DeviceSequence    int64   `json:"deviceSequence"`
 	TimerID           string  `json:"timerId"`
-	TaskID            *string `json:"taskId,omitempty"`
+	TaskID            *string `json:"taskId"`
 	Type              string  `json:"type"`
 	Phase             string  `json:"phase"`
 	PlannedDurationMs int64   `json:"plannedDurationMs"`
@@ -203,6 +221,22 @@ type coreTimerOutcome struct {
 }
 
 func reduceTimerWithSharedCore(ctx context.Context, commands []timer.Command, now time.Time) (timer.Result, error) {
+	if len(commands) > 256 {
+		paged, err := replayTimerPages(ctx, commands, now)
+		if err == nil {
+			if err := rejectUnsupportedRetarget(commands, paged); err != nil {
+				return timer.Result{}, err
+			}
+			return paged, nil
+		}
+		// S57: pinned 0.34.0 wasm lacks timer.replay.page.v1. Probe the
+		// paging capability and fall back to direct timer.reduce.v1, which
+		// supports up to 10,000 commands. Only UnsupportedOperation falls
+		// back; other errors stay fail-closed.
+		if !isCoreUnsupportedOperation(err) {
+			return timer.Result{}, err
+		}
+	}
 	var output coreTimerResult
 	if err := callAccountSharedCore(ctx, "timer.reduce.v1", map[string]any{
 		"commands": coreTimerCommands(commands),
@@ -210,7 +244,46 @@ func reduceTimerWithSharedCore(ctx context.Context, commands []timer.Command, no
 	}, &output); err != nil {
 		return timer.Result{}, err
 	}
-	return timerResultFromCore(output, commands)
+	result, err := timerResultFromCore(output, commands)
+	if err != nil {
+		return timer.Result{}, err
+	}
+	// S56: fail-closed on pinned-core retarget rejection. Pinned 0.34.0
+	// reduces unknown retarget to rejected "unsupported command type", a
+	// valid ack that would silently diverge. Map to sync error instead.
+	if err := rejectUnsupportedRetarget(commands, result); err != nil {
+		return timer.Result{}, err
+	}
+	return result, nil
+}
+
+// isCoreUnsupportedOperation reports pinned-wasm capability gaps:
+// unknown timer.replay.page.v1 ("unsupported shared-core operation") and
+// similar unsupported-operation errors. Matched case-insensitively.
+func isCoreUnsupportedOperation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unsupported")
+}
+
+// rejectUnsupportedRetarget maps core "unsupported command" outcomes for
+// retarget to a sync error so callers never ack them as success. Other
+// retarget rejections (validation) still ack normally.
+func rejectUnsupportedRetarget(commands []timer.Command, result timer.Result) error {
+	for _, command := range commands {
+		if command.Type != "retarget" {
+			continue
+		}
+		outcome, exists := result.Outcomes[command.ID]
+		if !exists {
+			continue
+		}
+		if outcome.Outcome == "rejected" && strings.Contains(strings.ToLower(outcome.Reason), "unsupported") {
+			return fmt.Errorf("retarget command %q rejected as unsupported by shared core: %s", command.ID, outcome.Reason)
+		}
+	}
+	return nil
 }
 
 func coreTimerCommands(commands []timer.Command) []coreTimerCommand {
