@@ -632,6 +632,25 @@ test("S52 post-write drift surfaces a single operation tag end to end", async (t
   assert.deepEqual(storageFixture.quarantines, ["quarantine"]);
 });
 
+test("S52 generic post-write failure surfaces a single operation tag end to end", async (t) => {
+  const operation = { id: "op-1", hlcWallMs: 1000, hlcCounter: 1 };
+  const storageFixture = allocateStorageFixture({
+    allocateMutation: async () => operation,
+    readSyncState: async () => ({ snapshot: {} }),
+    assertAccountOwnership: () => { throw new Error("post-write conflict"); }
+  });
+  const fixture = actionFixture({
+    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+  });
+  const reports = withSentryCapture(t);
+  assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
+  assert.deepEqual(fixture.notices, ["post-write conflict"]);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.duration.save-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.deepEqual(storageFixture.quarantines, []);
+});
+
 test("S53 completion notification failure warns and reports once", async (t) => {
   class BrokenNotification {
     static permission = "granted";
