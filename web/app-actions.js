@@ -573,7 +573,11 @@
         });
         this.completionAlertNotification.onclick = this.stopCompletionAlert;
         return true;
-      } catch {
+      } catch (error) {
+        // S53: a denied/broken Notification ctor must stay visible in
+        // diagnostics; audio + retry paths still alert.
+        this.host.console.warn("Pomodorough completion notification unavailable:", error);
+        reportFrontendError(error, "actions.completion.notification-failed");
         this.completionAlertNotification = null;
         return false;
       }
@@ -582,11 +586,18 @@
     async primeCompletionAlerts() {
       const AudioContextType = this.host.AudioContext || this.host.webkitAudioContext;
       if (!this.completionAlertContext && AudioContextType) {
-        try { this.completionAlertContext = new AudioContextType(); } catch { this.completionAlertContext = null; }
+        try { this.completionAlertContext = new AudioContextType(); } catch (error) {
+          // S54: audio-alert failures stay visible in diagnostics;
+          // the notification path still alerts.
+          this.host.console.warn("Pomodorough completion audio unavailable:", error);
+          reportFrontendError(error, "actions.completion.audio-init-failed");
+          this.completionAlertContext = null;
+        }
       }
       if (this.completionAlertContext?.state === "suspended") {
-        try { await this.completionAlertContext.resume(); } catch {
-          // Notification still provides an alert when browser audio is unavailable.
+        try { await this.completionAlertContext.resume(); } catch (error) {
+          this.host.console.warn("Pomodorough completion audio resume failed:", error);
+          reportFrontendError(error, "actions.completion.audio-resume-failed");
         }
       }
       const NotificationType = this.host.Notification;

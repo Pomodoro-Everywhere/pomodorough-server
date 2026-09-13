@@ -30,6 +30,7 @@ function actionFixture(overrides = {}) {
   const timers = [];
   const host = {
     crypto: { randomUUID: () => "break-1" }, Notification: undefined,
+    console: { warn: (...args) => calls.push(["warn", ...args]) },
     clearTimeout: (id) => calls.push(["clearTimeout", id]),
     setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
     clearInterval: (id) => calls.push(["clearInterval", id]),

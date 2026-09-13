@@ -30,8 +30,8 @@ const SHELL = [
   "/locales/ar-XB.json?v=2",
   "/app-runtime.js?v=1",
   "/app-state.js?v=3",
-  "/app-storage.js?v=3",
-  "/app-actions.js?v=5",
+  "/app-storage.js?v=4",
+  "/app-actions.js?v=6",
   "/app-sync.js?v=3",
   "/app-bootstrap.js?v=3",
   "/app-session.js?v=3",
@@ -62,6 +62,9 @@ async function activateShell() {
   await self.clients.claim();
   if (staleShells.length === 0) return;
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  // S55 documented-silent: post-purge refresh is best-effort; a failed
+  // navigate heals on the next load, and the worker has no Sentry/document
+  // context to report through (see header).
   await Promise.all(windows.map((client) => client.navigate(client.url).catch(() => null)));
 }
 
@@ -91,6 +94,9 @@ self.addEventListener("fetch", (event) => {
 });
 
 async function networkFirstNavigation(request) {
+  // S55 documented-silent: offline fallbacks serve cache; when no cache
+  // entry exists the error rethrows to the browser navigation, which
+  // surfaces it. The worker never reports to Sentry itself (see header).
   try {
     return await fetch(request);
   } catch (error) {

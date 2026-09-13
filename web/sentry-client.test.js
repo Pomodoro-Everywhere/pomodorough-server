@@ -411,3 +411,10 @@ test("service worker stays silent with a reasoned comment", () => {
   assert.doesNotMatch(worker, /reportFrontendError/);
   assert.doesNotMatch(worker, /captureException/);
 });
+
+test("S55 service worker documents each Sentry-dark site", () => {
+  const worker = fs.readFileSync(path.join(__dirname, "sw.js"), "utf8");
+  assert.equal(worker.match(/S55 documented-silent/g).length, 2);
+  assert.match(worker, /client\.navigate\(client\.url\)\.catch\(\(\) => null\)/);
+  assert.match(worker, /networkFirstNavigation/);
+});

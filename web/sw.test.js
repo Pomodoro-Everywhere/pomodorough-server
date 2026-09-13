@@ -128,7 +128,7 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 3, "app-storage.js": 3, "app-actions.js": 5, "app-sync.js": 3,
+    "app-state.js": 3, "app-storage.js": 4, "app-actions.js": 6, "app-sync.js": 3,
     "app-bootstrap.js": 3, "app-session.js": 3, "app-view.js": 4
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {

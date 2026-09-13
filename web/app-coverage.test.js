@@ -466,6 +466,49 @@ function withSentryCapture(t) {
   return reports;
 }
 
+function allocateStorageFixture({ allocateMutation, readSyncState, assertAccountOwnership } = {}) {
+  const state = baseState();
+  const host = { setTimeout, clearTimeout };
+  const quarantines = [];
+  const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    trustedNow: () => 1000, tabId: () => "tab-1",
+    compareDurationOperations: (left, right) => (left.hlcWallMs - right.hlcWallMs) || (left.hlcCounter - right.hlcCounter),
+    assertExpectedAccount: () => {},
+    quarantineAccountMismatch: () => quarantines.push("quarantine")
+  };
+  const syncStorage = {
+    allocateMutation, readSyncState: readSyncState || (async () => ({})),
+    assertAccountOwnership: assertAccountOwnership || (() => {})
+  };
+  const storage = require("./app-storage.js").create({
+    state, external: { host, syncCore: incarnationFixture.sync, syncStorage }, use
+  });
+  storage.setDatabaseForTest({});
+  return { host, quarantines, state, storage, use };
+}
+
+function completionFixture(hostOverrides = {}) {
+  const warnings = [];
+  const state = baseState();
+  const host = {
+    console: { warn: (...args) => warnings.push(args) },
+    Notification: undefined, AudioContext: undefined,
+    clearTimeout: () => {}, setTimeout: () => 0,
+    clearInterval: () => {}, setInterval: () => 0,
+    ...hostOverrides
+  };
+  const use = {
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    tr: (_key, _args, fallback) => fallback,
+    phaseLabel: (phase) => phase, phaseConfig: () => ({ focus: {} })
+  };
+  const actions = require("./app-actions.js").create({
+    state, external: { host, syncCore: incarnationFixture.sync, syncStorage: {} }, use
+  });
+  return { actions, host, state, warnings };
+}
+
 test("S50 persistRetargetState rethrows without an inner Sentry report", async (t) => {
   const fixture = retargetStorageFixture(async () => { throw new Error("retarget offline"); });
   const reports = withSentryCapture(t);
@@ -509,4 +552,126 @@ test("S50 retarget failure surfaces a single operation tag end to end", async (t
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "actions.retarget.persist-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+});
+
+test("S51 allocateOperation rethrows without an inner Sentry report", async (t) => {
+  const fixture = allocateStorageFixture({ allocateMutation: async () => { throw new Error("idb offline"); } });
+  const reports = withSentryCapture(t);
+  const task = { id: "task-1", title: "One" };
+  await assert.rejects(() => fixture.storage.persistTaskOperation("upsert", task), /idb offline/);
+  assert.equal(reports.length, 0);
+  assert.deepEqual(fixture.quarantines, []);
+
+  const owned = allocateStorageFixture({ allocateMutation: async () => {
+    throw new incarnationFixture.storage.AccountOwnershipError("stale owner");
+  } });
+  await assert.rejects(() => owned.storage.persistTaskOperation("upsert", task), /stale owner/);
+  assert.equal(reports.length, 0);
+  assert.deepEqual(owned.quarantines, ["quarantine"]);
+
+  const drifted = allocateStorageFixture({ allocateMutation: async () => ({ id: "op-1" }) });
+  const liveContext = drifted.use.captureAccountContext;
+  drifted.use.captureAccountContext = () => ({
+    ...liveContext(), assertCurrent: () => { throw new Error("tab superseded"); }
+  });
+  await assert.rejects(() => drifted.storage.persistTaskOperation("upsert", task), /tab superseded/);
+  assert.equal(reports.length, 0);
+  assert.deepEqual(drifted.quarantines, []);
+});
+
+test("S51 mutation failure surfaces a single operation tag end to end", async (t) => {
+  const storageFixture = allocateStorageFixture({
+    allocateMutation: async () => { throw new Error("idb offline"); }
+  });
+  const fixture = actionFixture({
+    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+  });
+  const reports = withSentryCapture(t);
+  assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
+  assert.deepEqual(fixture.notices, ["idb offline"]);
+  assert.equal(fixture.state.actionLocked, false);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.duration.save-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.deepEqual(storageFixture.quarantines, []);
+});
+
+test("S52 persistDurationOperation fails closed on post-write ownership drift", async (t) => {
+  const operation = { id: "op-1", hlcWallMs: 1000, hlcCounter: 1 };
+  const fixture = allocateStorageFixture({
+    allocateMutation: async () => operation,
+    readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("user-2") } }),
+    assertAccountOwnership: () => {
+      throw new incarnationFixture.storage.AccountOwnershipError("stale owner");
+    }
+  });
+  const reports = withSentryCapture(t);
+  await assert.rejects(
+    () => fixture.storage.persistDurationOperation("focus", 1_800_000), /stale owner/
+  );
+  assert.equal(reports.length, 0);
+  assert.deepEqual(fixture.quarantines, ["quarantine"]);
+});
+
+test("S52 post-write drift surfaces a single operation tag end to end", async (t) => {
+  const operation = { id: "op-1", hlcWallMs: 1000, hlcCounter: 1 };
+  const storageFixture = allocateStorageFixture({
+    allocateMutation: async () => operation,
+    readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("user-2") } }),
+    assertAccountOwnership: () => {
+      throw new incarnationFixture.storage.AccountOwnershipError("stale owner");
+    }
+  });
+  const fixture = actionFixture({
+    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+  });
+  const reports = withSentryCapture(t);
+  assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.duration.save-failed");
+  assert.deepEqual(storageFixture.quarantines, ["quarantine"]);
+});
+
+test("S53 completion notification failure warns and reports once", async (t) => {
+  class BrokenNotification {
+    static permission = "granted";
+    constructor() { throw new Error("notification denied"); }
+  }
+  const fixture = completionFixture({ Notification: BrokenNotification });
+  const reports = withSentryCapture(t);
+  assert.equal(fixture.actions.startCompletionAlert({ id: "timer-1", phase: "focus" }), true);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.completion.notification-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.equal(fixture.warnings.length, 1);
+  assert.match(String(fixture.warnings[0][0]), /completion notification unavailable/);
+  assert.match(String(reports[0][0]?.message || reports[0][0]), /notification denied/);
+  fixture.actions.stopCompletionAlert();
+});
+
+test("S54 completion audio init failure warns and reports once", async (t) => {
+  class BrokenAudioContext { constructor() { throw new Error("audio denied"); } }
+  const fixture = completionFixture({ AudioContext: BrokenAudioContext });
+  const reports = withSentryCapture(t);
+  await fixture.actions.primeCompletionAlerts();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.completion.audio-init-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.equal(fixture.warnings.length, 1);
+  assert.match(String(fixture.warnings[0][0]), /completion audio unavailable/);
+});
+
+test("S54 completion audio resume failure warns and reports once", async (t) => {
+  class SuspendedAudioContext {
+    constructor() { this.state = "suspended"; }
+    async resume() { throw new Error("resume blocked"); }
+  }
+  const fixture = completionFixture({ AudioContext: SuspendedAudioContext });
+  const reports = withSentryCapture(t);
+  await fixture.actions.primeCompletionAlerts();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.completion.audio-resume-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.equal(fixture.warnings.length, 1);
+  assert.match(String(fixture.warnings[0][0]), /completion audio resume failed/);
 });

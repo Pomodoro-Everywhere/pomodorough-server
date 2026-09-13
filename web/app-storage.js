@@ -45,6 +45,15 @@
     throw error;
   }
 
+  function rethrowOwnershipWithoutReport(error, use) {
+    // Single-report contract (S51/S52, mirrors S50): the actions-layer
+    // caller owns the `actions.*.save-failed` Sentry event, so this layer
+    // only quarantines ownership drift and rethrows without reporting to
+    // avoid a duplicate `storage.failure` event.
+    if (error?.name === "AccountOwnershipError") use.quarantineAccountMismatch();
+    throw error;
+  }
+
   function sanitizeRetargetMarkers(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     const markers = {};
@@ -588,8 +597,8 @@
     async allocateOperation(options) {
       const expectedUserId = options.expectedUserId;
       const operation = await this.syncStorage.allocateMutation(this.connection.database(), options)
-        .catch((error) => storageFailure(error, this.use));
-      try { options.assertCurrent?.(); } catch (error) { storageFailure(error, this.use); }
+        .catch((error) => rethrowOwnershipWithoutReport(error, this.use));
+      try { options.assertCurrent?.(); } catch (error) { rethrowOwnershipWithoutReport(error, this.use); }
       this.use.assertExpectedAccount(expectedUserId);
       return operation;
     }
@@ -677,7 +686,12 @@
         this.use.assertExpectedAccount(options.expectedUserId);
         this.syncStorage.assertAccountOwnership(queues.snapshot, options.expectedUserId);
       } catch (error) {
-        storageFailure(error, this.use);
+        // Fail-closed (S52, mirrors S50): never return stale queues after
+        // a post-write ownership change. The caller
+        // (`issueDurationOperation`) owns the
+        // `actions.duration.save-failed` Sentry event, so rethrow without
+        // an inner report.
+        rethrowOwnershipWithoutReport(error, this.use);
       }
       this.recordOperationHlc(operation);
       return {
