@@ -64,7 +64,7 @@ var readinessAssets = []readinessAsset{
 	{"app-state.js", "6f52ef4526b1d542863f0c7f8b60f94a32bc164448304f72af2249a006710b15", false},
 	{"app-storage.js", "5597510b1fb7d7e5b212c2bd7d01ec6d7e0a799529e23573dc9519edd1b4fd95", false},
 	{"app-actions.js", "173ee1625756be6f000cab6c9c5bc0b17fdd33369a56ad2a6ce22c991582196f", false},
-	{"app-sync.js", "dd4415cc4faf6b3e38bff2efbbe3dde5860993e05bb76c38d32ca4eecd09e807", false},
+	{"app-sync.js", "555ab4bccbbb872a560af3ef6ae3caf49155313691370b1bc79a61ba72814afb", false},
 	{"app-bootstrap.js", "08f17448ba35fe4bc1c74febe20d2d59e0d57da6e842bb2cb058354031a63e7b", false},
 	{"app-session.js", "c81d23363aead63afe6515b8e0bbf1df43d9bb01d47a77c018bbdcdef78a901f", false},
 	{"app-view.js", "a12da3c6788b7c363142b9987e4f9b1a9d3183d4364dfc20584003da9ea3062f", false},
