@@ -694,3 +694,19 @@ test("S54 completion audio resume failure warns and reports once", async (t) => 
   assert.equal(fixture.warnings.length, 1);
   assert.match(String(fixture.warnings[0][0]), /completion audio resume failed/);
 });
+
+test("S60 completion permission failure warns and reports once", async (t) => {
+  class DeniedPermissionNotification {
+    static permission = "default";
+    static async requestPermission() { throw new Error("permission denied"); }
+  }
+  const fixture = completionFixture({ Notification: DeniedPermissionNotification });
+  const reports = withSentryCapture(t);
+  await fixture.actions.primeCompletionAlerts();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][1], "actions.completion.permission-failed");
+  assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
+  assert.equal(fixture.warnings.length, 1);
+  assert.match(String(fixture.warnings[0][0]), /completion permission unavailable/);
+  assert.match(String(reports[0][0]?.message || reports[0][0]), /permission denied/);
+});

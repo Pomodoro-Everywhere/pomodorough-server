@@ -95,11 +95,8 @@ func parseCommand(deviceID string, input syncCommandJSON, now time.Time) (timer.
 	if _, valid := validTypes[input.Type]; !valid {
 		return timer.Command{}, fmt.Errorf("invalid command type")
 	}
-	if input.TaskID != "" && (!validID(input.TaskID) || (input.Type != "start" && input.Type != "retarget") || input.Phase != "focus") {
-		return timer.Command{}, fmt.Errorf("invalid task association")
-	}
-	if input.Type == "retarget" && (input.Phase != "focus" || (input.TaskID == "" && !input.TaskIDExplicitNull)) {
-		return timer.Command{}, fmt.Errorf("retarget requires explicit taskId or null and focus phase")
+	if err := validateCommandTaskAssociation(input); err != nil {
+		return timer.Command{}, err
 	}
 	if _, valid := validPhases[input.Phase]; !valid {
 		return timer.Command{}, fmt.Errorf("invalid command phase")
@@ -139,6 +136,24 @@ func parseCommand(deviceID string, input syncCommandJSON, now time.Time) (timer.
 		OccurredAt: occurredAt, HLCWallMs: *input.HLCWallMs, HLCCounter: *input.HLCCounter,
 		ObservedElapsedMs: *observedElapsedMs,
 	}, nil
+}
+
+// validateCommandTaskAssociation pins the wire task contract: task IDs only
+// on focus start/retarget, explicit null only for retarget unassign, and
+// retarget always carries an explicit task or null.
+func validateCommandTaskAssociation(input syncCommandJSON) error {
+	if input.TaskID != "" && (!validID(input.TaskID) || (input.Type != "start" && input.Type != "retarget") || input.Phase != "focus") {
+		return fmt.Errorf("invalid task association")
+	}
+	// S61: explicit null is significant only for retarget unassign.
+	// Other types must omit taskId (openapi TimerCommand.taskId).
+	if input.TaskIDExplicitNull && input.Type != "retarget" {
+		return fmt.Errorf("invalid task association")
+	}
+	if input.Type == "retarget" && (input.Phase != "focus" || (input.TaskID == "" && !input.TaskIDExplicitNull)) {
+		return fmt.Errorf("retarget requires explicit taskId or null and focus phase")
+	}
+	return nil
 }
 
 func parseTaskOperations(ctx context.Context, deviceID string, inputs []syncTaskOperationJSON, now time.Time) ([]task.Operation, error) {

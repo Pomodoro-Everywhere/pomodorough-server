@@ -602,8 +602,11 @@
       }
       const NotificationType = this.host.Notification;
       if (NotificationType?.permission === "default") {
-        try { await NotificationType.requestPermission(); } catch {
-          // Audio remains available when notification permission is unavailable.
+        try { await NotificationType.requestPermission(); } catch (error) {
+          // S60: denied-permission failures stay visible in diagnostics;
+          // audio + retry paths still alert.
+          this.host.console.warn("Pomodorough completion permission unavailable:", error);
+          reportFrontendError(error, "actions.completion.permission-failed");
         }
       }
       this.showCompletionNotification();

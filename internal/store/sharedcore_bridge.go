@@ -190,6 +190,27 @@ type coreTimerCommand struct {
 	ObservedElapsedMs int64   `json:"observedElapsedMs"`
 }
 
+// S62: explicit null is significant only for retarget unassign
+// (openapi TimerCommand.taskId). Other types omit an empty task so the
+// wire matches the spec; Core tolerates null but the contract must not
+// diverge.
+func (command coreTimerCommand) MarshalJSON() ([]byte, error) {
+	type wire coreTimerCommand
+	if command.Type == "retarget" || command.TaskID != nil {
+		return json.Marshal(wire(command))
+	}
+	encoded, err := json.Marshal(wire(command))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "taskId")
+	return json.Marshal(fields)
+}
+
 type coreTimerSession struct {
 	TimerID             string        `json:"timerId"`
 	TaskID              string        `json:"taskId,omitempty"`

@@ -209,6 +209,28 @@ func findSession(sessions []timer.Session, timerID string) *timer.Session {
 	return nil
 }
 
+// S63: malformed EndedAt must not collapse to zero time and silently
+// misorder. The sort falls back to deterministic raw order; validation
+// still rejects malformed timestamps fail-closed.
+func TestS63MalformedHistoryEndSortsDeterministically(t *testing.T) {
+	history := map[string]timer.HistoryItem{
+		"timer-aaa": {ID: "history-aaa", TimerID: "timer-aaa", EndedAt: "bad-a"},
+		"timer-zzz": {ID: "history-zzz", TimerID: "timer-zzz", EndedAt: "bad-b"},
+	}
+	_, items := orderedReplayProjection(map[string]coreTimerSession{}, history)
+	if len(items) != 2 || items[0].TimerID != "timer-zzz" || items[1].TimerID != "timer-aaa" {
+		t.Fatalf("malformed history order = %v, want raw-descending [timer-zzz timer-aaa]", items)
+	}
+	tied := map[string]timer.HistoryItem{
+		"timer-aaa": {ID: "history-aaa", TimerID: "timer-aaa", EndedAt: "bad-same"},
+		"timer-zzz": {ID: "history-zzz", TimerID: "timer-zzz", EndedAt: "bad-same"},
+	}
+	_, tiedItems := orderedReplayProjection(map[string]coreTimerSession{}, tied)
+	if len(tiedItems) != 2 || tiedItems[0].TimerID != "timer-aaa" || tiedItems[1].TimerID != "timer-zzz" {
+		t.Fatalf("tied malformed history order = %v, want TimerID [timer-aaa timer-zzz]", tiedItems)
+	}
+}
+
 func padIndex(i int) string {
 	const digits = "0123456789"
 	out := make([]byte, 4)

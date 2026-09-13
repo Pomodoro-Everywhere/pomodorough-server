@@ -63,7 +63,7 @@ var readinessAssets = []readinessAsset{
 	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
 	{"app-state.js", "6f52ef4526b1d542863f0c7f8b60f94a32bc164448304f72af2249a006710b15", false},
 	{"app-storage.js", "5597510b1fb7d7e5b212c2bd7d01ec6d7e0a799529e23573dc9519edd1b4fd95", false},
-	{"app-actions.js", "80355148543bf750acf88644dad7f22e578ec045fe94b2c4170acfbb4e55f625", false},
+	{"app-actions.js", "173ee1625756be6f000cab6c9c5bc0b17fdd33369a56ad2a6ce22c991582196f", false},
 	{"app-sync.js", "dd4415cc4faf6b3e38bff2efbbe3dde5860993e05bb76c38d32ca4eecd09e807", false},
 	{"app-bootstrap.js", "08f17448ba35fe4bc1c74febe20d2d59e0d57da6e842bb2cb058354031a63e7b", false},
 	{"app-session.js", "c81d23363aead63afe6515b8e0bbf1df43d9bb01d47a77c018bbdcdef78a901f", false},
@@ -72,7 +72,7 @@ var readinessAssets = []readinessAsset{
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
 	{"sw.js", "783e3d53a4e2079e3bc0c940d4e5f245dcae04af59bf7b329162f8284d203436", false},
-	{"openapi.yaml", "c014b69b5c0c18daefac9dfd97be92e2594d901fe0aa4e3d06c9f8c5c1f6224d", false},
+	{"openapi.yaml", "3703a7be7d28d03ba52397b48a522fb0844a5e803517a1eb0361c448a9aed523", false},
 }
 
 func readinessKeyDigest(secret []byte) [sha256.Size]byte {

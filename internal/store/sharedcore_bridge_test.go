@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -101,5 +103,54 @@ func TestSharedCoreReducersSatisfyCompatibilityFixtures(t *testing.T) {
 	gotSelected, gotSelectedWinner, err := reduceSelectedTaskWithSharedCore(ctx, selectedOps, gotTasks)
 	if err != nil || !reflect.DeepEqual(gotSelected, wantSelected) || gotSelectedWinner != wantSelectedWinner {
 		t.Fatalf("shared selected-task mismatch: err=%v got %#v/%q want %#v/%q", err, gotSelected, gotSelectedWinner, wantSelected, wantSelectedWinner)
+	}
+}
+
+// S62: explicit null is scoped to retarget unassign; other empty tasks
+// omit taskId so the wire matches the OpenAPI contract.
+func TestS62CoreTimerCommandsScopeExplicitNullToRetarget(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	commands := []timer.Command{
+		{ID: "s62-start", DeviceID: "device-a", DeviceSequence: 1,
+			TimerID: "timer-s62", Type: "start", Phase: "focus",
+			PlannedDurationMs: 1_500_000, OccurredAt: now, HLCWallMs: 1},
+		{ID: "s62-pause", DeviceID: "device-a", DeviceSequence: 2,
+			TimerID: "timer-s62", Type: "pause", Phase: "focus",
+			PlannedDurationMs: 1_500_000, OccurredAt: now, HLCWallMs: 2},
+		{ID: "s62-unassign", DeviceID: "device-a", DeviceSequence: 3,
+			TimerID: "timer-s62", Type: "retarget", Phase: "focus",
+			PlannedDurationMs: 1_500_000, OccurredAt: now, HLCWallMs: 3},
+		{ID: "s62-assign", DeviceID: "device-a", DeviceSequence: 4,
+			TimerID: "timer-s62", TaskID: "task-s62", Type: "retarget", Phase: "focus",
+			PlannedDurationMs: 1_500_000, OccurredAt: now, HLCWallMs: 4},
+	}
+	wire := coreTimerCommands(commands)
+	if len(wire) != len(commands) {
+		t.Fatalf("wire commands = %d, want %d", len(wire), len(commands))
+	}
+	for i, entry := range wire {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			t.Fatal(err)
+		}
+		raw, present := fields["taskId"]
+		switch commands[i].ID {
+		case "s62-start", "s62-pause":
+			if present {
+				t.Fatalf("%s taskId = %s, want omitted", commands[i].ID, raw)
+			}
+		case "s62-unassign":
+			if !present || !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				t.Fatalf("s62-unassign taskId = %s, want explicit null", raw)
+			}
+		case "s62-assign":
+			if !present || string(raw) != `"task-s62"` {
+				t.Fatalf("s62-assign taskId = %s, want task-s62", raw)
+			}
+		}
 	}
 }

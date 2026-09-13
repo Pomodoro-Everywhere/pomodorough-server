@@ -58,6 +58,27 @@ func TestS59NonRetargetStillRequiresLifecycle(t *testing.T) {
 	}
 }
 
+// S61: explicit null taskId is significant only for retarget unassign.
+func TestS61NonRetargetExplicitNullRejected(t *testing.T) {
+	now := time.Now().UTC()
+	for _, commandType := range []struct{ commandType, phase string }{
+		{"pause", "focus"}, {"clear", "focus"}, {"start", "short_break"},
+	} {
+		occurredAt, wallMs, counter := retargetTestClock(now)
+		_, err := parseCommand("device-a", syncCommandJSON{
+			ID: "command-s61", DeviceSequence: int64Pointer(1), TimerID: "timer-000001",
+			Type: commandType.commandType, Phase: commandType.phase, TaskIDExplicitNull: true,
+			PlannedDurationMs: int64Pointer(1_500_000),
+			OccurredAt:        occurredAt, HLCWallMs: wallMs, HLCCounter: counter,
+			ObservedElapsedMs: int64Pointer(0),
+		}, now)
+		if err == nil || !strings.Contains(err.Error(), "invalid task association") {
+			t.Fatalf("%s/%s with null taskId err = %v, want invalid task association",
+				commandType.commandType, commandType.phase, err)
+		}
+	}
+}
+
 // S58: null-vs-omitted wire distinction for retarget.
 func TestS58RetargetWireDistinguishesNullFromOmission(t *testing.T) {
 	var omitted syncCommandJSON
@@ -149,6 +170,43 @@ func TestS58S59OpenAPIRetargetContract(t *testing.T) {
 			if !strings.Contains(strings.ToLower(fieldDescription), want) {
 				t.Fatalf("TimerCommand %s description missing %q: %q", field, want, fieldDescription)
 			}
+		}
+	}
+}
+
+// S64: TimerCommand.required omits lifecycle for all types by intent.
+// Retarget accepts omission with deterministic server defaults; the parser
+// still rejects other types without them. Pinned via
+// x-required-except-retarget so spec/parser drift fails closed.
+func TestS64OpenAPILifecycleRequiredExceptRetarget(t *testing.T) {
+	document := loadOpenAPIDocument(t)
+	schemas := openAPIMap(t, openAPIMap(t, document, "components"), "schemas")
+	timerCommand := openAPIMap(t, schemas, "TimerCommand")
+	for _, field := range []string{"plannedDurationMs", "observedElapsedMs"} {
+		if openAPIRequired(timerCommand, field) {
+			t.Fatalf("TimerCommand required pins %q; lifecycle stays out for retarget omission", field)
+		}
+	}
+	conditional, ok := timerCommand["x-required-except-retarget"].([]any)
+	if !ok || len(conditional) != 2 || conditional[0] != "plannedDurationMs" || conditional[1] != "observedElapsedMs" {
+		t.Fatalf("x-required-except-retarget = %#v, want [plannedDurationMs observedElapsedMs]",
+			timerCommand["x-required-except-retarget"])
+	}
+	description, _ := timerCommand["description"].(string)
+	for _, want := range []string{"retarget", "reject", "required"} {
+		if !strings.Contains(strings.ToLower(description), want) {
+			t.Fatalf("TimerCommand description missing %q: %q", want, description)
+		}
+	}
+	properties := openAPIMap(t, timerCommand, "properties")
+	for _, field := range []string{"plannedDurationMs", "observedElapsedMs"} {
+		property, ok := properties[field].(map[string]any)
+		if !ok {
+			t.Fatalf("TimerCommand %s = %#v", field, properties[field])
+		}
+		fieldDescription, _ := property["description"].(string)
+		if !strings.Contains(strings.ToLower(fieldDescription), "retarget") {
+			t.Fatalf("TimerCommand %s description missing retarget omission: %q", field, fieldDescription)
 		}
 	}
 }

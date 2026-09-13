@@ -1101,6 +1101,15 @@ components:
         - occurredAt
         - hlcWallMs
         - hlcCounter
+      x-required-except-retarget:
+        - plannedDurationMs
+        - observedElapsedMs
+      description: |
+        Lifecycle fields `plannedDurationMs`/`observedElapsedMs` are required
+        for every command type except `retarget` (see
+        `x-required-except-retarget`). They stay out of `required` only because
+        `retarget` accepts omission with deterministic server defaults; the
+        parser still rejects other types without them.
       properties:
         id:
           $ref: "#/components/schemas/CommandID"

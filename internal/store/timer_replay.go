@@ -102,9 +102,16 @@ func orderedReplayProjection(sessions map[string]coreTimerSession, history map[s
 	slices.SortFunc(items, func(a, b timer.HistoryItem) int {
 		// Core emits normalized UTC timestamps. Compare instants, not strings
 		// with optional fractional seconds; output validation checks parse errors.
-		left, _ := time.Parse(time.RFC3339Nano, a.EndedAt)
-		right, _ := time.Parse(time.RFC3339Nano, b.EndedAt)
-		if order := right.Compare(left); order != 0 {
+		left, leftErr := time.Parse(time.RFC3339Nano, a.EndedAt)
+		right, rightErr := time.Parse(time.RFC3339Nano, b.EndedAt)
+		if leftErr == nil && rightErr == nil {
+			if order := right.Compare(left); order != 0 {
+				return order
+			}
+		} else if order := cmp.Compare(b.EndedAt, a.EndedAt); order != 0 {
+			// S63: malformed timestamps must not collapse to zero time and
+			// silently misorder. Fall back to deterministic raw order;
+			// validation still rejects them fail-closed.
 			return order
 		}
 		return cmp.Compare(a.TimerID, b.TimerID)
