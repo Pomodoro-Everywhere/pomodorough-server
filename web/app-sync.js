@@ -250,6 +250,10 @@
           return false;
         }
       } catch (error) {
+        if (error instanceof this.syncStorage.AccountOwnershipError) {
+          this.use.queueSessionRevalidation();
+          return false;
+        }
         this.state.retrying = true;
         this.use.renderSyncStatus();
         this.scheduleRetry();
@@ -261,6 +265,10 @@
         await this.refreshAllPendingOperations();
         context.assertCurrent();
       } catch (error) {
+        if (error instanceof this.syncStorage.AccountOwnershipError) {
+          this.use.queueSessionRevalidation();
+          return false;
+        }
         this.state.retrying = true;
         this.use.renderSyncStatus();
         this.scheduleRetry();

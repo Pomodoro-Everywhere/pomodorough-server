@@ -19,7 +19,9 @@ func (command *syncCommandJSON) UnmarshalJSON(payload []byte) error {
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return err
 	}
-	decoded.TaskIDExplicitNull = bytes.Equal(bytes.TrimSpace(fields["taskId"]), []byte("null"))
+	raw, present := fields["taskId"]
+	decoded.TaskIDPresent = present
+	decoded.TaskIDExplicitNull = present && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 	*command = syncCommandJSON(decoded)
 	return nil
 }

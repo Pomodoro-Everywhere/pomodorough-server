@@ -42,6 +42,7 @@ type syncCommandJSON struct {
 	TimerID            string `json:"timerId"`
 	TaskID             string `json:"taskId,omitempty"`
 	TaskIDExplicitNull bool   `json:"-"`
+	TaskIDPresent      bool   `json:"-"`
 	Type               string `json:"type"`
 	Phase              string `json:"phase"`
 	PlannedDurationMs  *int64 `json:"plannedDurationMs"`

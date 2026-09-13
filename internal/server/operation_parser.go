@@ -31,8 +31,11 @@ func (batch operationBatch) operationCount() int {
 }
 
 func (batch operationBatch) validCount() bool {
+	// S67: per-domain caps alone admit 5*maximum ops per envelope.
+	// Bound the cross-domain total to twice the per-domain maximum.
 	return operationCountsValid(len(batch.commands), len(batch.taskOperations), len(batch.durationOperations),
-		len(batch.autoStartOperations), len(batch.selectedTaskOperations), batch.maximum)
+		len(batch.autoStartOperations), len(batch.selectedTaskOperations), batch.maximum) &&
+		batch.operationCount() <= 2*batch.maximum
 }
 
 func operationCountsValid(commands, tasks, durations, autoStarts, selectedTasks, maximum int) bool {
@@ -142,6 +145,11 @@ func parseCommand(deviceID string, input syncCommandJSON, now time.Time) (timer.
 // on focus start/retarget, explicit null only for retarget unassign, and
 // retarget always carries an explicit task or null.
 func validateCommandTaskAssociation(input syncCommandJSON) error {
+	// S66: present-but-empty taskId is neither omission nor null.
+	// Reject for every type so "" never passes as omission.
+	if input.TaskIDPresent && input.TaskID == "" && !input.TaskIDExplicitNull {
+		return fmt.Errorf("invalid task association")
+	}
 	if input.TaskID != "" && (!validID(input.TaskID) || (input.Type != "start" && input.Type != "retarget") || input.Phase != "focus") {
 		return fmt.Errorf("invalid task association")
 	}

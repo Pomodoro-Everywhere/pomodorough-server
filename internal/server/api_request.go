@@ -45,8 +45,11 @@ func parseSyncRequest(w http.ResponseWriter, r *http.Request, now time.Time) (st
 func validSyncEnvelope(payload syncRequestJSON) bool {
 	return validID(payload.DeviceID) && payload.LastRevision != nil &&
 		*payload.LastRevision >= 0 && *payload.LastRevision <= store.MaxSafeRevision && payload.Commands != nil &&
-		operationCountsValid(len(payload.Commands), len(payload.TaskOperations), len(payload.DurationOperations),
-			len(payload.AutoStartOperations), len(payload.SelectedTaskOperations), 256)
+		operationBatch{
+			commands: payload.Commands, taskOperations: payload.TaskOperations,
+			durationOperations: payload.DurationOperations, autoStartOperations: payload.AutoStartOperations,
+			selectedTaskOperations: payload.SelectedTaskOperations, maximum: 256,
+		}.validCount()
 }
 
 func parseBootstrapResolutionRequest(w http.ResponseWriter, r *http.Request, now time.Time) (store.BootstrapResolutionRequest, error) {
