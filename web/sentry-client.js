@@ -132,10 +132,11 @@
   }
 
   // reportFrontendError forwards an already-warned frontend failure to error
-  // monitoring at warning level. Rate-safe (bounded per minute), PII-free
-  // (static operation tag plus scrubbed error name/message only, never raw
-  // URLs, emails, task content, or credentials), and a no-op when no usable
-  // DSN is configured or the SDK failed to load.
+  // monitoring at warning level. Rate-safe (bounded per minute) and PII-free
+  // by construction: the payload carries only the static operation tag plus
+  // the error name, never the error message (task content, URLs, emails,
+  // tokens, or credentials cannot survive a field that is never sent). It is
+  // a no-op when no usable DSN is configured or the SDK failed to load.
   function reportFrontendError(error, operation) {
     try {
       if (typeof operation !== "string" || !operation) return false;
@@ -145,9 +146,7 @@
       const scope = typeof globalThis === "undefined" ? null : globalThis;
       if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
       const name = (error && typeof error.name === "string" && error.name) || "Error";
-      const rawMessage = (error && typeof error.message === "string") ? error.message : String(error);
-      const scrubbed = scrubFrontendErrorMessage(rawMessage);
-      const wrapped = new Error(scrubbed ? `${operation}: ${scrubbed}` : operation);
+      const wrapped = new Error(operation);
       wrapped.name = String(name).slice(0, 100) || "Error";
       scope.Sentry.captureException(wrapped, {
         level: "warning",

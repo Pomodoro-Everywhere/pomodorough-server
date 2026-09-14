@@ -45,6 +45,50 @@ func TestInternalAPIErrorReportsOnePatternTaggedEvent(t *testing.T) {
 	assertEventHasNoPII(t, events[0], secrets)
 }
 
+// S69: raw store errors can carry task content and identity material.
+// Monitoring must keep only the static operation; this test fails if the
+// underlying message ever reaches the event payload again.
+func TestS69InternalErrorWithUserContentReportsNoUserContent(t *testing.T) {
+	transport := &sentry.MockTransport{}
+	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
+		t.Fatal(err)
+	}
+	defer sentry.CurrentHub().BindClient(nil)
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request, secrets := newPIIRequest()
+	userContent := []string{
+		"Write release notes",
+		"task-content-secret-321",
+		"https://example.com/sync?token=token-secret-xyz",
+	}
+	failure := errors.New("save task \"Write release notes\" failed: " +
+		"task-content-secret-321 for https://example.com/sync?token=token-secret-xyz")
+	response := httptest.NewRecorder()
+	server.internalAPIError(response, request, "sync account mutations", failure)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	sentry.Flush(2 * time.Second)
+	events := transport.Events()
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want exactly 1", len(events))
+	}
+	assertPatternTags(t, events[0])
+	assertEventHasNoPII(t, events[0], append(secrets, userContent...))
+	payload, err := json.Marshal(events[0].Exception)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range userContent {
+		if strings.Contains(string(payload), secret) {
+			t.Fatalf("exception payload contains user content %q", secret)
+		}
+	}
+	if !strings.Contains(string(payload), "sync account mutations") {
+		t.Fatalf("exception payload lost the static operation: %s", payload)
+	}
+}
+
 func newPIIRequest() (*http.Request, []string) {
 	body := `{"refreshToken":"body-secret-789","invite":"invite-secret-abc"}`
 	target := "https://pomodorough.egigoka.me/api/v1/sync" +

@@ -158,21 +158,47 @@ test("frontend errors reject missing operations and empty errors", (t) => {
   assert.equal(calls.length, 0);
 });
 
-test("frontend errors report warning-level PII-free events with the operation tag", (t) => {
+test("frontend errors report warning-level events with only the operation tag and error name", (t) => {
   const calls = withFrontendReporting(t);
   const error = new TypeError("Sync failed (503) at https://example.com/sync user@example.com");
   assert.equal(client.reportFrontendError(error, "sync.deferred"), true);
   assert.equal(calls.length, 1);
   const { error: reported, context } = calls[0];
   assert.equal(reported.name, "TypeError");
+  assert.equal(reported.message, "sync.deferred");
   assert.equal(context.level, "warning");
   assert.equal(context.tags["error.operation"], "sync.deferred");
-  assert.match(reported.message, /sync\.deferred: Sync failed \(503\)/);
-  assert.doesNotMatch(reported.message, /https:\/\/example\.com\/sync/);
-  assert.doesNotMatch(reported.message, /user@example\.com/);
-  assert.match(reported.message, /\[url\]/);
-  assert.match(reported.message, /\[email\]/);
-  assert.ok(reported.message.length <= "sync.deferred: ".length + client.FRONTEND_ERROR_MESSAGE_MAX);
+});
+
+test("S69 frontend reports never carry user content, only op tag plus error name", (t) => {
+  const calls = withFrontendReporting(t);
+  const secrets = [
+    "Write release notes",
+    "user@example.com",
+    "https://example.com/sync?token=token-secret-xyz",
+    "bearer-secret-123",
+    "sk-live-abcdef123456"
+  ];
+  const inputs = [
+    new Error(`task save failed: ${secrets.join(" ")}`),
+    new TypeError(secrets[0]),
+    secrets.join(" "),
+    { name: "CustomError", message: secrets.join(" ") },
+    { message: secrets.join(" ") }
+  ];
+  for (const input of inputs) {
+    assert.equal(client.reportFrontendError(input, "actions.task.save-failed"), true);
+  }
+  assert.equal(calls.length, inputs.length);
+  const payload = JSON.stringify(calls);
+  for (const secret of secrets) {
+    assert.ok(!payload.includes(secret), `reported payload leaks ${secret}`);
+  }
+  for (const { error: reported, context } of calls) {
+    assert.equal(reported.message, "actions.task.save-failed");
+    assert.equal(context.tags["error.operation"], "actions.task.save-failed");
+    assert.equal(context.level, "warning");
+  }
 });
 
 test("frontend errors are rate-safe within a minute window", (t) => {
@@ -341,10 +367,8 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
   const { error: reported, context } = calls[0];
   assert.equal(context.level, "warning");
   assert.equal(context.tags["error.operation"], "actions.task.save-failed");
-  assert.doesNotMatch(reported.message, /https:\/\/example\.com\/sync/);
-  assert.doesNotMatch(reported.message, /user@example\.com/);
-  assert.match(reported.message, /\[url\]/);
-  assert.match(reported.message, /\[email\]/);
+  assert.equal(reported.name, "Error");
+  assert.equal(reported.message, "actions.task.save-failed");
 });
 
 function finishTimerFixture(overrides = {}) {

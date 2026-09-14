@@ -23,6 +23,7 @@ func initErrorMonitoring(identity buildIdentity, dsn string, logger *slog.Logger
 		Dsn:         dsn,
 		Release:     errorMonitoringRelease(identity),
 		Environment: errorMonitoringEnvironment,
+		BeforeSend:  sentryBeforeSend,
 	}); err != nil {
 		logger.Warn("error monitoring disabled", "error", err)
 		return func() {}
@@ -34,6 +35,20 @@ func initErrorMonitoring(identity buildIdentity, dsn string, logger *slog.Logger
 
 func errorMonitoringRelease(identity buildIdentity) string {
 	return "pomodorough@" + identity.version
+}
+
+// sentryBeforeSend drops event material that can carry identity or
+// credential content. Capture sites tag only the route pattern and the
+// static operation; the SDK must not reattach raw requests, users, or
+// breadcrumbs on top of those tags.
+func sentryBeforeSend(event *sentry.Event, hint *sentry.EventHint) *sentry.Event {
+	if event == nil {
+		return nil
+	}
+	event.Request = nil
+	event.User = sentry.User{}
+	event.Breadcrumbs = nil
+	return event
 }
 
 // captureMainPanic reports a panic escaping main to monitoring, then
