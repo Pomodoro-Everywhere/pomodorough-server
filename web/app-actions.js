@@ -56,7 +56,7 @@
     requires: [
       "controlsBlocked", "persistDurationOperation", "persistAutoStartOperation",
       "persistSelectedTaskOperation", "persistTaskOperation", "persistCommand",
-      "persistRetargetState", "reapplyRetargetToPending", "database",
+      "persistRetargetOperation", "database",
       "settingsValue", "rebuildOptimisticState", "sharedTaskIdentity", "clone", "trustedNow",
       "elapsedFor", "tr", "phaseLabel", "phaseConfig", "tabId", "render", "renderDurations",
       "renderTaskSelector", "renderTimer", "renderSyncStatus", "showNotice", "scheduleSync",
@@ -221,37 +221,16 @@
       }
     }
 
-    retargetRunningFocusTimer(taskId) {
-      const timer = this.state.timer;
-      if (!timer?.id || !["running", "paused"].includes(timer.status) || timer.phase !== "focus") return false;
-      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) return false;
-      // Intentional local-only divergence (Apple parity): the single task
-      // selector applies to the running focus timer at once, even post-ack.
-      // The canonical timer taskId in core is unchanged, so other devices
-      // keep the old task until a new Start converges them. Only this local
-      // selected-task path writes markers; peer syncs never do, so they
-      // cannot hijack the active timer. Markers die with their timer (see
-      // applyTaskRetarget) and never reach the wire: only the rewritten
-      // pre-ack start command syncs, keeping its command identity.
-      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
-        this.state.retargetedTaskByTimerId = {};
-      }
-      this.state.retargetedTaskByTimerId[timer.id] = taskId;
-      this.use.reapplyRetargetToPending();
-      return true;
-    }
-
-    async saveRetargetState() {
-      // Best-effort durability for the marker and rewritten starts. A failure
-      // never fails the selection: the in-memory retarget still applies and
-      // the persisted selected-task operation still converges next-task
-      // state. The next retarget retries the write. Single-report contract
-      // (S50): persistRetargetState rethrows without reporting, so this is
-      // the only Sentry event for the failure.
+    async issueRetargetOperation(timerId, taskId) {
       try {
-        await this.use.persistRetargetState();
+        const command = await this.use.persistRetargetOperation(timerId, taskId);
+        this.state.pending.push(command);
+        this.state.projectionPending = null;
+        return true;
       } catch (error) {
-        reportFrontendError(error, "actions.retarget.persist-failed");
+        if (error?.name === "AccountOwnershipError") throw error;
+        reportFrontendError(error, "actions.retarget.save-failed");
+        return false;
       }
     }
 
@@ -262,11 +241,17 @@
         this.use.renderTaskSelector();
         return false;
       }
+      const timerId = this.state.timer?.id || null;
+      const retargetable = Boolean(timerId
+        && ["running", "paused"].includes(this.state.timer?.status)
+        && this.state.timer?.phase === "focus"
+        && (taskId === null || this.state.tasks.some((task) => task.id === taskId)
+          || this.state.pendingTaskOperations.some((operation) => operation.taskId === taskId)));
       this.state.actionLocked = true;
       try {
         const operation = await this.use.persistSelectedTaskOperation(taskId, expectedUserId);
         this.state.pendingSelectedTaskOperations.push(operation);
-        if (this.retargetRunningFocusTimer(taskId)) await this.saveRetargetState();
+        if (retargetable) await this.issueRetargetOperation(timerId, taskId);
         this.use.rebuildOptimisticState();
         this.use.renderTaskSelector();
         this.use.renderSyncStatus();

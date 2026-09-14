@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"iter"
 	"time"
 
 	"pomodorough/internal/task"
@@ -700,45 +701,50 @@ func sameProjectedTime(left, right time.Time) bool {
 	return left.UnixMilli() == right.UnixMilli()
 }
 
-func hlcObservations(reduction accountReduction, request *SyncRequest) []coreHLC {
-	observed := make([]coreHLC, 0)
-	for _, command := range reduction.commands {
-		observed = append(observed, coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter})
-	}
-	for _, operation := range reduction.taskOperations {
-		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-	}
-	for _, operation := range reduction.durationOperations {
-		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-	}
-	for _, operation := range reduction.autoStartOperations {
-		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-	}
-	for _, operation := range reduction.selectedTaskOperations {
-		observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-	}
-	if request != nil {
-		for _, command := range request.Commands {
-			observed = append(observed, coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter})
+func hlcObservations(reduction accountReduction, request *SyncRequest) iter.Seq[coreHLC] {
+	return func(yield func(coreHLC) bool) {
+		if !yieldReductionClocks(reduction, yield) {
+			return
 		}
-		for _, operation := range request.TaskOperations {
-			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-		}
-		for _, operation := range request.DurationOperations {
-			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-		}
-		for _, operation := range request.AutoStartOperations {
-			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
-		}
-		for _, operation := range request.SelectedTaskOperations {
-			observed = append(observed, coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter})
+		if request != nil {
+			yieldReductionClocks(accountReduction{commands: request.Commands, taskOperations: request.TaskOperations,
+				durationOperations: request.DurationOperations, autoStartOperations: request.AutoStartOperations,
+				selectedTaskOperations: request.SelectedTaskOperations}, yield)
 		}
 	}
-	return observed
+}
+
+func yieldReductionClocks(source accountReduction, yield func(coreHLC) bool) bool {
+	for _, command := range source.commands {
+		if !yield(coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter}) {
+			return false
+		}
+	}
+	for _, operation := range source.taskOperations {
+		if !yield(coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter}) {
+			return false
+		}
+	}
+	for _, operation := range source.durationOperations {
+		if !yield(coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter}) {
+			return false
+		}
+	}
+	for _, operation := range source.autoStartOperations {
+		if !yield(coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter}) {
+			return false
+		}
+	}
+	for _, operation := range source.selectedTaskOperations {
+		if !yield(coreHLC{WallMs: operation.HLCWallMs, Counter: operation.HLCCounter}) {
+			return false
+		}
+	}
+	return true
 }
 
 func serverHLCFromReductionWithCore(ctx context.Context, call coreJSONCall, reduction accountReduction, now time.Time, request *SyncRequest) (coreHLC, error) {
-	return hlcHeadWithCore(ctx, call, now.UnixMilli(), hlcObservations(reduction, request))
+	return hlcHeadSequenceWithCore(ctx, call, now.UnixMilli(), hlcObservations(reduction, request))
 }
 
 func resultFromReduction(ctx context.Context, reduction accountReduction, revision int64, now time.Time, request *SyncRequest) (SyncResult, error) {

@@ -27,6 +27,10 @@
   const TIMER_OWNER_KEY = "timerOwner";
   const CLOCK_OFFSET_KEY = "clockOffset";
   const CLOCK_REQUEST_SEQUENCE_KEY = "clockRequestSequence";
+  const DELIVERY_PROOF_KEY = "deliveryProof";
+  const OUTGOING_KEY = "outgoingSync";
+  const CANONICAL_HEAD_KEY = "canonicalHead";
+  const PROJECTION_PENDING_KEY = "projectionPending";
   const UUID7_KEY = "uuidV7";
   const UUID7_MAX_TIMESTAMP_MS = uuidModule.MAX_TIMESTAMP_MS;
   const UUID7_RANDOM_MAX = uuidModule.RANDOM_MAX;
@@ -323,8 +327,10 @@
       "pendingTaskOperations", "pendingTimerDependencies", "promotedTimerOperationIds", "revision",
       "selectedTaskId", "tasks", "timer"
     ];
+    const actualKeys = Object.keys(value || {}).sort();
+    const baseKeys = actualKeys.filter((key) => key !== "projectionPending");
     if (!plainObject(value)
-      || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys.sort())
+      || JSON.stringify(baseKeys) !== JSON.stringify([...expectedKeys].sort())
       || !Number.isSafeInteger(value.revision) || value.revision < 0
       || !Array.isArray(value.pending) || !Array.isArray(value.pendingTaskOperations)
       || !Array.isArray(value.pendingDurationOperations) || !Array.isArray(value.pendingAutoStartOperations)
@@ -338,7 +344,86 @@
     }
     validateCanonicalTimer(value.baseTimer);
     validateCanonicalTimer(value.timer);
+    if (value.projectionPending !== undefined) validateProjectionPending(value.projectionPending);
     return value;
+  }
+
+  function validateProjectionPending(pending) {
+    if (!plainObject(pending)) throw new Error("Shared core returned an invalid projectionPending.");
+    const queues = projectionPendingQueues(pending);
+    for (const items of Object.values(queues)) {
+      if (!Array.isArray(items)) throw new Error("Shared core returned an invalid projectionPending.");
+    }
+  }
+
+  function projectionPendingQueues(pending) {
+    return {
+      commands: pending.commands || [],
+      taskOperations: pending.taskOperations || [],
+      durationOperations: pending.durationOperations || [],
+      autoStartOperations: pending.autoStartOperations || [],
+      selectedTaskOperations: pending.selectedTaskOperations || []
+    };
+  }
+
+  function emptyDeliveryProof() {
+    return {
+      commands: [], taskOperations: [], durationOperations: [],
+      autoStartOperations: [], selectedTaskOperations: []
+    };
+  }
+
+  function sanitizeDeliveryProof(proof) {
+    const clean = emptyDeliveryProof();
+    if (!plainObject(proof)) return clean;
+    for (const queue of Object.keys(clean)) {
+      if (!Array.isArray(proof[queue])) continue;
+      clean[queue] = [...new Set(proof[queue].filter((id) => typeof id === "string" && id))];
+    }
+    return clean;
+  }
+
+  function addProofId(proof, queue, id) {
+    const clean = sanitizeDeliveryProof(proof);
+    if (typeof id === "string" && id && !clean[queue].includes(id)) clean[queue].push(id);
+    return clean;
+  }
+
+  function removeProofIds(proof, sent) {
+    const clean = sanitizeDeliveryProof(proof);
+    const drop = (queue, items) => {
+      const ids = new Set((items || []).map((item) => item.id));
+      clean[queue] = clean[queue].filter((id) => !ids.has(id));
+    };
+    drop("commands", sent?.commands);
+    drop("taskOperations", sent?.taskOperations);
+    drop("durationOperations", sent?.durationOperations);
+    drop("autoStartOperations", sent?.autoStartOperations);
+    drop("selectedTaskOperations", sent?.selectedTaskOperations);
+    return clean;
+  }
+
+  function neverSentFromProof(proof, local, sent) {
+    const clean = sanitizeDeliveryProof(proof);
+    const sentIds = {
+      commands: new Set((sent?.commands || []).map((item) => item.id)),
+      taskOperations: new Set((sent?.taskOperations || []).map((item) => item.id)),
+      durationOperations: new Set((sent?.durationOperations || []).map((item) => item.id)),
+      autoStartOperations: new Set((sent?.autoStartOperations || []).map((item) => item.id)),
+      selectedTaskOperations: new Set((sent?.selectedTaskOperations || []).map((item) => item.id))
+    };
+    const localIds = {
+      commands: new Set((local?.commands || []).map((item) => item.id)),
+      taskOperations: new Set((local?.taskOperations || []).map((item) => item.id)),
+      durationOperations: new Set((local?.durationOperations || []).map((item) => item.id)),
+      autoStartOperations: new Set((local?.autoStartOperations || []).map((item) => item.id)),
+      selectedTaskOperations: new Set((local?.selectedTaskOperations || []).map((item) => item.id))
+    };
+    const result = emptyDeliveryProof();
+    for (const queue of Object.keys(result)) {
+      result[queue] = clean[queue].filter((id) => localIds[queue].has(id) && !sentIds[queue].has(id));
+    }
+    return result;
   }
 
   function reconciledQueues(value) {
@@ -407,23 +492,80 @@
     });
   }
 
+  function cloneOutgoing(sent) {
+    return JSON.parse(JSON.stringify({
+      commands: sent?.commands || [], taskOperations: sent?.taskOperations || [],
+      durationOperations: sent?.durationOperations || [],
+      autoStartOperations: sent?.autoStartOperations || [],
+      selectedTaskOperations: sent?.selectedTaskOperations || []
+    }));
+  }
+
+  function outgoingMatchesStored(outgoing, sent) {
+    if (!outgoing?.sent) return true;
+    const sameItems = (previous, current) => {
+      const rebuilt = new Map((current || []).map((item) => [item.id, item]));
+      for (const item of previous || []) {
+        if (JSON.stringify(rebuilt.get(item.id)) !== JSON.stringify(item)) return false;
+      }
+      return true;
+    };
+    return sameItems(outgoing.sent.commands, sent?.commands)
+      && sameItems(outgoing.sent.taskOperations, sent?.taskOperations)
+      && sameItems(outgoing.sent.durationOperations, sent?.durationOperations)
+      && sameItems(outgoing.sent.autoStartOperations, sent?.autoStartOperations)
+      && sameItems(outgoing.sent.selectedTaskOperations, sent?.selectedTaskOperations);
+  }
+
+  function sanitizeCanonicalHead(head) {
+    if (!plainObject(head)) return null;
+    const wallMs = Number(head.wallMs);
+    const counter = Number(head.counter);
+    if (!Number.isSafeInteger(wallMs) || wallMs <= 0) return null;
+    if (!Number.isSafeInteger(counter) || counter < 0) return null;
+    return { wallMs, counter };
+  }
+
+  function sanitizeProjectionPending(value) {
+    if (!plainObject(value)) return null;
+    try {
+      validateProjectionPending(value);
+      return projectionPendingQueues(value);
+    } catch {
+      return null;
+    }
+  }
+
   function reconcileState(input) {
     const dispatcher = sharedCoreAdapter(
       input,
       "reconcileSynchronizedState",
       "Shared core is unavailable for synchronized reconciliation."
     );
+    const local = projectionQueues(input.queues, input.deviceId);
+    const sent = input.sent || {};
+    const neverSent = input.neverSent || neverSentFromProof(input.deliveryProof, local, sent);
     const value = validateReconciliationOutput(dispatcher.reconcileSynchronizedState({
-      local: projectionQueues(input.queues, input.deviceId),
-      sent: input.sent || {},
+      local,
+      sent,
       response: input.response,
-      timerDependencies: input.timerDependencies || timerDependencies(input.queues?.commands || [])
+      timerDependencies: input.timerDependencies || timerDependencies(input.queues?.commands || []),
+      neverSent
     }));
     const queues = reconciledQueues(value);
-    const projection = reconciliationProjection(value, queues, input, dispatcher);
+    const safeQueues = value.projectionPending ? projectionPendingQueues(value.projectionPending) : queues;
+    const projection = reconciliationProjection(value, safeQueues, input, dispatcher);
     assertReconciliationProjection(value, projection);
     queues.commands = restoreTimerDependencies(value.pending, value.pendingTimerDependencies);
-    return { ...value, queues, projection };
+    const projectionPending = value.projectionPending
+      ? { ...projectionPendingQueues(value.projectionPending) }
+      : { ...queues, commands: [...queues.commands] };
+    if (value.projectionPending) {
+      projectionPending.commands = restoreTimerDependencies(
+        value.projectionPending.commands || [], value.pendingTimerDependencies
+      );
+    }
+    return { ...value, queues, projection, projectionPending, neverSent };
   }
 
   const RESOLUTION_ACKNOWLEDGEMENTS = Object.freeze([
@@ -461,6 +603,8 @@
       response: shaped.response,
       deviceId: shaped.deviceId,
       timerDependencies: timerDependencies(shaped.queues?.commands || []),
+      neverSent: shaped.neverSent,
+      deliveryProof: shaped.deliveryProof,
       sharedCore: shaped.sharedCore
     });
   }
@@ -476,6 +620,8 @@
       sent: pending.payload,
       response: input.response,
       deviceId: input.deviceId,
+      neverSent: input.neverSent,
+      deliveryProof: input.deliveryProof,
       sharedCore: input.sharedCore
     });
   }
@@ -810,6 +956,7 @@
       gate: metaStore.get(GATE_KEY),
       resolution: metaStore.get(RESOLUTION_KEY),
       projectionSnapshot: metaStore.get("snapshot"),
+      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
       hlc: metaStore.get("hlc")
     };
     if (input.withDeviceSequence) requests.deviceSequence = metaStore.get("deviceSequence");
@@ -892,10 +1039,14 @@
     for (const operation of superseded) transaction.objectStore(input.storeName).delete(operation.id);
   }
 
-  function persistAllocatedMutation(transaction, metaStore, input, allocated, clock) {
+  function persistAllocatedMutation(transaction, metaStore, input, allocated, clock, proof) {
     transaction.objectStore(input.storeName).add(allocated);
     if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: clock.id });
     metaStore.put({ key: "hlc", value: { wallMs: clock.wallMs, counter: clock.counter } });
+    const queue = PROJECTION_QUEUE_FIELDS[input.storeName];
+    if (queue && allocated?.id) {
+      metaStore.put({ key: DELIVERY_PROOF_KEY, value: addProofId(proof, queue, allocated.id) });
+    }
     if (input.withDeviceSequence) {
       metaStore.put({ key: "deviceSequence", value: clock.deviceSequence });
     }
@@ -926,7 +1077,8 @@
           if (requiresProjection) {
             validateAllocatedMutation(transaction, input, results, allocated, clock.wallMs);
           }
-          persistAllocatedMutation(transaction, metaStore, input, allocated, clock);
+          const proof = results.deliveryProof?.value || null;
+          persistAllocatedMutation(transaction, metaStore, input, allocated, clock, proof);
         } catch (error) {
           failure = error;
           transaction.abort();
@@ -999,7 +1151,8 @@
       return {
         queues: input.retainedQueues,
         droppedCommandIds: input.dropCommandIds || [],
-        droppedTimerIds: input.dropTimerIds || []
+        droppedTimerIds: input.dropTimerIds || [],
+        projectionPending: null
       };
     }
     const storedQueues = {
@@ -1009,17 +1162,26 @@
       autoStartOperations: results.autoStartOperations || [],
       selectedTaskOperations: results.selectedTaskOperations || []
     };
+    const proof = results.deliveryProof?.value || input.deliveryProof || null;
     const rebased = discardedQueueIds
       ? reconcileResolution({
         queues: storedQueues,
         queueIds: discardedQueueIds,
+        deliveryProof: proof,
+        neverSent: input.neverSent,
         ...input.reconciliation
       })
-      : reconcileState({ queues: storedQueues, ...input.reconciliation });
+      : reconcileState({
+        queues: storedQueues,
+        deliveryProof: proof,
+        neverSent: input.neverSent,
+        ...input.reconciliation
+      });
     return {
       queues: rebased.queues,
       droppedCommandIds: rebased.droppedTimerOperationIds,
-      droppedTimerIds: rebased.droppedTimerIds
+      droppedTimerIds: rebased.droppedTimerIds,
+      projectionPending: rebased.projectionPending || null
     };
   }
 
@@ -1042,6 +1204,7 @@
       resolution: metaStore.get(RESOLUTION_KEY),
       snapshot: metaStore.get("snapshot"),
       deviceSequence: metaStore.get("deviceSequence"),
+      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
       hlc: metaStore.get("hlc")
     };
     if (includeOwner) requests.timerOwner = metaStore.get(TIMER_OWNER_KEY);
@@ -1137,7 +1300,7 @@
     return { ...position, commandIds, persisted };
   }
 
-  function persistCancelledTimer(metaStore, pendingStore, input, batch) {
+  function persistCancelledTimer(metaStore, pendingStore, input, batch, proof) {
     for (const command of batch.persisted) pendingStore.add(command);
     if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: batch.commandIds.at(-1) });
     metaStore.delete(TIMER_OWNER_KEY);
@@ -1146,6 +1309,11 @@
       key: "hlc",
       value: { wallMs: batch.wallMs, counter: batch.firstCounter + batch.persisted.length - 1 }
     });
+    let nextProof = sanitizeDeliveryProof(proof);
+    for (const command of batch.persisted) {
+      nextProof = addProofId(nextProof, "commands", command.id);
+    }
+    metaStore.put({ key: DELIVERY_PROOF_KEY, value: nextProof });
   }
 
   function applyCancelAndClearTimer(transaction, input, results) {
@@ -1162,7 +1330,8 @@
       transaction.objectStore(META_STORE),
       transaction.objectStore(PENDING_STORE),
       input,
-      batch
+      batch,
+      results.deliveryProof?.value || null
     );
     return { transitioned: true, reason: "", commands: batch.persisted };
   }
@@ -1333,7 +1502,7 @@
     };
   }
 
-  function persistFinishedTimer(metaStore, pendingStore, input, batch, ownership, settings) {
+  function persistFinishedTimer(metaStore, pendingStore, input, batch, ownership, settings, proof) {
     for (const command of batch.persisted) pendingStore.add(command);
     if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: batch.commandIds.at(-1) });
     if (batch.persisted.length === 2 && ownership.ownerGranted) {
@@ -1350,6 +1519,11 @@
     } else if (ownership.ownerGranted) metaStore.delete(TIMER_OWNER_KEY);
     metaStore.put({ key: "deviceSequence", value: batch.highestSequence + batch.persisted.length });
     metaStore.put({ key: "hlc", value: { wallMs: batch.wallMs, counter: batch.counter } });
+    let nextProof = sanitizeDeliveryProof(proof);
+    for (const command of batch.persisted) {
+      nextProof = addProofId(nextProof, "commands", command.id);
+    }
+    metaStore.put({ key: DELIVERY_PROOF_KEY, value: nextProof });
     if (input.settings) {
       metaStore.put({ key: "settings", value: { ...settings, selectedPhase: batch.selectedPhase } });
     }
@@ -1390,7 +1564,8 @@
       input,
       batch,
       ownership,
-      results.settings?.value || {}
+      results.settings?.value || {},
+      results.deliveryProof?.value || null
     );
     return {
       transitioned: true, reason: "", commands: batch.persisted, selectedPhase: batch.selectedPhase,
@@ -1639,6 +1814,7 @@
       settings: metaStore.get("settings"),
       clockOffset: metaStore.get(CLOCK_OFFSET_KEY),
       timerOwner: metaStore.get(TIMER_OWNER_KEY),
+      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
       taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
       durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
@@ -1737,6 +1913,9 @@
       : canonical.serverHlc || canonical.hlc;
     const hlc = laterHlc(results.hlc?.value, responseHlc);
     metaStore.put({ key: "hlc", value: hlc });
+    if (sanitizeCanonicalHead(canonical.serverHlc)) {
+      metaStore.put({ key: CANONICAL_HEAD_KEY, value: sanitizeCanonicalHead(canonical.serverHlc) });
+    }
     return { hlc, clockOffset };
   }
 
@@ -1774,6 +1953,11 @@
     applyResolutionQueues(transaction, queueIds, canonical, rebased);
     completeResolutionLegacyMigrations(metaStore, results.settings, pending);
     const { hlc, clockOffset } = applyResolutionMetadata(metaStore, results, canonical);
+    if (rebased.projectionPending) {
+      metaStore.put({ key: PROJECTION_PENDING_KEY, value: rebased.projectionPending });
+    } else {
+      metaStore.delete(PROJECTION_PENDING_KEY);
+    }
     applyResolutionTimerOwner(metaStore, results, canonical, queueIds, rebased);
     metaStore.delete(RESOLUTION_KEY);
     metaStore.delete(GATE_KEY);
@@ -1811,6 +1995,10 @@
       gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
       snapshot: metaStore.get("snapshot"), hlc: metaStore.get("hlc"),
       clockOffset: metaStore.get(CLOCK_OFFSET_KEY), timerOwner: metaStore.get(TIMER_OWNER_KEY),
+      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
+      outgoing: metaStore.get(OUTGOING_KEY),
+      canonicalHead: metaStore.get(CANONICAL_HEAD_KEY),
+      projectionPending: metaStore.get(PROJECTION_PENDING_KEY),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
       taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
       durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
@@ -1864,8 +2052,10 @@
       ? input.hlc
       : input.serverHlc || input.hlc;
     const hlc = laterHlc(results.hlc?.value, responseHlc);
+    const canonicalHead = sanitizeCanonicalHead(input.serverHlc)
+      || sanitizeCanonicalHead(results.canonicalHead?.value) || null;
     return {
-      kind: "apply", rebased, clockOffset, hlc,
+      kind: "apply", rebased, clockOffset, hlc, canonicalHead,
       owner: plannedTimerOwner(input, results, rebased),
       outcome: { applied: true, stale: false, snapshot: input.snapshot, hlc, clockOffset }
     };
@@ -1898,10 +2088,47 @@
     persistReconciledQueue(transaction.objectStore(SELECTED_TASK_PENDING_STORE),
       input.queueIds.selectedTaskOperations, plan.rebased.queues?.selectedTaskOperations);
     metaStore.put({ key: "snapshot", value: input.snapshot });
+    if (plan.canonicalHead) metaStore.put({ key: CANONICAL_HEAD_KEY, value: plan.canonicalHead });
+    if (plan.rebased.projectionPending) {
+      metaStore.put({ key: PROJECTION_PENDING_KEY, value: plan.rebased.projectionPending });
+    } else {
+      metaStore.delete(PROJECTION_PENDING_KEY);
+    }
+    metaStore.delete(OUTGOING_KEY);
     if (input.settings) metaStore.put({ key: "settings", value: input.settings });
     if (plan.owner.remove) metaStore.delete(TIMER_OWNER_KEY);
     else if (plan.owner.value) metaStore.put({ key: TIMER_OWNER_KEY, value: plan.owner.value });
     metaStore.put({ key: "hlc", value: plan.hlc });
+  }
+
+  function retireProofAndPersistOutgoing(database, sent) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction([META_STORE], "readwrite");
+      const metaStore = transaction.objectStore(META_STORE);
+      const requests = {
+        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
+        snapshot: metaStore.get("snapshot"), proof: metaStore.get(DELIVERY_PROOF_KEY)
+      };
+      const results = {};
+      let outcome = null;
+      let failure = null;
+      collectTransactionRequests(requests, results, () => {
+        if (results.gate || results.resolution) throw new BootstrapGateError();
+        const proof = sanitizeDeliveryProof(results.proof?.value);
+        const retired = removeProofIds(proof, sent);
+        metaStore.put({ key: DELIVERY_PROOF_KEY, value: retired });
+        metaStore.put({ key: OUTGOING_KEY, value: { sent: cloneOutgoing(sent), retiredAt: new Date().toISOString() } });
+        outcome = { proof: retired };
+      }, (error) => { failure = error; transaction.abort(); });
+      transaction.oncomplete = () => resolve(outcome);
+      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
+      transaction.onerror = () => {};
+    });
+  }
+
+  function readDeliveryProof(database) {
+    return accountMetadataMutation(database, {}, [DELIVERY_PROOF_KEY], (store, results) =>
+      sanitizeDeliveryProof(results[DELIVERY_PROOF_KEY]?.value));
   }
 
   function applySyncResponseCoordinator(database, input) {
@@ -1968,7 +2195,7 @@
       "readonly"
     );
     const metaStore = transaction.objectStore(META_STORE);
-    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations] = await Promise.all([
+    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations, proof, outgoing, head, projectionPending] = await Promise.all([
       requestResult(metaStore.get("snapshot")),
       requestResult(metaStore.get("hlc")),
       requestResult(metaStore.get(CLOCK_OFFSET_KEY)),
@@ -1976,7 +2203,11 @@
       requestResult(transaction.objectStore(TASK_PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
       requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll()),
-      requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll())
+      requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()),
+      requestResult(metaStore.get(DELIVERY_PROOF_KEY)),
+      requestResult(metaStore.get(OUTGOING_KEY)),
+      requestResult(metaStore.get(CANONICAL_HEAD_KEY)),
+      requestResult(metaStore.get(PROJECTION_PENDING_KEY))
     ]);
     return {
       snapshot: snapshot?.value || null,
@@ -1986,7 +2217,11 @@
       taskOperations,
       durationOperations,
       autoStartOperations,
-      selectedTaskOperations
+      selectedTaskOperations,
+      deliveryProof: sanitizeDeliveryProof(proof?.value),
+      outgoing: outgoing?.value || null,
+      canonicalHead: sanitizeCanonicalHead(head?.value),
+      projectionPending: sanitizeProjectionPending(projectionPending?.value)
     };
   }
 
@@ -2164,6 +2399,19 @@
     reserveUuid7,
     uuid7FromParts,
     uuid7Parts,
-    validatePendingForSend
+    validatePendingForSend,
+    retireProofAndPersistOutgoing,
+    readDeliveryProof,
+    sanitizeDeliveryProof,
+    emptyDeliveryProof,
+    neverSentFromProof,
+    sanitizeCanonicalHead,
+    sanitizeProjectionPending,
+    cloneOutgoing,
+    outgoingMatchesStored,
+    DELIVERY_PROOF_KEY,
+    OUTGOING_KEY,
+    CANONICAL_HEAD_KEY,
+    PROJECTION_PENDING_KEY
   });
 });

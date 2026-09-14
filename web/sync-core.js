@@ -271,8 +271,49 @@
       hlcCounter: command.hlcCounter,
       observedElapsedMs: command.observedElapsedMs
     };
+    if (command.type === "retarget") {
+      result.taskId = command.taskId === null ? null : command.taskId;
+      return result;
+    }
     if (command.taskId) result.taskId = command.taskId;
     return result;
+  }
+
+  function validRetargetTaskId(taskId) {
+    return taskId === null || typeof taskId === "string" && taskId.length > 0;
+  }
+
+  function retargetRequestFields(taskId) {
+    if (!validRetargetTaskId(taskId)) throw new Error("Retarget requires an explicit taskId or null.");
+    return taskId === null ? { taskId: null } : { taskId };
+  }
+
+  function emptyNeverSent() {
+    return {
+      commands: [], taskOperations: [], durationOperations: [],
+      autoStartOperations: [], selectedTaskOperations: []
+    };
+  }
+
+  function neverSentForQueues(proof, local, sent) {
+    const sentIds = {
+      commands: new Set((sent?.commands || []).map((item) => item.id)),
+      taskOperations: new Set((sent?.taskOperations || []).map((item) => item.id)),
+      durationOperations: new Set((sent?.durationOperations || []).map((item) => item.id)),
+      autoStartOperations: new Set((sent?.autoStartOperations || []).map((item) => item.id)),
+      selectedTaskOperations: new Set((sent?.selectedTaskOperations || []).map((item) => item.id))
+    };
+    const pick = (queue, items) => {
+      const localIds = new Set((items || []).map((item) => item.id));
+      return [...(proof?.[queue] || [])].filter((id) => localIds.has(id) && !sentIds[queue].has(id));
+    };
+    return {
+      commands: pick("commands", local?.commands),
+      taskOperations: pick("taskOperations", local?.taskOperations),
+      durationOperations: pick("durationOperations", local?.durationOperations),
+      autoStartOperations: pick("autoStartOperations", local?.autoStartOperations),
+      selectedTaskOperations: pick("selectedTaskOperations", local?.selectedTaskOperations)
+    };
   }
 
   function sendableTimerCommands(commands, limit) {
@@ -628,6 +669,10 @@
     sendableTimerCommands,
     selectedTaskRequestOperation,
     timerRequestCommand,
+    validRetargetTaskId,
+    retargetRequestFields,
+    emptyNeverSent,
+    neverSentForQueues,
     trustedNow,
     validClockSample,
     validDateTime,

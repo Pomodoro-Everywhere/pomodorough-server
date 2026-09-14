@@ -207,7 +207,8 @@
           autoStartOperations: local.pendingAutoStartOperations,
           selectedTaskOperations: local.pendingSelectedTaskOperations
         },
-        pendingResolution: pending, response: payload, deviceId: pending.payload.deviceId
+        pendingResolution: pending, response: payload, deviceId: pending.payload.deviceId,
+        deliveryProof: local.deliveryProof || null
       });
       const revision = Number(applied.revision);
       if (!Number.isFinite(revision) || revision < 0) throw new Error(this.use.tr(

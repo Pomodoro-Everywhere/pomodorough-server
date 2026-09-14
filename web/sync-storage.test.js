@@ -2116,6 +2116,13 @@ test("provisional chain matrix survives restart and response loss", async () => 
                 hlc: { wallMs: 100, counter: 0 }
               });
               await seedQueues(instance.database, { commands: [source, ...dependents] });
+              await seedMeta(instance.database, {
+                deliveryProof: {
+                  commands: [source.id, ...dependents.map((item) => item.id)],
+                  taskOperations: [], durationOperations: [], autoStartOperations: [],
+                  selectedTaskOperations: []
+                }
+              });
               if (restartBeforeHttp) {
                 instance.database.close();
                 instance.database = await openDatabase(instance.name);
@@ -2241,6 +2248,13 @@ test("sync response planner rereads peer dependency chains at transaction time",
   await seedQueues(instance.database, {
     commands: [source, rejectedSource, generatedStart, rejectedStart]
   });
+  await seedMeta(instance.database, {
+    deliveryProof: {
+      commands: [source.id, rejectedSource.id, generatedStart.id, rejectedStart.id],
+      taskOperations: [], durationOperations: [], autoStartOperations: [],
+      selectedTaskOperations: []
+    }
+  });
   const captured = await storage.readSyncState(instance.database);
   const sent = sync.buildSyncBatch(captured);
   assert.deepEqual(sent.commands.map((item) => item.id), [source.id, rejectedSource.id]);
@@ -2262,6 +2276,15 @@ test("sync response planner rereads peer dependency chains at transaction time",
     dependsOnCommandId: rejectedSource.id
   }));
   await seedQueues(peer, { commands: [...survivingPeerCommands, ...droppedPeerCommands] });
+  await seedMeta(instance.database, {
+    deliveryProof: {
+      commands: [source.id, rejectedSource.id, generatedStart.id, rejectedStart.id,
+        ...survivingPeerCommands.map((item) => item.id),
+        ...droppedPeerCommands.map((item) => item.id)],
+      taskOperations: [], durationOperations: [], autoStartOperations: [],
+      selectedTaskOperations: []
+    }
+  });
 
   const canonical = snapshot(1);
   canonical.history = [{
@@ -2290,7 +2313,8 @@ test("sync response planner rereads peer dependency chains at transaction time",
     queues: captured,
     sent,
     response,
-    deviceId: "device-1"
+    deviceId: "device-1",
+    deliveryProof: captured.deliveryProof || null
   });
   const observedTransactionCommands = [];
   const coreInstance = await authoritativeCore();

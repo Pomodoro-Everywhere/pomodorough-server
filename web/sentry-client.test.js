@@ -297,7 +297,7 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
     ["app-actions.js", "actions.timer.save-failed"],
     ["app-actions.js", "actions.timer.clear-failed"],
     ["app-actions.js", "actions.timer.finish-failed"],
-    ["app-actions.js", "actions.retarget.persist-failed"],
+    ["app-actions.js", "actions.retarget.save-failed"],
     ["app-view.js", "view.phase.save-failed"],
     ["app-bootstrap.js", "bootstrap.retry.deferred"],
     ["app-bootstrap.js", "bootstrap.choice.deferred"]

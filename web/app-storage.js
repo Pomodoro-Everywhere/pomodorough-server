@@ -17,7 +17,6 @@
   const TIMER_OWNER_LEASE_MS = 60_000;
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
-  const RETARGET_MARKERS_KEY = "retargetedTaskByTimerId";
   const ALL_STORES = Object.freeze([
     META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE,
     AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE
@@ -46,34 +45,8 @@
   }
 
   function rethrowOwnershipWithoutReport(error, use) {
-    // Single-report contract (S51/S52, mirrors S50): the actions-layer
-    // caller owns the `actions.*.save-failed` Sentry event, so this layer
-    // only quarantines ownership drift and rethrows without reporting to
-    // avoid a duplicate `storage.failure` event.
     if (error?.name === "AccountOwnershipError") use.quarantineAccountMismatch();
     throw error;
-  }
-
-  function sanitizeRetargetMarkers(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-    const markers = {};
-    for (const [timerId, taskId] of Object.entries(value)) {
-      if (typeof timerId !== "string" || timerId.length === 0) continue;
-      if (taskId === null) markers[timerId] = null;
-      else if (typeof taskId === "string" && taskId.length > 0) markers[timerId] = taskId;
-    }
-    return markers;
-  }
-
-  function rewritePendingStartsForRetarget(pending, markers) {
-    if (!markers || typeof markers !== "object") return;
-    for (const command of pending || []) {
-      if (command?.type !== "start" || typeof command.timerId !== "string") continue;
-      if (!Object.hasOwn(markers, command.timerId)) continue;
-      const taskId = markers[command.timerId];
-      if (taskId === null || taskId === undefined) delete command.taskId;
-      else command.taskId = taskId;
-    }
   }
 
   const manifest = Object.freeze({
@@ -94,7 +67,7 @@
       "persistNewLocalIdentity", "loadLocalState", "acquireBootstrapGate",
       "refreshMigratedPreferences",       "persistSettings", "persistCommand", "persistTaskOperation",
       "persistAutoStartOperation", "persistSelectedTaskOperation", "persistDurationOperation",
-      "persistRetargetState", "reapplyRetargetToPending",
+      "persistRetargetOperation",
       "reloadPersistedState", "clearLocalData", "database", "setDatabaseForTest",
       "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity"
     ],
@@ -256,7 +229,7 @@
       return bindActions(this, [
         "settingsValue", "snapshotValue", "migrateDurationQueueFromSettings",
         "bootstrapLegacyDurations", "readPendingDurationOperations", "refreshPendingDurationOperations",
-        "readLocalRecords", "restoreLocalRecords", "reapplyRetargetToPending",
+        "readLocalRecords", "restoreLocalRecords",
         "persistNewLocalIdentity", "loadLocalState",
         "acquireBootstrapGate", "refreshMigratedPreferences", "persistSettings", "reloadPersistedState"
       ]);
@@ -353,12 +326,16 @@
         this.connection.requestResult(transaction.objectStore(DURATION_PENDING_STORE).getAll()),
         this.connection.requestResult(transaction.objectStore(AUTO_START_PENDING_STORE).getAll()),
         this.connection.requestResult(transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()),
-        this.connection.requestResult(metaStore.get(RETARGET_MARKERS_KEY))
+        this.connection.requestResult(metaStore.get("deliveryProof")),
+        this.connection.requestResult(metaStore.get("canonicalHead")),
+        this.connection.requestResult(metaStore.get("projectionPending")),
+        this.connection.requestResult(metaStore.get("outgoingSync"))
       ]);
       const names = [
         "deviceId", "deviceSequence", "hlc", "clockOffset", "settings", "snapshot",
         "bootstrapResolution", "pending", "pendingTaskOperations", "pendingDurationOperations",
-        "pendingAutoStartOperations", "pendingSelectedTaskOperations", "retargetMarkers"
+        "pendingAutoStartOperations", "pendingSelectedTaskOperations",
+        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync"
       ];
       return Object.fromEntries(names.map((name, index) => [name, values[index]]));
     }
@@ -391,11 +368,12 @@
       this.state.pendingDurationOperations = (records.pendingDurationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = records.pendingAutoStartOperations || [];
       this.state.pendingSelectedTaskOperations = records.pendingSelectedTaskOperations || [];
-      // Durable retarget marker: reloads re-apply it to the restored pending
-      // starts (same rewrite as the live retarget) so the wire keeps the
-      // newly selected task with no duplicate command identity.
-      this.state.retargetedTaskByTimerId = sanitizeRetargetMarkers(records.retargetMarkers?.value);
-      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
+      this.state.deliveryProof = this.syncStorage.sanitizeDeliveryProof(records.deliveryProof?.value);
+      this.state.canonicalHead = this.syncStorage.sanitizeCanonicalHead(records.canonicalHead?.value);
+      this.state.projectionPending = this.syncStorage.sanitizeProjectionPending(
+        records.projectionPending?.value
+      );
+      this.state.outgoingSync = records.outgoingSync?.value || null;
       this.state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
       this.state.autoStartSyncBootstrapped = settings?.value?.autoStartSyncBootstrapped === true;
       this.state.selectedTaskSyncBootstrapped = settings?.value?.selectedTaskSyncBootstrapped === true;
@@ -407,10 +385,6 @@
         (value, command) => Math.max(value, Number(command.deviceSequence) || 0), 0
       );
       this.state.deviceSequence = Math.max(this.state.deviceSequence, highest);
-    }
-
-    reapplyRetargetToPending() {
-      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
     }
 
     async persistNewLocalIdentity(records) {
@@ -518,7 +492,10 @@
       this.state.pendingDurationOperations = (syncState.durationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = syncState.autoStartOperations || [];
       this.state.pendingSelectedTaskOperations = syncState.selectedTaskOperations || [];
-      rewritePendingStartsForRetarget(this.state.pending, this.state.retargetedTaskByTimerId);
+      this.state.deliveryProof = this.syncStorage.sanitizeDeliveryProof(syncState.deliveryProof);
+      this.state.canonicalHead = this.syncStorage.sanitizeCanonicalHead(syncState.canonicalHead);
+      this.state.projectionPending = this.syncStorage.sanitizeProjectionPending(syncState.projectionPending);
+      this.state.outgoingSync = syncState.outgoing || null;
       this.use.rebuildOptimisticState();
     }
   }
@@ -532,7 +509,7 @@
     actions() {
       return bindActions(this, [
         "persistCommand", "persistTaskOperation", "persistAutoStartOperation",
-        "persistSelectedTaskOperation", "persistDurationOperation", "persistRetargetState",
+        "persistSelectedTaskOperation", "persistDurationOperation", "persistRetargetOperation",
         "setInFlightDurationOperationIds"
       ]);
     }
@@ -629,30 +606,43 @@
       return operation;
     }
 
-    async persistRetargetState() {
-      const markers = sanitizeRetargetMarkers(this.state.retargetedTaskByTimerId);
-      this.state.retargetedTaskByTimerId = markers;
-      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
-      const context = this.use.captureAccountContext();
-      await this.syncStorage.guardedMutation(this.connection.database(), [PENDING_STORE], (transaction) => {
-        const pendingStore = transaction.objectStore(PENDING_STORE);
-        const request = pendingStore.getAll();
-        request.onsuccess = () => {
-          const commands = request.result || [];
-          rewritePendingStartsForRetarget(commands, markers);
-          for (const command of commands) {
-            if (command?.type === "start" && Object.hasOwn(markers, command.timerId)) pendingStore.put(command);
-          }
-          transaction.objectStore(META_STORE).put({ key: RETARGET_MARKERS_KEY, value: markers });
-        };
-      }, { ...context, expectedUserId }).catch((error) => {
-        // Single-report contract (S50): the caller (saveRetargetState)
-        // owns the `actions.retarget.persist-failed` Sentry event, so this
-        // layer only quarantines ownership drift and rethrows without
-        // reporting to avoid a duplicate `storage.failure` event.
-        if (error?.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
-        throw error;
+    buildRetargetCommand(timer, taskId, allocation) {
+      const fields = this.syncCore.retargetRequestFields
+        ? this.syncCore.retargetRequestFields(taskId)
+        : { taskId };
+      return {
+        id: allocation.id, deviceId: this.state.deviceId, deviceSequence: allocation.deviceSequence,
+        timerId: timer.id, type: "retarget", phase: "focus",
+        plannedDurationMs: timer.plannedDurationMs,
+        occurredAt: new Date(allocation.wallMs).toISOString(),
+        hlcWallMs: allocation.wallMs, hlcCounter: allocation.counter,
+        observedElapsedMs: Math.round(this.use.elapsedFor(timer, this.use.trustedNow())),
+        ...fields
+      };
+    }
+
+    async persistRetargetOperation(timerId, taskId) {
+      const timer = this.state.timer;
+      if (!timer?.id || timer.id !== timerId) throw new Error(this.use.tr(
+        "timer.noTimer", {}, "No timer is available for this action."
+      ));
+      if (!["running", "paused"].includes(timer.status) || timer.phase !== "focus") {
+        throw new Error(this.use.tr("timer.noTimer", {}, "No timer is available for this action."));
+      }
+      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) {
+        throw new Error(this.use.tr("timer.noTimer", {}, "No timer is available for this action."));
+      }
+      const command = await this.allocateOperation({
+        ...this.use.captureAccountContext(),
+        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
+        storeName: PENDING_STORE, requireProjection: true, nowMs: this.use.trustedNow(),
+        withDeviceSequence: true, withUuidV7: true,
+        build: (allocation) => this.buildRetargetCommand(timer, taskId, allocation)
       });
+      this.state.deviceSequence = command.deviceSequence;
+      this.state.hlcWallMs = command.hlcWallMs;
+      this.state.hlcCounter = command.hlcCounter;
+      return command;
     }
 
     async persistSelectedTaskOperation(taskId, expectedUserId) {

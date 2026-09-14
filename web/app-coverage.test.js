@@ -31,7 +31,7 @@ function actionFixture(overrides = {}) {
     persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}` }),
     persistTaskOperation: async (type, task) => ({ id: `${type}-${task.id}` }),
     persistCommand: async (type) => ({ id: `command-${type}` }),
-    persistRetargetState: async () => {}, reapplyRetargetToPending: () => {},
+    persistRetargetOperation: async (timerId, taskId) => ({ id: `retarget-${timerId}`, timerId, taskId }),
     rebuildOptimisticState: () => calls.push("rebuild"), render: () => calls.push("render"),
     renderDurations: () => calls.push("durations"), renderTaskSelector: () => calls.push("selector"),
     renderSyncStatus: () => calls.push("status"), scheduleSync: (delay) => calls.push(`sync:${delay}`),
@@ -393,7 +393,7 @@ test("dial tick sizing stays bounded for edge durations and render clamps", () =
   assert.equal(fixture.elements.dialTicks.children.length, 60);
 });
 
-test("retarget persist failure keeps the selection and reports statically", async (t) => {
+test("immutable retarget failure keeps the selection and reports statically", async (t) => {
   const fixture = actionFixture();
   fixture.state.tasks = [{ id: "task-new", title: "New" }];
   fixture.state.selectedTaskId = "task-old";
@@ -401,8 +401,7 @@ test("retarget persist failure keeps the selection and reports statically", asyn
   fixture.state.pending = [];
   fixture.state.pendingSelectedTaskOperations = [];
   fixture.use.persistSelectedTaskOperation = async (taskId) => ({ id: `selected-${taskId}`, taskId });
-  fixture.use.persistRetargetState = async () => { throw new Error("retarget offline"); };
-  fixture.use.reapplyRetargetToPending = () => {};
+  fixture.use.persistRetargetOperation = async () => { throw new Error("retarget offline"); };
   const reports = [];
   const previous = globalThis.PomodoroughSentryClient;
   globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
@@ -412,11 +411,11 @@ test("retarget persist failure keeps the selection and reports statically", asyn
   });
   assert.equal(await fixture.actions.issueSelectedTaskOperation("task-new"), true);
   assert.deepEqual(fixture.state.pendingSelectedTaskOperations, [{ id: "selected-task-new", taskId: "task-new" }]);
-  assert.deepEqual(fixture.state.retargetedTaskByTimerId, { "timer-1": "task-new" });
+  assert.deepEqual(fixture.state.pending.filter((command) => command.type === "retarget"), []);
   assert.equal(fixture.state.actionLocked, false);
   assert.ok(fixture.calls.includes("rebuild"));
   assert.equal(reports.length, 1);
-  assert.equal(reports[0][1], "actions.retarget.persist-failed");
+  assert.equal(reports[0][1], "actions.retarget.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
   assert.match(String(reports[0][0]?.message || reports[0][0]), /retarget offline/);
 });
@@ -440,19 +439,27 @@ test("view timer projection clamps elapsed time and formats accessible clock tex
   assert.deepEqual(view.displayTimer(), { phase: "focus", plannedDurationMs: 90_000 });
 });
 
-function retargetStorageFixture(guardedMutation) {
-  const state = baseState({ retargetedTaskByTimerId: { "timer-1": "task-new" } });
-  const host = { setTimeout, clearTimeout };
-  const syncStorage = { guardedMutation };
+function immutableRetargetStorageFixture(allocateMutation) {
+  const state = baseState();
+  const host = { setTimeout, clearTimeout, crypto: { randomUUID: () => "retarget-uuid" } };
+  const syncStorage = { allocateMutation };
   const quarantines = [];
+  const compareTimerCommands = (left, right) => String(left.id).localeCompare(String(right.id));
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
-    quarantineAccountMismatch: () => quarantines.push("quarantine")
+    quarantineAccountMismatch: () => quarantines.push("quarantine"),
+    assertExpectedAccount: () => {},
+    trustedNow: () => 1000, tabId: () => "tab-1",
+    elapsedFor: () => 0, clampNumber: (value) => value,
+    emptyTimer: (phase) => ({ phase, status: "idle" }),
+    normalizeTimer: (timer) => timer, phaseConfig: () => ({ focus: {} }),
+    compareTimerCommands,
+    tr: (_key, _args, fallback) => fallback
   };
   const storage = require("./app-storage.js").create({
     state, external: { host, syncCore: incarnationFixture.sync, syncStorage }, use
   });
-  return { host, quarantines, state, storage };
+  return { host, quarantines, state, storage, use };
 }
 
 function withSentryCapture(t) {
@@ -509,22 +516,33 @@ function completionFixture(hostOverrides = {}) {
   return { actions, host, state, warnings };
 }
 
-test("S50 persistRetargetState rethrows without an inner Sentry report", async (t) => {
-  const fixture = retargetStorageFixture(async () => { throw new Error("retarget offline"); });
+test("S50 persistRetargetOperation rethrows without an inner Sentry report", async (t) => {
+  const failing = immutableRetargetStorageFixture(async () => { throw new Error("retarget offline"); });
+  Object.assign(failing.state, {
+    tasks: [{ id: "task-new", title: "New" }],
+    timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 }
+  });
+  failing.storage.setDatabaseForTest({});
   const reports = withSentryCapture(t);
-  await assert.rejects(() => fixture.storage.persistRetargetState(), /retarget offline/);
+  await assert.rejects(() => failing.storage.persistRetargetOperation("timer-1", "task-new"), /retarget offline/);
   assert.equal(reports.length, 0);
-  assert.deepEqual(fixture.quarantines, []);
-  const owned = retargetStorageFixture(async () => {
+  assert.deepEqual(failing.quarantines, []);
+  const owned = immutableRetargetStorageFixture(async () => {
     throw new incarnationFixture.storage.AccountOwnershipError("stale owner");
   });
-  await assert.rejects(() => owned.storage.persistRetargetState(), /stale owner/);
+  Object.assign(owned.state, {
+    tasks: [{ id: "task-new", title: "New" }],
+    timer: { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 }
+  });
+  owned.storage.setDatabaseForTest({});
+  await assert.rejects(() => owned.storage.persistRetargetOperation("timer-1", "task-new"), /stale owner/);
   assert.equal(reports.length, 0);
   assert.deepEqual(owned.quarantines, ["quarantine"]);
 });
 
-test("S50 retarget failure surfaces a single operation tag end to end", async (t) => {
-  const storageFixture = retargetStorageFixture(async () => { throw new Error("retarget offline"); });
+test("S50 immutable retarget failure surfaces a single operation tag end to end", async (t) => {
+  const allocateMutation = async () => { throw new Error("retarget offline"); };
+  const storageFixture = immutableRetargetStorageFixture(allocateMutation);
   const state = storageFixture.state;
   Object.assign(state, {
     tasks: [{ id: "task-new", title: "New" }], selectedTaskId: "task-old",
@@ -538,19 +556,19 @@ test("S50 retarget failure surfaces a single operation tag end to end", async (t
     use: {
       controlsBlocked: () => false,
       persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}`, taskId }),
-      persistRetargetState: (...args) => storageFixture.storage.persistRetargetState(...args),
-      reapplyRetargetToPending: () => {},
+      persistRetargetOperation: (...args) => storageFixture.storage.persistRetargetOperation(...args),
       rebuildOptimisticState: () => calls.push("rebuild"),
       renderTaskSelector: () => calls.push("selector"),
       renderSyncStatus: () => calls.push("status"),
       scheduleSync: () => calls.push("sync")
     }
   });
+  storageFixture.storage.setDatabaseForTest({});
   const reports = withSentryCapture(t);
   assert.equal(await actions.issueSelectedTaskOperation("task-new"), true);
-  assert.deepEqual(state.retargetedTaskByTimerId, { "timer-1": "task-new" });
+  assert.deepEqual(state.pending.filter((command) => command.type === "retarget"), []);
   assert.equal(reports.length, 1);
-  assert.equal(reports[0][1], "actions.retarget.persist-failed");
+  assert.equal(reports[0][1], "actions.retarget.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
 });
 

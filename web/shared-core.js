@@ -86,7 +86,7 @@
     }
 
     reconcileSynchronizedState(input) {
-      return this.call("reconcile.rebase.v1", input);
+      return this.call("reconcile.rebase.v2", input);
     }
 
     planTimerCompletion(input) {

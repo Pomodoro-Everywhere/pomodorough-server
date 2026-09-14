@@ -98,7 +98,7 @@ test("typed shared-core adapter methods dispatch pinned production operations", 
   assert.deepEqual(core.planTimerCompletion({}), completion);
   assert.deepEqual(core.tickHlc({}), clock);
   assert.deepEqual(operations(), [
-    "projection.apply.v2", "bootstrap.plan.v1", "reconcile.rebase.v1",
+    "projection.apply.v2", "bootstrap.plan.v1", "reconcile.rebase.v2",
     "timer.completionPlan.v1", "hlc.tick.v1"
   ]);
 });
@@ -307,7 +307,7 @@ test("shared WASM core exposes its pinned version", async () => {
   const core = await loadCore();
   assert.deepEqual(core.call("core.version", {}), {
     schemaVersion: 1,
-    coreVersion: "0.37.0"
+    coreVersion: "0.38.0"
   });
 });
 

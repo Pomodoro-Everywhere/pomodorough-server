@@ -77,6 +77,9 @@ function storageFixture(overrides = {}) {
       ? (await requestResult(database.transaction("meta").objectStore("meta").get("snapshot")))?.value
       : { user: current.user }, ...await syncStorage.readQueues() }),
     assertAccountOwnership: (snapshot, expectedUserId) => assert.equal(incarnationFixture.sync.accountOwnerId(snapshot?.user), expectedUserId),
+    sanitizeDeliveryProof: incarnationFixture.storage.sanitizeDeliveryProof,
+    sanitizeCanonicalHead: incarnationFixture.storage.sanitizeCanonicalHead,
+    sanitizeProjectionPending: incarnationFixture.storage.sanitizeProjectionPending,
     ...overrides.syncStorage
   };
   const use = {
@@ -183,7 +186,7 @@ function actionFixture(overrides = {}) {
     showNotice: (value) => calls.push(["notice", value]), scheduleSync: (delay) => calls.push(["sync", delay]),
     persistAutoStartOperation: async (enabled) => ({ id: `auto-${enabled}` }),
     persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}`, taskId }),
-    persistRetargetState: async () => {}, reapplyRetargetToPending: () => {},
+    persistRetargetOperation: async (timerId, taskId) => ({ id: `retarget-${timerId}`, timerId, taskId }),
     persistTaskOperation: async (type, task) => ({ id: `${type}-${task.id}`, type, taskId: task.id }),
     persistCommand: async (type) => ({ id: `command-${type}`, type }),
     tr: (_key, _args, fallback) => fallback, ...overrides.use
@@ -256,7 +259,11 @@ function syncFixture(overrides = {}) {
     assertAccountOwnership: incarnationFixture.storage.assertAccountOwnership,
     normalizeLegacyDurationOperations: async () => {}, readQueues: async () => ({ commands: [{ id: "command-1" }] }),
     reconcileState: () => ({ revision: 3, baseTimer: null, baseHistory: [], baseTasks: [], baseDurationsMs: current.durationsMs,
-      baseAutoStartBreaks: false, baseSelectedTaskId: null, queues: {}, droppedTimerOperationIds: [], droppedTimerIds: [] }),
+      baseAutoStartBreaks: false, baseSelectedTaskId: null, queues: { commands: [], taskOperations: [],
+        durationOperations: [], autoStartOperations: [], selectedTaskOperations: [] },
+      droppedTimerOperationIds: [], droppedTimerIds: [], projectionPending: null, neverSent: {} }),
+    retireProofAndPersistOutgoing: async () => ({ proof: { commands: [], taskOperations: [],
+      durationOperations: [], autoStartOperations: [], selectedTaskOperations: [] } }),
     applySyncResponse: async (_db, input) => { calls.push(["apply", input]); return { applied: true }; }, ...overrides.syncStorage
   };
   const use = {

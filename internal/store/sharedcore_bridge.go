@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"time"
 	"unicode/utf8"
 
@@ -68,21 +69,21 @@ type coreHLCHeadOutput struct {
 	Counter *int64 `json:"counter"`
 }
 
-func hlcHeadWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed []coreHLC) (coreHLC, error) {
-	head := coreHLC{WallMs: physicalNowMs}
-	for len(observed) > 9999 {
-		batch := append([]coreHLC{head}, observed[:9999]...)
-		var err error
-		head, err = hlcHeadPageWithCore(ctx, call, physicalNowMs, batch)
-		if err != nil {
-			return coreHLC{}, err
+func hlcHeadSequenceWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed iter.Seq[coreHLC]) (coreHLC, error) {
+	batch := make([]coreHLC, 0, 10000)
+	for clock := range observed {
+		if len(batch) == cap(batch) {
+			head, err := hlcHeadPageWithCore(ctx, call, physicalNowMs, batch)
+			if err != nil {
+				return coreHLC{}, err
+			}
+			// hlc.head.v1 is a non-incrementing maximum, so its result is
+			// sufficient continuation. Every original clock still gets validated.
+			batch = append(batch[:0], head)
 		}
-		observed = observed[9999:]
+		batch = append(batch, clock)
 	}
-	if head != (coreHLC{WallMs: physicalNowMs}) {
-		observed = append([]coreHLC{head}, observed...)
-	}
-	return hlcHeadPageWithCore(ctx, call, physicalNowMs, observed)
+	return hlcHeadPageWithCore(ctx, call, physicalNowMs, batch)
 }
 
 func hlcHeadPageWithCore(ctx context.Context, call coreJSONCall, physicalNowMs int64, observed []coreHLC) (coreHLC, error) {

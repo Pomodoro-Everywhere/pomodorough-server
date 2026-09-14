@@ -77,9 +77,9 @@
       baseTimer: emptyTimerValue("focus", DEFAULT_DURATIONS_MS.focus),
       timer: emptyTimerValue("focus", DEFAULT_DURATIONS_MS.focus),
       baseHistory: [], history: [], baseTasks: [], tasks: [],
-      retargetedTaskByTimerId: {},
       pending: [], pendingTaskOperations: [], pendingDurationOperations: [],
-      pendingAutoStartOperations: [], pendingSelectedTaskOperations: []
+      pendingAutoStartOperations: [], pendingSelectedTaskOperations: [],
+      deliveryProof: null, canonicalHead: null, projectionPending: null, outgoingSync: null
     };
   }
 
@@ -116,7 +116,7 @@
     provides: [
       "clone", "emptyTimer", "controlsBlocked", "normalizeTimer", "loadSharedCore",
       "sharedTaskIdentity", "positiveNumber", "clampNumber", "selectedDurationMs",
-      "selectedTaskIdForNextFocus", "applyTaskRetarget", "normalizeDurationsMs", "compareDurationOperations",
+      "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
       "compareTimerCommands", "trustedNow", "monotonicNow", "elapsedFor", "projectOwnerState",
       "rebuildOptimisticState", "ownerStateValue", "resetOwnerState", "quarantineOwnerState",
       "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "tr", "phaseLabel", "phaseShortLabel", "timerStatusLabel",
@@ -251,7 +251,7 @@
     actions() {
       return bindActions(this, [
         "emptyTimer", "controlsBlocked", "normalizeTimer", "selectedDurationMs",
-        "selectedTaskIdForNextFocus", "applyTaskRetarget", "normalizeDurationsMs", "compareDurationOperations",
+        "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
         "projectOwnerState", "rebuildOptimisticState", "ownerStateValue", "resetOwnerState",
         "quarantineOwnerState", "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "phaseConfig", "defaultDurationsMs", "tabId"
       ]);
@@ -282,33 +282,6 @@
     selectedTaskIdForNextFocus() {
       return this.state.tasks.some((task) => task.id === this.state.selectedTaskId)
         ? this.state.selectedTaskId : null;
-    }
-
-    applyTaskRetarget() {
-      // Display/projection-only overlay for the local retarget marker (see
-      // retargetRunningFocusTimer): the canonical projected timer keeps its
-      // core taskId, and only the live running/paused focus timer renders
-      // with the marker. Markers for finished timers are pruned here so the
-      // divergence never outlives its timer or leaks across devices.
-      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
-        this.state.retargetedTaskByTimerId = {};
-      }
-      const markers = this.state.retargetedTaskByTimerId;
-      const timer = this.state.timer;
-      if (timer && typeof timer.id === "string" && timer.id
-        && ["running", "paused"].includes(timer.status) && timer.phase === "focus"
-        && Object.hasOwn(markers, timer.id)) {
-        timer.taskId = markers[timer.id] ?? null;
-      }
-      const live = new Set();
-      if (timer?.id) live.add(timer.id);
-      for (const item of this.state.history || []) {
-        if (item?.timerId) live.add(item.timerId);
-      }
-      for (const key of Object.keys(markers)) {
-        if (!live.has(key)) delete markers[key];
-      }
-      return markers;
     }
 
     emptyTimer(phase, plannedDurationMs) {
@@ -342,6 +315,49 @@
         || String(left.id).localeCompare(String(right.id));
     }
 
+    projectionQueuesForDisplay(local) {
+      if (local.projectionPending && typeof local.projectionPending === "object") {
+        const safe = local.projectionPending;
+        const safeIds = new Set((safe.commands || []).map((command) => command.id));
+        const fresh = (local.pending || []).filter((command) =>
+          !safeIds.has(command.id) && this.hasImmutableProof(local, "commands", command.id)
+          && this.isNewerThanHead(local, command)
+        );
+        if (fresh.length === 0) return {
+          commands: safe.commands || [], taskOperations: safe.taskOperations || [],
+          durationOperations: safe.durationOperations || [],
+          autoStartOperations: safe.autoStartOperations || [],
+          selectedTaskOperations: safe.selectedTaskOperations || []
+        };
+        return {
+          commands: [...(safe.commands || []), ...fresh],
+          taskOperations: safe.taskOperations || [],
+          durationOperations: safe.durationOperations || [],
+          autoStartOperations: safe.autoStartOperations || [],
+          selectedTaskOperations: safe.selectedTaskOperations || []
+        };
+      }
+      return {
+        commands: local.pending, taskOperations: local.pendingTaskOperations,
+        durationOperations: local.pendingDurationOperations,
+        autoStartOperations: local.pendingAutoStartOperations,
+        selectedTaskOperations: local.pendingSelectedTaskOperations
+      };
+    }
+
+    hasImmutableProof(local, queue, id) {
+      return Array.isArray(local.deliveryProof?.[queue]) && local.deliveryProof[queue].includes(id);
+    }
+
+    isNewerThanHead(local, operation) {
+      if (!local.canonicalHead) return true;
+      const wall = Number(operation.hlcWallMs);
+      const counter = Number(operation.hlcCounter);
+      if (!Number.isSafeInteger(wall) || !Number.isSafeInteger(counter)) return false;
+      return wall > local.canonicalHead.wallMs
+        || wall === local.canonicalHead.wallMs && counter > local.canonicalHead.counter;
+    }
+
     projectOwnerState(local) {
       const projection = this.syncStorage.projectState({
         snapshot: {
@@ -351,12 +367,7 @@
           autoStartBreaks: local.baseAutoStartBreaks === true,
           selectedTaskId: local.baseSelectedTaskId ?? null
         },
-        queues: {
-          commands: local.pending, taskOperations: local.pendingTaskOperations,
-          durationOperations: local.pendingDurationOperations,
-          autoStartOperations: local.pendingAutoStartOperations,
-          selectedTaskOperations: local.pendingSelectedTaskOperations
-        },
+        queues: this.projectionQueuesForDisplay(local),
         nowMs: this.clock.trustedNow(), deviceId: this.state.deviceId
       });
       const pendingStart = [...local.pending].filter((command) =>
@@ -371,7 +382,6 @@
         history: projection.history, tasks: projection.tasks, durationsMs: projection.durationsMs,
         autoStartBreaks: projection.autoStartBreaks, selectedTaskId: projection.selectedTaskId
       });
-      if (local === this.state) this.applyTaskRetarget();
     }
 
     rebuildOptimisticState() {
@@ -384,8 +394,6 @@
     ownerStateValue() {
       return {
         revision: this.state.revision, selectedPhase: this.state.selectedPhase,
-        retargetedTaskByTimerId: this.state.retargetedTaskByTimerId
-          ? JSON.parse(JSON.stringify(this.state.retargetedTaskByTimerId)) : {},
         baseSelectedTaskId: this.state.baseSelectedTaskId, selectedTaskId: this.state.selectedTaskId,
         baseAutoStartBreaks: this.state.baseAutoStartBreaks, autoStartBreaks: this.state.autoStartBreaks,
         baseDurationsMs: clone(this.state.baseDurationsMs), durationsMs: clone(this.state.durationsMs),
@@ -395,7 +403,9 @@
         pendingTaskOperations: clone(this.state.pendingTaskOperations),
         pendingDurationOperations: clone(this.state.pendingDurationOperations),
         pendingAutoStartOperations: clone(this.state.pendingAutoStartOperations),
-        pendingSelectedTaskOperations: clone(this.state.pendingSelectedTaskOperations), user: clone(this.state.user)
+        pendingSelectedTaskOperations: clone(this.state.pendingSelectedTaskOperations), user: clone(this.state.user),
+        deliveryProof: clone(this.state.deliveryProof), canonicalHead: clone(this.state.canonicalHead),
+        projectionPending: clone(this.state.projectionPending), outgoingSync: clone(this.state.outgoingSync)
       };
     }
 
@@ -445,16 +455,14 @@
 
     restoreOwnerState(local) {
       const fields = [
-        "revision", "selectedPhase", "retargetedTaskByTimerId", "baseSelectedTaskId", "selectedTaskId",
+        "revision", "selectedPhase", "baseSelectedTaskId", "selectedTaskId",
         "baseAutoStartBreaks", "autoStartBreaks", "baseDurationsMs", "durationsMs",
         "baseTimer", "timer", "baseHistory", "history", "baseTasks", "tasks", "pending",
         "pendingTaskOperations", "pendingDurationOperations", "pendingAutoStartOperations",
-        "pendingSelectedTaskOperations", "user"
+        "pendingSelectedTaskOperations", "user",
+        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync"
       ];
       for (const field of fields) this.state[field] = local[field];
-      if (!this.state.retargetedTaskByTimerId || typeof this.state.retargetedTaskByTimerId !== "object") {
-        this.state.retargetedTaskByTimerId = {};
-      }
     }
 
     phaseConfig() { return PHASES; }

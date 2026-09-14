@@ -31,7 +31,6 @@
     requires: [
       "captureAccountContext",
       "clone", "normalizeTimer", "emptyTimer", "selectedDurationMs", "normalizeDurationsMs",
-      "reapplyRetargetToPending",
       "selectedPhaseAfterCommandAcknowledgements", "snapshotValue", "settingsValue", "tabId",
       "reloadPersistedState", "database", "setInFlightDurationOperationIds", "stopCompletionAlert",
       "closeRevisionStream", "quarantineOwnerState", "render", "renderSyncStatus", "tr",
@@ -125,7 +124,7 @@
       };
     }
 
-    syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next) {
+    syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next, neverSent) {
       return {
         expectedUserId, snapshot: next.snapshot, hlc: next.hlc, serverHlc: next.serverHlc,
         clockOffset: next.clockOffset, queueIds: this.acknowledgedQueueIds(validated),
@@ -133,10 +132,38 @@
           deviceId: this.state.deviceId, tabId: this.use.tabId(), nowMs: Date.now(), leaseMs: TIMER_OWNER_LEASE_MS
         },
         retainedQueues: rebased.queues, dropCommandIds: rebased.droppedTimerOperationIds,
-        dropTimerIds: rebased.droppedTimerIds, reconciliation: { sent, response: payload, deviceId: this.state.deviceId },
+        dropTimerIds: rebased.droppedTimerIds,
+        neverSent,
+        deliveryProof: this.state.deliveryProof || null,
+        reconciliation: {
+          sent, response: payload, deviceId: this.state.deviceId,
+          neverSent, deliveryProof: this.state.deliveryProof || null
+        },
         ...(next.selectedPhase !== this.state.selectedPhase
           ? { settings: this.use.settingsValue({ selectedPhase: next.selectedPhase }) } : {})
       };
+    }
+
+    currentQueues() {
+      return {
+        commands: this.state.pending, taskOperations: this.state.pendingTaskOperations,
+        durationOperations: this.state.pendingDurationOperations,
+        autoStartOperations: this.state.pendingAutoStartOperations,
+        selectedTaskOperations: this.state.pendingSelectedTaskOperations
+      };
+    }
+
+    neverSentForBatch(local, sent) {
+      if (typeof this.syncCore.neverSentForQueues === "function") {
+        return this.syncCore.neverSentForQueues(this.state.deliveryProof, local, sent);
+      }
+      return { commands: [], taskOperations: [], durationOperations: [],
+        autoStartOperations: [], selectedTaskOperations: [] };
+    }
+
+    isImmutableRecoveryError(error) {
+      return /possibly delivered|not causally ordered|device sequence|neverSent|rewrite/i
+        .test(String(error?.message || ""));
     }
 
     async waitForUnlockedAction() {
@@ -152,17 +179,23 @@
       context.assertCurrent();
       this.state.actionLocked = true;
       try {
-        const rebased = this.syncStorage.reconcileState({
-          queues: {
-            commands: this.state.pending, taskOperations: this.state.pendingTaskOperations,
-            durationOperations: this.state.pendingDurationOperations,
-            autoStartOperations: this.state.pendingAutoStartOperations,
-            selectedTaskOperations: this.state.pendingSelectedTaskOperations
-          },
-          sent, response: payload, deviceId: this.state.deviceId
-        });
+        const local = this.currentQueues();
+        const neverSent = this.neverSentForBatch(local, sent);
+        let rebased;
+        try {
+          rebased = this.syncStorage.reconcileState({
+            queues: local, sent, response: payload, deviceId: this.state.deviceId,
+            neverSent, deliveryProof: this.state.deliveryProof || null
+          });
+        } catch (error) {
+          if (this.isImmutableRecoveryError(error)) {
+            this.state.conflict = error.message || "Immutable delivery conflict. Retained work was not rewritten.";
+            reportFrontendError(error, "sync.immutable.recovery");
+          }
+          throw error;
+        }
         const next = this.syncResponseState(payload, rebased, validated, timing);
-        const input = this.syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next);
+        const input = this.syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next, neverSent);
         input.assertCurrent = context.assertCurrent;
         const outcome = await this.syncStorage.applySyncResponse(this.use.database(), input);
         context.assertCurrent();
@@ -229,9 +262,16 @@
       this.state.pendingDurationOperations = (queues.durationOperations || []).sort(this.use.compareDurationOperations);
       this.state.pendingAutoStartOperations = queues.autoStartOperations || [];
       this.state.pendingSelectedTaskOperations = queues.selectedTaskOperations || [];
-      // Re-apply the local retarget marker: a refresh that raced the retarget
-      // write must not resurrect the stale taskId on the pending start.
-      this.use.reapplyRetargetToPending();
+      this.state.deliveryProof = this.syncStorage.sanitizeDeliveryProof
+        ? this.syncStorage.sanitizeDeliveryProof(queues.deliveryProof)
+        : queues.deliveryProof || null;
+      this.state.canonicalHead = this.syncStorage.sanitizeCanonicalHead
+        ? this.syncStorage.sanitizeCanonicalHead(queues.canonicalHead)
+        : queues.canonicalHead || null;
+      this.state.projectionPending = this.syncStorage.sanitizeProjectionPending
+        ? this.syncStorage.sanitizeProjectionPending(queues.projectionPending)
+        : queues.projectionPending || null;
+      this.state.outgoingSync = queues.outgoing || null;
       this.use.rebuildOptimisticState();
     }
 
@@ -302,6 +342,51 @@
       });
     }
 
+    async retireProofForBatch(sent) {
+      this.verifyOutgoingExactness(sent);
+      const retired = await this.syncStorage.retireProofAndPersistOutgoing(this.use.database(), sent);
+      this.state.deliveryProof = retired.proof;
+      this.state.outgoingSync = { sent: this.syncStorage.cloneOutgoing
+        ? this.syncStorage.cloneOutgoing(sent) : JSON.parse(JSON.stringify(sent)) };
+    }
+
+    async submitSyncBatch(sent, expectedUserId, context) {
+      this.use.setInFlightDurationOperationIds(sent.durationOperations.map((operation) => operation.id));
+      const { response, timing } = await this.use.postMutation(
+        "/api/v1/sync", this.syncRequestBody(sent), expectedUserId
+      );
+      context.assertCurrent();
+      if (response.status === 401) {
+        this.use.redirectToLogin();
+        return;
+      }
+      if (response.status === 409) throw new this.syncStorage.AccountOwnershipError();
+      if (!response.ok) throw new Error(this.use.tr(
+        "sync.failed", { status: response.status }, `Sync failed (${response.status}).`
+      ));
+      const payload = await response.json();
+      context.assertCurrent();
+      await this.reconciler.acceptSyncResponse(payload, sent, expectedUserId, timing);
+      if (this.hasPendingOperations()) this.syncAgain = true;
+      this.retryDelayMs = 1000;
+      this.state.retrying = false;
+    }
+
+    reportSyncError(error) {
+      if (this.reconciler.isImmutableRecoveryError
+        && this.reconciler.isImmutableRecoveryError(error)) {
+        this.state.retrying = true;
+        this.scheduleRetry();
+        this.host.console.warn("Pomodorough immutable sync needs recovery:", error);
+        reportFrontendError(error, "sync.immutable.recovery");
+        return;
+      }
+      this.state.retrying = true;
+      this.scheduleRetry();
+      this.host.console.warn("Pomodorough sync deferred:", error);
+      reportFrontendError(error, "sync.deferred");
+    }
+
     async performSync() {
       const context = this.use.captureAccountContext();
       this.state.syncing = true;
@@ -310,38 +395,27 @@
       try {
         const expectedUserId = this.syncCore.accountOwnerId(this.state.user);
         const sent = this.currentSyncBatch();
-        this.use.setInFlightDurationOperationIds(sent.durationOperations.map((operation) => operation.id));
-        const { response, timing } = await this.use.postMutation(
-          "/api/v1/sync", this.syncRequestBody(sent), expectedUserId
-        );
+        await this.retireProofForBatch(sent);
         context.assertCurrent();
-        if (response.status === 401) {
-          this.use.redirectToLogin();
-          return;
-        }
-        if (response.status === 409) throw new this.syncStorage.AccountOwnershipError();
-        if (!response.ok) throw new Error(this.use.tr(
-          "sync.failed", { status: response.status }, `Sync failed (${response.status}).`
-        ));
-        const payload = await response.json();
-        context.assertCurrent();
-        await this.reconciler.acceptSyncResponse(payload, sent, expectedUserId, timing);
-        if (this.hasPendingOperations()) this.syncAgain = true;
-        this.retryDelayMs = 1000;
-        this.state.retrying = false;
+        await this.submitSyncBatch(sent, expectedUserId, context);
       } catch (error) {
         if (error instanceof this.syncStorage.AccountOwnershipError) {
           this.use.queueSessionRevalidation();
           return;
         }
-        this.state.retrying = true;
-        this.scheduleRetry();
-        this.host.console.warn("Pomodorough sync deferred:", error);
-        reportFrontendError(error, "sync.deferred");
+        this.reportSyncError(error);
       } finally {
         this.use.setInFlightDurationOperationIds([]);
         this.state.syncing = false;
         this.use.render();
+      }
+    }
+
+    verifyOutgoingExactness(sent) {
+      const outgoing = this.state.outgoingSync;
+      if (!outgoing?.sent || typeof this.syncStorage.outgoingMatchesStored !== "function") return;
+      if (!this.syncStorage.outgoingMatchesStored(outgoing, sent)) {
+        throw new Error("Outgoing payload changed under an existing identity. Recovery is required.");
       }
     }
 

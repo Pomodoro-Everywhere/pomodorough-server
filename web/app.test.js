@@ -147,6 +147,14 @@ function loadTaskProjection() {
         return { snapshot: state.localOwnerId ? { user: state.user } : null,
           ...await context.PomodoroughStorage.readQueues() };
       },
+      sanitizeDeliveryProof: incarnationFixture.storage.sanitizeDeliveryProof,
+      sanitizeCanonicalHead: incarnationFixture.storage.sanitizeCanonicalHead,
+      sanitizeProjectionPending: incarnationFixture.storage.sanitizeProjectionPending,
+      async retireProofAndPersistOutgoing(_database, sent) {
+        return { proof: incarnationFixture.storage.sanitizeDeliveryProof(null) };
+      },
+      cloneOutgoing: (sent) => JSON.parse(JSON.stringify(sent)),
+      outgoingMatchesStored: () => true,
       projectState(input) {
         const app = context.PomodoroughAppTest;
         let projectedTimer = input.snapshot?.canonicalTimer
@@ -186,6 +194,9 @@ function loadTaskProjection() {
       },
       async allocateMutation(_database, input) {
         allocatedMutationInput = input;
+        if (input.storeName === "pending") {
+          return input.build({ id: "retarget-operation", wallMs: baseTime, counter: 1, deviceSequence: 2 });
+        }
         return input.build({ id: "selected-operation", wallMs: baseTime, counter: 0 });
       }
     },
@@ -552,7 +563,7 @@ test("task projection clears unavailable selection and restores it when task rea
   assert.equal(state.selectedTaskId, null);
 });
 
-test("focus task selection retargets the running timer while the selector stays enabled", async () => {
+test("focus task selection creates a separate immutable retarget without rewriting the start", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
   app.state.ready = true;
@@ -584,11 +595,16 @@ test("focus task selection retargets the running timer while the selector stays 
   assert.equal(await app.issueSelectedTaskOperation("next-task"), true);
   assert.equal(app.state.selectedTaskId, "next-task");
   assert.equal(app.state.timer.taskId, "next-task");
-  assert.equal(app.state.pending.find((command) => command.id === "start-active").taskId, "next-task");
+  assert.equal(app.state.pending.find((command) => command.id === "start-active").taskId, "active-task");
+  const retarget = app.state.pending.find((command) => command.type === "retarget");
+  assert.equal(retarget.timerId, "active-timer");
+  assert.equal(retarget.taskId, "next-task");
+  assert.equal(retarget.phase, "focus");
+  assert.equal(retarget.id, "retarget-operation");
   assert.equal(app.displayTimer().taskId, "next-task");
   assert.equal(
     app.historyTaskContext({ timerId: "active-timer", taskId: "active-task" }, app.state.tasks),
-    "Next task"
+    "Active task"
   );
 
   app.state.selectedPhase = "short_break";
@@ -652,7 +668,7 @@ test("start after terminal without a history entry still retains the displaced t
   }
 });
 
-test("No task selection persists nullable operation and retargets the running timer", async () => {
+test("No task selection persists nullable operation and a null retarget", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
   app.state.ready = true;
@@ -665,7 +681,7 @@ test("No task selection persists nullable operation and retargets the running ti
 
   assert.equal(await app.issueSelectedTaskOperation(null), true);
 
-  assert.equal(app.allocatedMutationInput().storeName, "pendingSelectedTasks");
+  assert.equal(app.allocatedMutationInput().storeName, "pending");
   assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [{
     id: "selected-operation",
     deviceId: "test-device",
@@ -674,6 +690,9 @@ test("No task selection persists nullable operation and retargets the running ti
     hlcWallMs: baseTime,
     hlcCounter: 0
   }]);
+  const retarget = app.state.pending.find((command) => command.type === "retarget");
+  assert.equal(retarget.taskId, null);
+  assert.equal(Object.hasOwn(retarget, "taskId"), true);
   assert.equal(app.state.selectedTaskId, null);
   assert.equal(app.state.timer.taskId, null);
   assert.equal(app.displayTimer().taskId, null);
@@ -710,12 +729,11 @@ test("queue refresh rebuilds selected-task projection from peer operations", asy
   assert.equal(app.selectedTaskIdForNextFocus(), "task-second");
 });
 
-test("queue refresh re-applies the local retarget marker over stale durable starts", async () => {
+test("queue refresh preserves exact pending starts without rewriting task attribution", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
   app.state.ready = true;
   app.state.bootstrapBlocked = false;
-  app.state.retargetedTaskByTimerId = { "timer-stale": "task-new" };
   app.setQueuesForTest({
     commands: [{
       id: "start-stale", deviceId: "test-device", deviceSequence: 1, timerId: "timer-stale",
@@ -731,11 +749,11 @@ test("queue refresh re-applies the local retarget marker over stale durable star
 
   await app.refreshAllPendingOperations();
 
-  assert.equal(app.state.pending.find((command) => command.id === "start-stale").taskId, "task-new");
-  assert.deepEqual(app.state.retargetedTaskByTimerId, { "timer-stale": "task-new" });
+  assert.equal(app.state.pending.find((command) => command.id === "start-stale").taskId, "task-old");
+  assert.equal(app.state.pending.some((command) => command.type === "retarget"), false);
 });
 
-test("peer selected-task sync never writes the local retarget marker", async () => {
+test("peer selected-task sync never creates a timer retarget command", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
   app.state.ready = true;
@@ -751,7 +769,6 @@ test("peer selected-task sync never writes the local retarget marker", async () 
     elapsedAtAnchorMs: 0, anchorAt: new Date(baseTime).toISOString(),
     lastIntent: null, taskId: "task-old", dependsOnCommandId: null
   };
-  app.state.retargetedTaskByTimerId = { "timer-local": "task-first" };
   app.setQueuesForTest({
     commands: [],
     taskOperations: [],
@@ -769,8 +786,8 @@ test("peer selected-task sync never writes the local retarget marker", async () 
   await app.refreshAllPendingOperations();
 
   assert.equal(app.state.selectedTaskId, "task-second");
-  assert.deepEqual(app.state.retargetedTaskByTimerId, { "timer-local": "task-first" });
-  assert.equal(app.displayTimer().taskId, "task-first");
+  assert.equal(app.state.pending.some((command) => command.type === "retarget"), false);
+  assert.equal(app.state.timer.taskId, "task-old");
 });
 
 test("owner quarantine round-trip preserves selected-task base and pending claims", () => {
@@ -1634,7 +1651,7 @@ test("browser database schema and local-record read restore restart-safe default
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
 });
 
-test("task retarget persists rewritten starts and markers across reload", async () => {
+test("immutable retarget persists as a separate command without rewriting the start", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
   const database = await app.openDatabase();
@@ -1646,33 +1663,28 @@ test("task retarget persists rewritten starts and markers across reload", async 
     occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 0,
     observedElapsedMs: 0, taskId: "task-old"
   };
+  const retarget = {
+    id: "retarget-retarget", deviceId: "test-device", deviceSequence: 2, timerId: "timer-retarget",
+    type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
+    occurredAt: new Date(baseTime + 1_000).toISOString(), hlcWallMs: baseTime + 1_000, hlcCounter: 0,
+    observedElapsedMs: 0, taskId: "task-new"
+  };
   let transaction = database.transaction("pending", "readwrite");
   transaction.objectStore("pending").put(structuredClone(start));
+  transaction.objectStore("pending").put(structuredClone(retarget));
   await indexedDBTransaction(transaction);
-
-  app.state.pending = [structuredClone(start)];
-  app.state.retargetedTaskByTimerId = { "timer-retarget": "task-new" };
-  await app.persistRetargetState();
-
-  transaction = database.transaction(["meta", "pending"], "readonly");
-  const stored = await indexedDBRequest(transaction.objectStore("pending").get("start-retarget"));
-  const markers = await indexedDBRequest(transaction.objectStore("meta").get("retargetedTaskByTimerId"));
-  await indexedDBTransaction(transaction);
-  assert.equal(stored.taskId, "task-new");
-  assert.deepEqual(JSON.parse(JSON.stringify(markers.value)), { "timer-retarget": "task-new" });
 
   app.state.pending = [];
-  app.state.retargetedTaskByTimerId = {};
   const records = await app.readLocalRecords();
   app.restoreLocalRecords(records, { operations: [], resolution: null });
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.retargetedTaskByTimerId)), { "timer-retarget": "task-new" });
-  assert.equal(app.state.pending.find((command) => command.id === "start-retarget").taskId, "task-new");
+  assert.equal(app.state.pending.find((command) => command.id === "start-retarget").taskId, "task-old");
+  assert.equal(app.state.pending.find((command) => command.id === "retarget-retarget").taskId, "task-new");
 
   database.close();
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
 });
 
-test("task retarget to No task clears the pending start and persists a null marker", async () => {
+test("immutable null retarget unassigns while the start keeps its task", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
   const database = await app.openDatabase();
@@ -1684,33 +1696,30 @@ test("task retarget to No task clears the pending start and persists a null mark
     occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 0,
     observedElapsedMs: 0, taskId: "task-old"
   };
+  const retarget = {
+    id: "retarget-null", deviceId: "test-device", deviceSequence: 2, timerId: "timer-null",
+    type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
+    occurredAt: new Date(baseTime + 1_000).toISOString(), hlcWallMs: baseTime + 1_000, hlcCounter: 0,
+    observedElapsedMs: 0, taskId: null
+  };
   let transaction = database.transaction("pending", "readwrite");
   transaction.objectStore("pending").put(structuredClone(start));
+  transaction.objectStore("pending").put(structuredClone(retarget));
   await indexedDBTransaction(transaction);
-
-  app.state.pending = [structuredClone(start)];
-  app.state.retargetedTaskByTimerId = { "timer-null": null };
-  await app.persistRetargetState();
-
-  transaction = database.transaction(["meta", "pending"], "readonly");
-  const stored = await indexedDBRequest(transaction.objectStore("pending").get("start-null"));
-  const markers = await indexedDBRequest(transaction.objectStore("meta").get("retargetedTaskByTimerId"));
-  await indexedDBTransaction(transaction);
-  assert.equal(Object.hasOwn(stored, "taskId"), false);
-  assert.deepEqual(JSON.parse(JSON.stringify(markers.value)), { "timer-null": null });
 
   app.state.pending = [];
-  app.state.retargetedTaskByTimerId = {};
   const records = await app.readLocalRecords();
   app.restoreLocalRecords(records, { operations: [], resolution: null });
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.retargetedTaskByTimerId)), { "timer-null": null });
-  assert.equal(Object.hasOwn(app.state.pending.find((command) => command.id === "start-null"), "taskId"), false);
+  assert.equal(app.state.pending.find((command) => command.id === "start-null").taskId, "task-old");
+  const stored = app.state.pending.find((command) => command.id === "retarget-null");
+  assert.equal(stored.taskId, null);
+  assert.equal(Object.hasOwn(stored, "taskId"), true);
 
   database.close();
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
 });
 
-test("retarget persistence sanitizes markers and leaves non-start commands alone", async () => {
+test("immutable retarget leaves non-target commands alone", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
   const database = await app.openDatabase();
@@ -1728,53 +1737,28 @@ test("retarget persistence sanitizes markers and leaves non-start commands alone
     occurredAt: new Date(baseTime + 1_000).toISOString(), hlcWallMs: baseTime + 1_000, hlcCounter: 0,
     observedElapsedMs: 1_000
   };
-  const foreignStart = {
-    id: "start-foreign", deviceId: "test-device", deviceSequence: 3, timerId: "timer-other",
-    type: "start", phase: "focus", plannedDurationMs: 1_500_000,
+  const retarget = {
+    id: "retarget-mixed", deviceId: "test-device", deviceSequence: 3, timerId: "timer-good",
+    type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
     occurredAt: new Date(baseTime + 2_000).toISOString(), hlcWallMs: baseTime + 2_000, hlcCounter: 0,
-    observedElapsedMs: 0, taskId: "task-foreign"
+    observedElapsedMs: 1_000, taskId: "task-new"
   };
   let transaction = database.transaction("pending", "readwrite");
-  for (const command of [start, pause, foreignStart]) transaction.objectStore("pending").put(structuredClone(command));
+  for (const command of [start, pause, retarget]) transaction.objectStore("pending").put(structuredClone(command));
   await indexedDBTransaction(transaction);
-
-  app.state.pending = structuredClone([start, pause, foreignStart]);
-  app.state.retargetedTaskByTimerId = {
-    "timer-good": "task-new",
-    "": "task-bad",
-    "timer-empty": "",
-    "timer-num": 123,
-    "timer-other": null
-  };
-  await app.persistRetargetState();
-
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.retargetedTaskByTimerId)), {
-    "timer-good": "task-new",
-    "timer-other": null
-  });
-  transaction = database.transaction(["meta", "pending"], "readonly");
-  const storedStart = await indexedDBRequest(transaction.objectStore("pending").get("start-mixed"));
-  const storedPause = await indexedDBRequest(transaction.objectStore("pending").get("pause-mixed"));
-  const storedForeign = await indexedDBRequest(transaction.objectStore("pending").get("start-foreign"));
-  const markers = await indexedDBRequest(transaction.objectStore("meta").get("retargetedTaskByTimerId"));
-  await indexedDBTransaction(transaction);
-  assert.equal(storedStart.taskId, "task-new");
-  assert.equal(Object.hasOwn(storedPause, "taskId"), false);
-  assert.equal(Object.hasOwn(storedForeign, "taskId"), false);
-  assert.deepEqual(JSON.parse(JSON.stringify(markers.value)), { "timer-good": "task-new", "timer-other": null });
 
   app.state.pending = [];
-  app.state.retargetedTaskByTimerId = {};
   const records = await app.readLocalRecords();
   app.restoreLocalRecords(records, { operations: [], resolution: null });
-  assert.equal(app.state.pending.find((command) => command.id === "start-mixed").taskId, "task-new");
+  assert.equal(app.state.pending.find((command) => command.id === "start-mixed").taskId, "task-old");
   assert.equal(Object.hasOwn(app.state.pending.find((command) => command.id === "pause-mixed"), "taskId"), false);
+  assert.equal(app.state.pending.find((command) => command.id === "retarget-mixed").taskId, "task-new");
 
   database.close();
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
 });
 
-test("retarget markers stay bounded to the live running focus timer", () => {
+test("immutable retarget applies only to the live running focus timer", () => {
   const app = loadTaskProjection();
   app.state.tasks = [{ id: "task-new", title: "New" }, { id: "task-other", title: "Other" }];
   app.state.history = [{ timerId: "timer-history", taskId: "task-old" }];
@@ -1782,21 +1766,18 @@ test("retarget markers stay bounded to the live running focus timer", () => {
     id: "timer-live", phase: "focus", status: "running", plannedDurationMs: 1_500_000,
     elapsedAtAnchorMs: 0, anchorAt: new Date(baseTime).toISOString(), lastIntent: null, taskId: "task-old"
   };
-  app.state.retargetedTaskByTimerId = {
-    "timer-live": "task-new",
-    "timer-history": "task-other",
-    "timer-dead": "task-new"
-  };
-  app.applyTaskRetarget();
+  app.state.baseTimer = structuredClone(app.state.timer);
+  app.state.baseHistory = [];
+  app.state.pending = [{
+    id: "retarget-live", deviceId: "test-device", deviceSequence: 2, timerId: "timer-live",
+    type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
+    occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 1,
+    observedElapsedMs: 0, taskId: "task-new"
+  }];
+  app.rebuildOptimisticState();
   assert.equal(app.state.timer.taskId, "task-new");
-  assert.deepEqual(app.state.retargetedTaskByTimerId, {
-    "timer-live": "task-new",
-    "timer-history": "task-other"
-  });
   assert.equal(app.displayTimer().taskId, "task-new");
-  assert.equal(app.historyTaskContext({ timerId: "timer-live", taskId: "task-old" }, app.state.tasks), "New");
-  assert.equal(app.historyTaskContext({ timerId: "timer-history", taskId: "task-old" }, app.state.tasks), "Other");
-  assert.equal(app.historyTaskContext({ timerId: "timer-dead", taskId: "task-old" }, app.state.tasks), "Deleted task");
+  assert.equal(app.historyTaskContext({ timerId: "timer-history", taskId: "task-old" }, app.state.tasks), "Deleted task");
 
   for (const timer of [
     { id: "timer-live", phase: "short_break", status: "running", taskId: "task-old" },
@@ -1806,20 +1787,16 @@ test("retarget markers stay bounded to the live running focus timer", () => {
     { id: "timer-live", phase: "focus", status: "superseded", taskId: "task-old" }
   ]) {
     app.state.timer = { ...timer, plannedDurationMs: 1_500_000 };
-    app.state.retargetedTaskByTimerId = { "timer-live": "task-new" };
-    app.applyTaskRetarget();
+    app.state.baseTimer = structuredClone(app.state.timer);
+    app.state.pending = [{
+      id: "retarget-inert", deviceId: "test-device", deviceSequence: 2, timerId: "timer-live",
+      type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
+      occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 1,
+      observedElapsedMs: 0, taskId: "task-new"
+    }];
+    app.rebuildOptimisticState();
     assert.equal(app.state.timer.taskId, "task-old", `${timer.phase}/${timer.status}`);
-    assert.equal(app.displayTimer().taskId !== "task-new" || timer.status === "idle", true, `${timer.phase}/${timer.status}`);
   }
-
-  app.state.timer = {
-    id: "timer-next", phase: "focus", status: "running", plannedDurationMs: 1_500_000,
-    elapsedAtAnchorMs: 0, anchorAt: new Date(baseTime).toISOString(), lastIntent: null, taskId: "task-old"
-  };
-  app.state.history = [];
-  app.state.retargetedTaskByTimerId = { "timer-live": "task-new" };
-  app.applyTaskRetarget();
-  assert.deepEqual(app.state.retargetedTaskByTimerId, {});
 });
 
 test("legacy duration migrations atomically normalize queues and retire local settings", async () => {

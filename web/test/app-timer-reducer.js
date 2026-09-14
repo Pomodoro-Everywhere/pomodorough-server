@@ -186,6 +186,16 @@ class TimerReduction {
     }
   }
 
+  applyRetarget() {
+    if (!this.commandMatches() || !this.timer) return;
+    if (!["running", "paused"].includes(this.timer.status) || this.timer.phase !== "focus") return;
+    if (this.command.phase !== "focus") return;
+    if (!Object.hasOwn(this.command, "taskId")) return;
+    const taskId = this.command.taskId;
+    if (taskId !== null && !(typeof taskId === "string" && taskId)) return;
+    this.timer.taskId = taskId;
+  }
+
   apply() {
     if (this.command.type === "start") this.applyStart();
     else if (this.command.type === "pause") this.applyPause();
@@ -193,6 +203,7 @@ class TimerReduction {
     else if (this.command.type === "finish") this.applyTerminal("completed");
     else if (this.command.type === "cancel") this.applyTerminal("cancelled");
     else if (this.command.type === "clear") this.applyClear();
+    else if (this.command.type === "retarget") this.applyRetarget();
     if (this.timer) {
       delete this.timer._historyId;
       if (this.timer.id) this.sessions.set(this.timer.id, this.clone(this.timer));

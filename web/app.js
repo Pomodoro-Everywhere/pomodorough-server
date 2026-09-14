@@ -31,8 +31,8 @@
   const COMPATIBILITY_ACTIONS = Object.freeze([
     "phaseLabel", "timerStatusLabel", "formatTaskDuration", "formatHistoryDate", "setI18nForTest",
     "emptyTimer", "displayTimer", "elapsedFor", "trustedNow", "responseClockOffset",
-    "rebuildOptimisticState", "selectedTaskIdForNextFocus", "applyTaskRetarget", "reapplyRetargetToPending",
-    "persistRetargetState", "refreshAllPendingOperations",
+    "rebuildOptimisticState", "selectedTaskIdForNextFocus",
+    "persistRetargetOperation", "refreshAllPendingOperations",
     "renderTaskSelector", "issueSelectedTaskOperation", "ownerStateValue", "resetOwnerState",
     "restoreOwnerState", "activateCachedOwnerOffline", "requestResult", "transactionDone",
     "openDatabase", "readLocalRecords", "restoreLocalRecords", "persistNewLocalIdentity",
