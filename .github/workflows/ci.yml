@@ -82,6 +82,10 @@ jobs:
             server_pid=$!
             # The ten-thousand-history replay already runs under the race
             # detector above; repeating it here would triple a ~10m suite.
+            # Full-scale coverage (the seeded replay plus ten-thousand-command
+            # Sync ingestion via POMODOROUGH_SCALE_INGESTION=1, S68) lives in
+            # the scheduled scale workflow (scale-nightly.yml), which runs
+            # this package without the skip.
             go test -race -count=1 -skip '^TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession$' ./internal/store &
             store_pid=$!
             server_status=0

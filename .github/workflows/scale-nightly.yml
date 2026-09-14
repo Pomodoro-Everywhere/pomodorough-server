@@ -1,0 +1,63 @@
+name: Scheduled sync scale gate
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-sync-scale
+  cancel-in-progress: false
+
+jobs:
+  sync-scale:
+    name: Sync ingestion at scale (S68)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check out pinned shared core
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Pomodoro-Everywhere/pomodorough-core
+          ref: 44d38bca7583e7121173bc69f744926ddecf7b43
+          path: shared-core
+          persist-credentials: false
+      - name: Rebuild and verify embedded shared core
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.97.1
+          (
+            cd shared-core
+            cargo +1.97.1 build --release --target wasm32-unknown-unknown --locked
+          )
+          rebuilt=shared-core/target/wasm32-unknown-unknown/release/pomodorough_core.wasm
+          python3 shared-core/scripts/canonicalize_wasm_artifact.py "$rebuilt"
+          python3 shared-core/scripts/verify_wasm_artifact.py \
+            "$rebuilt"
+          python3 shared-core/scripts/verify_wasm_artifact.py \
+            internal/sharedcore/pomodorough_core.wasm \
+            --sha256 51639c4f9261cf26f940934c093f9caf4458e4b04ff50022a75044da34091619
+          python3 scripts/verify_shared_core_provenance.py \
+            --sha256 51639c4f9261cf26f940934c093f9caf4458e4b04ff50022a75044da34091619 \
+            "$rebuilt" \
+            internal/sharedcore/pomodorough_core.wasm \
+            web/pomodorough_core.wasm
+          cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm
+          test "$(cat internal/sharedcore/CORE_COMMIT)" = "44d38bca7583e7121173bc69f744926ddecf7b43"
+          (cd internal/sharedcore && sha256sum --check pomodorough_core.wasm.sha256)
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Ten-thousand-history replay and Sync ingestion under race
+        env:
+          POMODOROUGH_SCALE_INGESTION: "1"
+        run: go test -race -timeout 40m -count=1 -run '^TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession$|^TestS68' -v ./internal/store
