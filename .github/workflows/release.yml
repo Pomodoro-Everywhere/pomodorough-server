@@ -115,7 +115,7 @@ jobs:
       - name: Test integration credential documentation
         run: python3 -m unittest scripts/test_integration_credential_docs.py -v
       - name: Test server with race detector
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
       - name: Test release identity contract
         run: python3 -m unittest discover -s scripts -p 'test_release*.py' -v
       - name: Vet server

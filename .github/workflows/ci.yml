@@ -73,14 +73,16 @@ jobs:
       - name: Test integration credential documentation
         run: python3 -m unittest scripts/test_integration_credential_docs.py -v
       - name: Test with race detector
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
       - name: Repeat Server race gate under package parallelism
         run: |
           for attempt in 1 2 3; do
             echo "Server race gate attempt $attempt"
             go test -race -count=1 -run '^TestLogicalProtocolClientsConvergeAcrossTimerTransitionTable$' ./internal/server &
             server_pid=$!
-            go test -race -count=1 ./internal/store &
+            # The ten-thousand-history replay already runs under the race
+            # detector above; repeating it here would triple a ~10m suite.
+            go test -race -count=1 -skip '^TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession$' ./internal/store &
             store_pid=$!
             server_status=0
             store_status=0

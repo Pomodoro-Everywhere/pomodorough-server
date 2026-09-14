@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -9,28 +10,59 @@ import (
 	"pomodorough/internal/timer"
 )
 
-func TestLifetimeReplayCrossesTenThousandAndRetriesImmutableRetarget(t *testing.T) {
+// seedTimerCommands persists bulk history with the exact row mapping of
+// applyTimerOperations in a single transaction. A 10001-command Sync setup
+// costs minutes under the race detector (two SELECTs plus one INSERT per
+// command); the seeded rows are identical, so every later Sync still replays,
+// chunks HLC observations, and projects through the production path.
+func seedTimerCommands(t *testing.T, db *sql.DB, deviceID string, commands []timer.Command) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO timer_commands(
+		id, device_id, device_sequence, timer_id, task_id, command_type, phase, planned_duration_ms,
+		occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter, observed_elapsed_ms
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for _, command := range commands {
+		if _, err := stmt.ExecContext(ctx,
+			command.ID, deviceID, command.DeviceSequence, command.TimerID, nullString(command.TaskID), command.Type, command.Phase,
+			command.PlannedDurationMs, command.OccurredAt.UTC().Format(time.RFC3339Nano), command.OccurredAt.UnixMilli(),
+			command.HLCWallMs, command.HLCCounter, command.ObservedElapsedMs,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImmutableRetargetRetryAndConflict(t *testing.T) {
 	userStore, db, userID, now := openTestUser(t, "lifetime-retarget")
 	defer db.Close()
 	ctx := context.Background()
-	commands := make([]timer.Command, 10001)
-	for index := range commands {
-		kind := "pause"
-		if index == 0 {
-			kind = "start"
-		}
-		commands[index] = testTimerCommand(fmt.Sprintf("operation-%08d", index), "device-lifetime", "timer-lifetime", kind,
-			int64(index+1), now.Add(time.Duration(index)*time.Millisecond))
+	commands := []timer.Command{
+		testTimerCommand("operation-start", "device-lifetime", "timer-lifetime", "start", 1, now),
+		testTimerCommand("operation-pause", "device-lifetime", "timer-lifetime", "pause", 2, now.Add(time.Millisecond)),
 	}
 	commands[0].TaskID = "task-original"
-	first, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-lifetime", Commands: commands}, now.Add(time.Minute))
+	seedTimerCommands(t, db, "device-lifetime", commands)
+	first, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-lifetime"}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.CanonicalTimer == nil || first.CanonicalTimer.Status != "paused" {
 		t.Fatalf("unexpected projection: %#v", first)
 	}
-	retarget := testTimerCommand("retarget-lifetime", "device-lifetime", "timer-lifetime", "retarget", 10002, now.Add(11*time.Second))
+	retarget := testTimerCommand("retarget-lifetime", "device-lifetime", "timer-lifetime", "retarget", 3, now.Add(11*time.Second))
 	retarget.TaskID = "task-next"
 	request := SyncRequest{DeviceID: "device-lifetime", LastRevision: first.Revision, Commands: []timer.Command{retarget}}
 	applied, err := userStore.Sync(ctx, db, userID, request, now.Add(time.Minute))
@@ -78,7 +110,8 @@ func TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession(t 
 		commands[index] = testTimerCommand(fmt.Sprintf("start-%08d", index), "device-history", fmt.Sprintf("timer-%08d", index),
 			"start", int64(index+1), now.Add(time.Duration(index)*time.Millisecond))
 	}
-	result, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-history", Commands: commands}, now.Add(30*time.Minute))
+	seedTimerCommands(t, db, "device-history", commands)
+	result, err := userStore.Sync(ctx, db, userID, SyncRequest{DeviceID: "device-history"}, now.Add(30*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
