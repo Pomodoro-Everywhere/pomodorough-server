@@ -196,7 +196,7 @@ WORKFLOW_CONTRACTS = (
         "Test shared-core provenance verifier",
         "python3 -m unittest scripts/test_shared_core_provenance.py -v",
         "Test with race detector",
-        "go test -race ./...",
+        "go test -race -timeout 20m ./...",
     ),
     WorkflowContract(
         ".github/workflows/release.yml",
@@ -205,7 +205,7 @@ WORKFLOW_CONTRACTS = (
         "Test shared-core provenance verifier",
         "python3 -m unittest scripts/test_shared_core_provenance.py -v",
         "Test server with race detector",
-        "go test -race ./...",
+        "go test -race -timeout 20m ./...",
     ),
 )
 
