@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify-core:
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: f72d7ded96d78ed559ff6463e2d59de10181bfb0
+          ref: cd3c129438309cba33f2aead6f3bc72257cd5564
           path: shared-core
           persist-credentials: false
       - name: Restore Rust toolchain and cargo cache
@@ -65,9 +65,9 @@ jobs:
           python3 shared-core/scripts/verify_wasm_artifact.py "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 94bba0da3dec697e29c83b60917debeb5074911d4bbd1562fbf8dc2238c452d3
+            --sha256 3ec4ca03393a5822d3c5cb3b4c3c654a1cb7b0cae1938b731bd8e6505360a73d
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 94bba0da3dec697e29c83b60917debeb5074911d4bbd1562fbf8dc2238c452d3 \
+            --sha256 3ec4ca03393a5822d3c5cb3b4c3c654a1cb7b0cae1938b731bd8e6505360a73d \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
@@ -117,7 +117,7 @@ jobs:
       - name: Test server with race detector
         run: go test -race ./...
       - name: Test release identity contract
-        run: python3 -m unittest scripts/test_release_identity_s7.py -v
+        run: python3 -m unittest discover -s scripts -p 'test_release*.py' -v
       - name: Vet server
         run: go vet ./...
       - name: Scan reachable Go dependencies
@@ -571,6 +571,7 @@ jobs:
             dist/*.spdx.json \
             dist/SHA256SUMS \
             --verify-tag \
+            --target "$GITHUB_SHA" \
             --generate-notes \
             --draft \
             --title "$GITHUB_REF_NAME"
@@ -600,25 +601,16 @@ jobs:
             "pomodorough-server.spdx.json"
             "SHA256SUMS"
           )
-          verified="$(mktemp -d)"
-          gh release download "$GITHUB_REF_NAME" --dir "$verified"
           printf '%s\n' "${expected_assets[@]}" | sort > "$RUNNER_TEMP/expected-assets.txt"
-          find "$verified" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
+          find dist -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
           cmp "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
-          python3 scripts/release_identity.py verify-release \
-            --tag "$GITHUB_REF_NAME" \
-            --commit "$GITHUB_SHA" \
-            --directory "$verified" \
-            --checksums "$verified/SHA256SUMS"
-          printf '%s\0' "$verified"/*.tar.gz "$verified"/*.identity.json "$verified"/*.native.json | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
-          gh attestation verify "$verified/pomodorough-server.spdx.json" --repo "$GH_REPO" &
-          spdx_pid=$!
-          gh attestation verify "$verified/SHA256SUMS" --repo "$GH_REPO" &
-          sums_pid=$!
-          wait "$spdx_pid"
-          wait "$sums_pid"
+          printf '%s\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
+          python3 scripts/release_publication.py verify \
+            --seal "$RUNNER_TEMP/server-release-seal.json"
       - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        run: |
+          python3 scripts/release_publication.py publish \
+            --seal "$RUNNER_TEMP/server-release-seal.json"
