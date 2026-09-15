@@ -227,10 +227,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn('--target "$GITHUB_SHA"', workflow)
         self.assertIn("python3 -m unittest discover -s scripts -p 'test_release*.py' -v", workflow)
-        self.assertIn("printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}", workflow)
+        self.assertIn("printf '%s\\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {}", workflow)
+        self.assertNotIn("printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}", workflow)
         self.assertEqual(workflow.count('--seal "$RUNNER_TEMP/server-release-seal.json"'), 2)
         self.assertLess(workflow.index("release_publication.py verify"),
                         workflow.index("release_publication.py publish"))
+        self.assertIn("  verify-fast:\n", workflow)
+        self.assertIn("  verify-race:\n", workflow)
+        self.assertNotRegex(workflow, r"^  verify:\n")
+        self.assertIn("needs: [preflight, verify-fast, verify-core, verify-web]", workflow)
+        self.assertIn("needs: [build, verify-fast, verify-race]", workflow)
+        self.assertIn("needs: [package, verify-fast, verify-race]", workflow)
+        self.assertIn("release-gobuild-", workflow)
+        self.assertIn("~/.cache/go-build", workflow)
+        self.assertIn("Validate draft seal inputs", workflow)
+        self.assertLess(workflow.index("  preflight:"), workflow.index("  build:"))
 
     def test_publication_functions_remain_within_size_limit(self):
         source = inspect.getsource(publication)

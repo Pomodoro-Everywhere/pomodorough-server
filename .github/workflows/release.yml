@@ -72,10 +72,39 @@ jobs:
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm
 
-  verify:
-    name: Verify release
+  preflight:
+    name: Validate draft seal inputs
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Check workflow action pins
+        run: python3 scripts/check_workflow_pins.py
+      - name: Validate draft seal inputs
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/release_identity.py version "$GITHUB_REF_NAME")"
+          PYTHONPATH=scripts python3 -c "import os, release_identity; tag=os.environ['GITHUB_REF_NAME']; names=release_identity.release_asset_names(tag, True); assert len(names) == 17, names; print(f'draft seal inputs valid for {tag}: {len(names)} assets')"
+
+  verify-fast:
+    name: Verify release fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -98,6 +127,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Cache Go build cache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+          key: release-gobuild-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            release-gobuild-${{ runner.os }}-
       - name: Test server
         run: go test ./...
       - name: Cross-build Windows server and store tests
@@ -114,8 +153,6 @@ jobs:
         run: python3 -m unittest scripts/test_shared_core_provenance.py -v
       - name: Test integration credential documentation
         run: python3 -m unittest scripts/test_integration_credential_docs.py -v
-      - name: Test server with race detector
-        run: go test -race -timeout 20m ./...
       - name: Test release identity contract
         run: python3 -m unittest discover -s scripts -p 'test_release*.py' -v
       - name: Vet server
@@ -141,6 +178,45 @@ jobs:
           python3 -c 'import sqlite3, sys; db = sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE probe(value TEXT NOT NULL)"); db.execute("INSERT INTO probe VALUES (?)", ("restore-ready",)); db.commit(); db.close()' "$source_db"
           python3 scripts/restore_drill.py "$source_db" "$restored_db"
           test "$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT value FROM probe").fetchone()[0])' "$restored_db")" = "restore-ready"
+
+  verify-race:
+    name: Verify release race
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate tag-bound source identity
+        run: |
+          python3 scripts/release_identity.py validate-source \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --event-sha "$GITHUB_SHA" \
+            --event-ref "$GITHUB_REF" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --github-repository "$GITHUB_REPOSITORY"
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache Go build cache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+          key: release-gobuild-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            release-gobuild-${{ runner.os }}-
+      - name: Test server with race detector
+        run: go test -race -timeout 20m ./...
 
   verify-web:
     name: Verify PWA
@@ -177,7 +253,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.goos }} ${{ matrix.goarch }}
-    needs: [verify, verify-core, verify-web]
+    needs: [preflight, verify-fast, verify-core, verify-web]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
@@ -244,6 +320,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Cache Go build cache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+          key: release-gobuild-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            release-gobuild-${{ runner.os }}-
       - name: Test Windows data directory lock
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -363,7 +449,7 @@ jobs:
 
   package:
     name: Package ${{ matrix.goos }} ${{ matrix.goarch }}
-    needs: build
+    needs: [build, verify-fast, verify-race]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -486,7 +572,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: package
+    needs: [package, verify-fast, verify-race]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -604,7 +690,8 @@ jobs:
           printf '%s\n' "${expected_assets[@]}" | sort > "$RUNNER_TEMP/expected-assets.txt"
           find dist -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
           cmp "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
-          printf '%s\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
+          # Package attestations were verified before SBOM/finalize; the seal
+          # binds downloads to that evidence, so do not re-verify here.
           python3 scripts/release_publication.py verify \
             --seal "$RUNNER_TEMP/server-release-seal.json"
       - name: Publish verified release

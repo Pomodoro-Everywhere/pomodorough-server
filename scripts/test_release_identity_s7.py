@@ -197,6 +197,66 @@ def public_asset_matrix(workflow: str) -> tuple[str, ...]:
     return tuple(re.findall(r'^            "([^"]+)"$', match.group(1), re.MULTILINE))
 
 
+def job_needs(workflow: str, job: str) -> list[str]:
+    text = job_text(workflow, job)
+    match = re.search(r"^\s*needs:\s*(.+)$", text, re.MULTILINE)
+    if match is None:
+        return []
+    raw = match.group(1).strip()
+    if raw.startswith("["):
+        return [part.strip() for part in raw.strip("[]").split(",") if part.strip()]
+    return [raw]
+
+
+def gate_errors(workflow: str) -> list[str]:
+    errors = []
+    if re.search(r"^  verify:\n", workflow, re.MULTILINE):
+        errors.append("old verify job remains")
+    for job in ("preflight", "verify-fast", "verify-race"):
+        if f"  {job}:\n" not in workflow:
+            errors.append(f"missing {job} job")
+    fast = job_text(workflow, "verify-fast")
+    race = job_text(workflow, "verify-race")
+    if "go test -race" in fast:
+        errors.append("verify-fast contains race")
+    if "go test -race -timeout 20m ./..." not in race:
+        errors.append("verify-race missing race")
+    if "go test ./..." not in fast:
+        errors.append("verify-fast missing fast tests")
+    build_needs = job_needs(workflow, "build")
+    for dependency in ("preflight", "verify-fast", "verify-core", "verify-web"):
+        if dependency not in build_needs:
+            errors.append(f"build missing {dependency}")
+    if "verify-race" in build_needs:
+        errors.append("build blocked on verify-race")
+    if "verify" in build_needs:
+        errors.append("build uses old verify")
+    for job in ("package", "release"):
+        needs = job_needs(workflow, job)
+        for dependency in ("verify-fast", "verify-race"):
+            if dependency not in needs:
+                errors.append(f"{job} missing {dependency}")
+        if "verify" in needs:
+            errors.append(f"{job} uses old verify")
+    if "build" not in job_needs(workflow, "package"):
+        errors.append("package missing build")
+    if "package" not in job_needs(workflow, "release"):
+        errors.append("release missing package")
+    if "release-gobuild-" not in workflow or "~/.cache/go-build" not in workflow:
+        errors.append("go build cache not cached")
+    preflight = job_text(workflow, "preflight")
+    if "Validate draft seal inputs" not in preflight:
+        errors.append("preflight missing seal validation")
+    if "  preflight:\n" in workflow and "  build:\n" in workflow:
+        if workflow.index("  preflight:") > workflow.index("  build:"):
+            errors.append("preflight not before builds")
+    if "printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}" in workflow:
+        errors.append("redundant attest-verify remains")
+    if "printf '%s\\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {}" not in workflow:
+        errors.append("package attestations missing")
+    return errors
+
+
 def workflow_contract_errors(workflow: str) -> list[str]:
     errors = []
     if build_matrix(workflow) != EXPECTED_BUILD_MATRIX:
@@ -207,6 +267,7 @@ def workflow_contract_errors(workflow: str) -> list[str]:
         errors.append("public asset matrix")
     errors.extend(required_workflow_errors(workflow))
     errors.extend(step_order_errors(workflow))
+    errors.extend(gate_errors(workflow))
     return errors
 
 
@@ -229,12 +290,25 @@ def required_workflow_errors(workflow: str) -> list[str]:
         "SBOM": "dist/pomodorough-server.spdx.json",
         "checksums": "dist/SHA256SUMS",
         "draft gate": "Download and verify draft release assets",
+        "fast verify job": "  verify-fast:\n",
+        "race verify job": "  verify-race:\n",
+        "early seal validation": "Validate draft seal inputs",
+        "go build cache": "release-gobuild-",
+        "fast gate": "needs: [preflight, verify-fast, verify-core, verify-web]",
+        "package dual gate": "needs: [build, verify-fast, verify-race]",
+        "publish dual gate": "needs: [package, verify-fast, verify-race]",
     }
     return [name for name, token in required.items() if token not in workflow]
 
 
 def step_order_errors(workflow: str) -> list[str]:
     expected = {
+        "preflight": [
+            "Check out repository",
+            "Validate tag-bound source identity",
+            "Check workflow action pins",
+            "Validate draft seal inputs",
+        ],
         "build": [
             "Build reproducible native binary",
             "Build reproducible native Windows binary",
@@ -570,6 +644,33 @@ class ReleaseIdentityTests(unittest.TestCase):
                 "      - name: Attest archive and identity binding",
                 "      - name: Replace archive after bind\n        run: cp forged dist/archive.tar.gz\n      - name: Attest archive and identity binding",
                 1,
+            ),
+            "package without race gate": self.workflow.replace(
+                "needs: [build, verify-fast, verify-race]", "needs: [build, verify-fast]", 1
+            ),
+            "publish without race gate": self.workflow.replace(
+                "needs: [package, verify-fast, verify-race]", "needs: [package, verify-fast]", 1
+            ),
+            "build blocked on race": self.workflow.replace(
+                "needs: [preflight, verify-fast, verify-core, verify-web]",
+                "needs: [preflight, verify-fast, verify-race, verify-core, verify-web]",
+                1,
+            ),
+            "old verify gate": self.workflow.replace(
+                "needs: [preflight, verify-fast, verify-core, verify-web]",
+                "needs: [verify, verify-core, verify-web]",
+                1,
+            ),
+            "missing go build cache": self.workflow.replace(
+                "release-gobuild-", "missing-"
+            ),
+            "redundant attest-verify": self.workflow.replace(
+                "# Package attestations were verified before SBOM/finalize; the seal",
+                "printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {} --repo \"$GH_REPO\"\n          # Package attestations were verified before SBOM/finalize; the seal",
+                1,
+            ),
+            "missing preflight": self.workflow.replace(
+                "  preflight:\n", "  preflight-disabled:\n", 1
             ),
         }
         for name, workflow in mutations.items():
