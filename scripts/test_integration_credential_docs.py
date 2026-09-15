@@ -200,12 +200,12 @@ WORKFLOW_CONTRACTS = (
     ),
     WorkflowContract(
         ".github/workflows/release.yml",
-        "verify",
+        "verify-fast",
         'on:\n  push:\n    tags:\n      - "v*"\n',
         "Test shared-core provenance verifier",
         "python3 -m unittest scripts/test_shared_core_provenance.py -v",
-        "Test server with race detector",
-        "go test -race -timeout 20m ./...",
+        "Test release identity contract",
+        "python3 -m unittest discover -s scripts -p 'test_release*.py' -v",
     ),
 )
 
