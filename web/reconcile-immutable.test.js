@@ -7,7 +7,7 @@
 // projectionPending-safe optimistic state. Retarget never rewrites a pending
 // Start and never overlays canonical history or task totals.
 //
-// Reconcile paths run against the repinned Core v0.40.0 WASM, which natively
+// Reconcile paths run against the repinned Core v0.41.0 WASM, which natively
 // implements `reconcile.rebase.v2`.
 
 const test = require("node:test");

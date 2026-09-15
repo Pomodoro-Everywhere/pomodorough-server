@@ -55,7 +55,7 @@ func testTimerCommand(id, deviceID, timerID, commandType string, sequence int64,
 	}
 }
 
-// canonicalTaskID derives the task identity core v0.40.0 requires for an
+// canonicalTaskID derives the task identity core v0.41.0 requires for an
 // upsert title, mirroring the production parse path.
 func canonicalTaskID(t *testing.T, title string) string {
 	t.Helper()
