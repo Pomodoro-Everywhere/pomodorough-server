@@ -508,5 +508,17 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation
 func (s *Server) internalAPIError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	s.logger.Error(operation, "error", err)
 	reportInternalErrorToErrorMonitoring(err, r, operation)
+	echoIdempotencyKey(w, r)
 	writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
+}
+
+// echoIdempotencyKey returns the client-supplied idempotency key so
+// retried requests can match responses without resubmitting work.
+func echoIdempotencyKey(w http.ResponseWriter, r *http.Request) {
+	if r == nil {
+		return
+	}
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		w.Header().Set("Idempotency-Key", key)
+	}
 }

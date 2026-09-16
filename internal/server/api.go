@@ -143,7 +143,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, identity pri
 		return
 	}
 	if err != nil {
-		s.internalAPIError(w, r, "sync account mutations", err)
+		s.writeSyncMutationError(w, r, err)
 		return
 	}
 	s.logger.Info("sync applied",

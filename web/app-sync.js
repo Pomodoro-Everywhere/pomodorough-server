@@ -5,9 +5,18 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const RETRY_MAX_MS = 60_000;
-  const REMOTE_SYNC_INTERVAL_MS = 15_000;
-  const TIMER_OWNER_LEASE_MS = 60_000;
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks sync */ }
+    return fallback;
+  }
+
+  const RETRY_MAX_MS = timingMs("retryMax", 60_000);
+  const REMOTE_SYNC_INTERVAL_MS = timingMs("remoteSyncInterval", 15_000);
+  const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
 
   function reportFrontendError(error, operation) {
     try {
@@ -167,7 +176,7 @@
     }
 
     async waitForUnlockedAction() {
-      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
+      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
     }
 
     async acceptSyncResponse(payload, sent, expectedUserId, timing) {
@@ -360,7 +369,18 @@
         this.use.redirectToLogin();
         return;
       }
-      if (response.status === 409) throw new this.syncStorage.AccountOwnershipError();
+      if (response.status === 409) {
+        const conflict = typeof response.json === "function"
+          ? await response.json().catch(() => ({}))
+          : {};
+        context.assertCurrent();
+        if (conflict && conflict.error === "account incarnation changed") {
+          throw new this.syncStorage.AccountOwnershipError();
+        }
+        throw new Error(this.use.tr(
+          "sync.failed", { status: response.status }, `Sync failed (${response.status}).`
+        ));
+      }
       if (!response.ok) throw new Error(this.use.tr(
         "sync.failed", { status: response.status }, `Sync failed (${response.status}).`
       ));
@@ -463,7 +483,7 @@
     }
 
     resetSyncRetry() {
-      this.retryDelayMs = 1000;
+      this.retryDelayMs = timingMs("retryInitial", 1000);
       this.host.clearTimeout(this.retryTimer);
     }
 

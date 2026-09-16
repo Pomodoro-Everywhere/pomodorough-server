@@ -1893,12 +1893,14 @@ test("settings and snapshot persistence values isolate mutable canonical state",
 
 test("account deletion does not broadcast local sign-out before server confirmation", () => {
   const source = fs.readFileSync(path.join(__dirname, "app-session.js"), "utf8");
-  const start = source.indexOf("    async deleteAccount()");
+  assert.doesNotMatch(source, /host\.prompt/);
+  const start = source.indexOf("    async confirmDeleteAccount(");
   const end = source.indexOf("    async requestAccountDeletion", start);
   assert.ok(start >= 0 && end > start, "session lifecycle must own account deletion");
   const body = source.slice(start, end);
-  assert.ok(body.indexOf("await this.requestAccountDeletion(confirmation)")
+  assert.ok(body.indexOf("await this.requestAccountDeletion(")
     < body.indexOf("this.markPendingLogout()"));
+  assert.match(source, /async deleteAccount\(confirmation\)[\s\S]{0,200}openDeleteAccountDialog/);
 });
 
 test("account deletion requires the exact destructive phrase", () => {
@@ -1919,18 +1921,16 @@ test("account deletion keeps local state when confirmation, connectivity, or ser
     return { ok: false, status: 503 };
   });
 
-  app.setPromptResult("delete");
-  await app.deleteAccount();
+  await app.deleteAccount("delete");
   assert.match(app.notice().textContent, /Type DELETE exactly/);
   assert.equal(requests, 0);
 
-  app.setPromptResult("DELETE");
-  await app.deleteAccount();
+  await app.deleteAccount("DELETE");
   assert.match(app.notice().textContent, /Connect to the account server/);
   assert.equal(requests, 0);
 
   app.state.csrfToken = "csrf-current";
-  await app.deleteAccount();
+  await app.deleteAccount("DELETE");
   assert.equal(requests, 1);
   assert.match(app.notice().textContent, /Account deletion failed \(503\)/);
   assert.equal(app.deleteAccountButtonDisabled(), false);
@@ -1945,13 +1945,12 @@ test("confirmed account deletion clears local state only after server success", 
   app.setStorageMethodForTest("guardedMutation", async () => {});
   const requests = [];
   app.state.csrfToken = "csrf-current";
-  app.setPromptResult("DELETE");
   app.setFetchForTest(async (url, options) => {
     requests.push({ url, options });
     return { ok: true, status: 204 };
   });
 
-  await app.deleteAccount();
+  await app.deleteAccount("DELETE");
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "/api/v1/account");

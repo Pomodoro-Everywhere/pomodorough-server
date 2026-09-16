@@ -346,6 +346,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Default().Warn("encode JSON response", "error", err)
 		reportInternalErrorToErrorMonitoring(err, r, "encode JSON response")
 	}
 }

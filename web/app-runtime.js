@@ -5,6 +5,25 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const TIMING_MS = Object.freeze({
+    defer: 0,
+    focusDefer: 0,
+    retryInitial: 1000,
+    retryMax: 60_000,
+    remoteSyncInterval: 15_000,
+    bootstrapLease: 5 * 60_000,
+    timerOwnerLease: 60_000,
+    timerOwnerHeartbeat: 15_000
+  });
+
+  function timingMs(name, fallback) {
+    try {
+      const value = TIMING_MS[name];
+      if (Number.isFinite(value)) return value;
+    } catch { /* frozen config read never throws */ }
+    return fallback;
+  }
+
   const EVENT_VALIDATORS = Object.freeze({
     "revision-hint": (value) => value?.revision === null || Number.isFinite(value?.revision)
   });
@@ -145,5 +164,5 @@
     });
   }
 
-  return Object.freeze({ EVENT_VALIDATORS, createRuntime, validateManifest });
+  return Object.freeze({ TIMING_MS, timingMs, EVENT_VALIDATORS, createRuntime, validateManifest });
 });

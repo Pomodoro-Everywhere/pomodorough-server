@@ -9,6 +9,15 @@
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
 
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks view */ }
+    return fallback;
+  }
+
   function reportFrontendError(error, operation) {
     try {
       const reporter = typeof globalThis !== "undefined"
@@ -77,9 +86,9 @@
       "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderDialTicks", "renderTimer",
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
       "renderTasks", "formatTaskDuration", "formatHistoryDate", "renderProfile",
-      "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice",
+      "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice", "dismissNotice",
       "createDialTicks", "dialTickCountFor", "clampInput", "setupPreferenceEvents", "setupTaskEvents",
-      "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice",
+      "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel",
       "setupBootstrapEvents", "setupConnectivityEvents", "setupInstallEvents", "setupEvents"
     ],
     emits: [],
@@ -569,7 +578,7 @@
     actions() {
       return super.actions([
         "renderProfile", "renderSyncStatus", "renderConflict", "renderBootstrapDialog",
-        "resetBootstrapChoice"
+        "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel"
       ]);
     }
 
@@ -651,10 +660,23 @@
         ?? syncCore.completedHistoryCount(use.localBootstrapState().history);
       const remoteCount = state.bootstrapPlan?.remoteHistoryCount
         ?? syncCore.completedHistoryCount(state.bootstrapPreview?.history);
-      elements.bootstrapTitle.textContent = limitRecovery ? "Local queue too large" : "Choose synchronized state";
-      elements.bootstrapSummary.textContent = limitRecovery
-        ? "Upload stopped before any local or remote data changed."
-        : `${localCount} local completed run${localCount === 1 ? "" : "s"}; ${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}. Timers, tasks, or settings may also differ.`;
+      elements.bootstrapTitle.textContent = limitRecovery
+        ? use.tr("bootstrap.limitTitle", {}, "Local queue too large")
+        : use.tr("bootstrap.title", {}, "Choose synchronized state");
+      if (limitRecovery) {
+        elements.bootstrapSummary.textContent = use.tr(
+          "bootstrap.limitSummary", {}, "Upload stopped before any local or remote data changed."
+        );
+      } else {
+        const localRuns = use.tr("bootstrap.localRuns", { count: localCount },
+          `${localCount} local completed run${localCount === 1 ? "" : "s"}`);
+        const remoteRuns = use.tr("bootstrap.remoteRuns", { count: remoteCount },
+          `${remoteCount} remote completed run${remoteCount === 1 ? "" : "s"}`);
+        const divergenceNote = use.tr(
+          "bootstrap.divergenceNote", {}, "Timers, tasks, or settings may also differ."
+        );
+        elements.bootstrapSummary.textContent = `${localRuns}; ${remoteRuns}. ${divergenceNote}`;
+      }
       elements.bootstrapDialog.setAttribute("aria-busy", String(view.busy));
       if (state.bootstrapOwnershipConfirmation) elements.bootstrapSummary.textContent = use.tr("bootstrap.ownershipChanged", {},
         "Account ownership changed or predates incarnation validation. Retained work cannot be uploaded to this account. Keep remote explicitly discards retained local work; cancel leaves it untouched.");
@@ -694,13 +716,14 @@
 
     focusBootstrapDialog() {
       const { state, elements, host } = this;
+      elements.bootstrapDialog.setAttribute?.("aria-modal", "true");
       if (!elements.bootstrapDialog.open) elements.bootstrapDialog.showModal();
       if (!state.bootstrapFocusTarget) return;
       const target = state.bootstrapFocusTarget;
       state.bootstrapFocusTarget = null;
       host.setTimeout(() => {
         if (elements.bootstrapDialog.open && !target.hidden) target.focus();
-      }, 0);
+      }, timingMs("focusDefer", 0));
     }
 
     renderBootstrapDialog() {
@@ -754,24 +777,40 @@
       ) || elements.bootstrapChoiceButtons[0];
       this.renderBootstrapDialog();
     }
+
+    refocusBootstrapAfterCancel() {
+      const { state, elements, document } = this;
+      if (document.activeElement?.blur) document.activeElement.blur();
+      if (state.logoutRecoveryRequired) {
+        state.bootstrapFocusTarget = elements.logoutRecoveryRetry;
+      } else {
+        state.bootstrapFocusTarget = elements.bootstrapChoiceButtons.find(
+          (button) => !button.hidden && !button.disabled
+        ) || ((!elements.bootstrapRetry.hidden && !elements.bootstrapRetry.disabled)
+          ? elements.bootstrapRetry : elements.bootstrapChoiceButtons[0]);
+      }
+      this.focusBootstrapDialog();
+    }
   }
 
   class NoticePresenter extends ViewPart {
-    constructor(state, external, use) {
-      super(state, external, use);
-      this.noticeTimer = null;
-    }
-
     actions() {
-      return super.actions(["showNotice"]);
+      return super.actions(["showNotice", "dismissNotice"]);
     }
 
     showNotice(message) {
-      const { host, elements } = this;
-      host.clearTimeout(this.noticeTimer);
-      elements.notice.textContent = message;
+      const { elements } = this;
+      const text = elements.noticeText || elements.notice;
+      if (!elements.notice || !text) return;
+      text.textContent = message;
       elements.notice.hidden = false;
-      this.noticeTimer = host.setTimeout(() => { elements.notice.hidden = true; }, 7000);
+      elements.notice.setAttribute?.("role", "alert");
+      elements.notice.setAttribute?.("aria-live", "assertive");
+    }
+
+    dismissNotice() {
+      const { elements } = this;
+      if (elements.notice) elements.notice.hidden = true;
     }
   }
 
@@ -846,7 +885,10 @@
         button.addEventListener("click", () => {
           const input = document.getElementById(button.dataset.for);
           if (!input) return;
-          input.value = String(Number(input.value) + Number(button.dataset.step));
+          const step = Number(button.dataset.step);
+          const delta = Number.isFinite(step) ? step : 0;
+          const base = use.clampNumber(input.value, 1, 180);
+          input.value = String(Math.round(base + delta));
           view.clampInput(input);
         });
       }
@@ -911,6 +953,7 @@
         view.renderConflict();
         view.renderSyncStatus();
       });
+      elements.noticeDismiss?.addEventListener("click", () => view.dismissNotice());
     }
 
     setupBootstrapEvents() {
@@ -927,6 +970,7 @@
       elements.bootstrapDialog.addEventListener("cancel", (event) => {
         event.preventDefault();
         if (state.bootstrapStrategy && !state.bootstrapPending) view.resetBootstrapChoice();
+        else view.refocusBootstrapAfterCancel();
       });
     }
 

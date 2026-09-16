@@ -254,6 +254,28 @@ iOS offers totals, charts, and per-task focus summaries (`CompletedFocusBreakdow
 
 Apple disables Iroh until a room exists; Android/Desktop allow actions that can persist or attempt an unusable route. Either disable with an accessible explanation or launch Create/Join directly, and test signed-out first-room setup.
 
+## Web PWA review 2026-09-16 (iPhone sizes + Duo + Sentry)
+
+Scope: `server` repo only (`web/app.html`, `web/app.css`, `web/index.html`). Devices: iOS 18 12 mini (375px, smallest) through Pro Max (~430-440px); iOS 27 SE2 (375x667, smallest) through 18 Pro Max (largest); iPhone Duo foldable (hinge gap, unfolded wide canvas, Xcode 27.1).
+
+### W1 Missing viewport-fit and safe-area handling
+`web/app.html:5` and `web/index.html:5` use `width=device-width, initial-scale=1` without `viewport-fit=cover`; no `env(safe-area-inset-*)` padding exists. Notch/Dynamic Island/home indicator can clip masthead, action bank, and footer in portrait/landscape. Fix HTML meta plus CSS insets together; neither alone is safe.
+
+### W2 Dead responsive rule on tab list
+`web/app.css:1712` sets `grid-template-columns` on `.screen-nav [role="tablist"]`, which is `display:flex` (`web/app.css:331`). Rule never applies at `max-width:640px`. Decide flex-wrap or grid and cover 375px two-tab layout with a test.
+
+### W3 Pomodoro progress not exposed to assistive tech
+`web/app.html:155` sets `aria-label` on a generic `span` via `web/app-view.js:276`; without a role the label is ignored by VoiceOver/TalkBack. Fixed here with `role="img"`; same pattern should be audited for other status spans.
+
+### W4 Touch targets below 44px
+`.text-button`, `.task-delete`, `.action-clear` (37.6px), `.screen-nav button` (no minimum), and `.stepper` side buttons (40.8px wide) miss the 44px minimum on 375px phones. Raise to 44px without changing visual hierarchy.
+
+### W5 No wide/dual-screen path for Duo
+`.workbench` stays single-column up to `92rem`; no `min-width` two-column path and no `viewport-segments`/hinge avoidance exists. On unfolded Duo the timer and pattern rail stack into a long scroll. Add one wide breakpoint placing timer beside rail and keep controls clear of the hinge gap.
+
+### W6 Sentry: no actionable web errors
+Checked `just-me-inc`/`pomodorough` 2026-09-16: 20 unresolved issues are Apple `cocoa` dev-environment noise on one `VirtualMac2,1` (`0.41.0@55`), including `POMODOROUGH-5Q/37/7R/24/1B/2F/1F/B/2D/22/21/27/C/2E/7E/1/JT/70/17/JS`. No JavaScript-platform issue exists. `POMODOROUGH-1` (503 on `POST /api/v1/auth/logout`, 943 events/100 users) and `POMODOROUGH-7E` (`lineLimitExceeded`) track the same dev host; treat the 503 as server-side to monitor rather than a PWA change.
+
 ## Shared definition of done
 
 Every backlog item that changes core state or sync must include:

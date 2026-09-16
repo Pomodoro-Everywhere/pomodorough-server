@@ -15,6 +15,7 @@ import (
 )
 
 func TestStaticServeFailuresReportPatternOnly(t *testing.T) {
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)
@@ -45,6 +46,7 @@ func TestStaticServeFailuresReportPatternOnly(t *testing.T) {
 }
 
 func TestOpenAPISpecFailureReportsPatternTaggedEvent(t *testing.T) {
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)
@@ -95,6 +97,7 @@ func TestMissingAppEntrypointFailuresReportEvents(t *testing.T) {
 
 func assertMissingEntrypointReports(t *testing.T, path, operation string) {
 	t.Helper()
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)

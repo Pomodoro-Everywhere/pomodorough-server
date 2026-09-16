@@ -13,8 +13,17 @@
   const DURATION_PENDING_STORE = "pendingDurations";
   const AUTO_START_PENDING_STORE = "pendingAutoStarts";
   const SELECTED_TASK_PENDING_STORE = "pendingSelectedTasks";
-  const BOOTSTRAP_LEASE_MS = 5 * 60_000;
-  const TIMER_OWNER_LEASE_MS = 60_000;
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks storage */ }
+    return fallback;
+  }
+
+  const BOOTSTRAP_LEASE_MS = timingMs("bootstrapLease", 5 * 60_000);
+  const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
   const ALL_STORES = Object.freeze([
@@ -453,7 +462,7 @@
       const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
       const context = this.use.captureAccountContext();
       const settings = this.settingsValue();
-      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
+      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
       await this.syncStorage.guardedMutation(this.connection.database(), [], (transaction) => {
         transaction.objectStore(META_STORE).put({ key: "settings", value: settings });
       }, { ...context, expectedUserId }).catch((error) => storageFailure(error, this.use));

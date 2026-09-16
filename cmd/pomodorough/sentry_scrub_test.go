@@ -29,13 +29,39 @@ func TestSentryBeforeSendDropsRequestUserAndBreadcrumbs(t *testing.T) {
 	if !got.User.IsEmpty() {
 		t.Fatalf("event user = %+v, want empty", got.User)
 	}
-	if len(got.Breadcrumbs) != 0 {
-		t.Fatalf("breadcrumbs = %d, want 0", len(got.Breadcrumbs))
+	if len(got.Breadcrumbs) != 1 {
+		t.Fatalf("breadcrumbs = %d, want exactly the repeat marker", len(got.Breadcrumbs))
+	}
+	if got.Breadcrumbs[0].Message != "suppressed repeat" {
+		t.Fatalf("breadcrumb = %q, want static repeat marker", got.Breadcrumbs[0].Message)
+	}
+	if len(got.Breadcrumbs[0].Data) != 0 {
+		t.Fatalf("breadcrumb data = %+v, want no payload", got.Breadcrumbs[0].Data)
 	}
 	if got.Tags["error.operation"] != "sync account mutations" {
 		t.Fatalf("error.operation = %q, want pattern tag kept", got.Tags["error.operation"])
 	}
 	if sentryBeforeSend(nil, nil) != nil {
 		t.Fatal("BeforeSend(nil) must stay nil")
+	}
+}
+
+func TestKeepLastBreadcrumbCollapsesTrail(t *testing.T) {
+	if got := keepLastBreadcrumb(nil); got != nil {
+		t.Fatalf("empty trail = %+v, want nil", got)
+	}
+	trail := []*sentry.Breadcrumb{
+		{Message: "https://example.com/sync?token=secret", Data: map[string]interface{}{"token": "secret"}},
+		{Message: "second", Data: map[string]interface{}{"token": "secret"}},
+	}
+	got := keepLastBreadcrumb(trail)
+	if len(got) != 1 {
+		t.Fatalf("breadcrumbs = %d, want 1", len(got))
+	}
+	if got[0].Message != "suppressed repeat" {
+		t.Fatalf("breadcrumb = %q, want static marker", got[0].Message)
+	}
+	if len(got[0].Data) != 0 {
+		t.Fatalf("breadcrumb data = %+v, want dropped", got[0].Data)
 	}
 }

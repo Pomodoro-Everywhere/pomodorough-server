@@ -162,6 +162,7 @@ func TestWriteRateLimitLogsPatternNotRawPath(t *testing.T) {
 
 func initMockSentry(t *testing.T) *sentry.MockTransport {
 	t.Helper()
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)

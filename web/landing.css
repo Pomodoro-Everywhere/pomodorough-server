@@ -80,7 +80,10 @@ a:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 1.5rem;
-  padding: 1.25rem clamp(1rem, 4.5vw, 5rem);
+  padding-top: calc(1.25rem + env(safe-area-inset-top, 0px));
+  padding-right: max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-right, 0px));
+  padding-bottom: 1.25rem;
+  padding-left: max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-left, 0px));
   color: var(--porcelain);
   background: var(--platform);
   border-bottom: 1px solid rgba(247, 248, 242, 0.35);
@@ -472,7 +475,7 @@ footer {
   display: flex;
   justify-content: space-between;
   gap: 1.5rem;
-  padding: 1.4rem clamp(1rem, 5vw, 5rem);
+  padding: 1.4rem max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-right, 0px)) calc(1.4rem + env(safe-area-inset-bottom, 0px)) max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-left, 0px));
   color: var(--track);
   background: var(--ticket);
   font-size: 0.62rem;

@@ -14,8 +14,11 @@
   const FRONTEND_ERROR_WINDOW_MS = 60_000;
   const FRONTEND_ERROR_MAX_PER_WINDOW = 10;
   const FRONTEND_ERROR_MESSAGE_MAX = 500;
+  const FRONTEND_ERROR_DEDUP_MS = 30_000;
+  const FRONTEND_ERROR_DEDUP_MAX_MS = 300_000;
 
   const frontendErrorTimestamps = [];
+  const frontendErrorSamples = new Map();
 
   function isUsableDsn(value) {
     return typeof value === "string" &&
@@ -31,6 +34,36 @@
   function releaseFromDocument(document) {
     const version = readMetaContent(document, "pomodorough-version").trim();
     return `pomodorough-web@${version || "unknown"}`;
+  }
+
+  function hostNameFromHost(host) {
+    const scope = (host && host.window) || {};
+    const location = scope.location || (host && host.location) || null;
+    const raw = location && (location.hostname || location.host) || "";
+    return typeof raw === "string" ? raw : "";
+  }
+
+  function isDevHostName(value) {
+    if (typeof value !== "string") return false;
+    let host = value.trim().toLowerCase();
+    if (!host) return false;
+    if (host.startsWith("[")) {
+      const end = host.indexOf("]");
+      if (end > 0) host = host.slice(1, end);
+    } else if (host === "::1") {
+      return true;
+    } else if (host.indexOf(":") !== host.lastIndexOf(":")) {
+      host = host.split("%")[0];
+    } else {
+      host = host.split(":")[0].split("%")[0];
+    }
+    host = host.replace(/\.$/, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" ||
+      host.endsWith(".local") || host.endsWith(".localhost");
+  }
+
+  function isDevHost(host) {
+    return isDevHostName(hostNameFromHost(host));
   }
 
   function collectSettings(host) {
@@ -87,6 +120,7 @@
     }
     const settings = collectSettings(host);
     if (!settings.dsn) return { enabled: false };
+    if (isDevHost(host)) return { enabled: false };
     if (!host.document.head || typeof host.document.head.appendChild !== "function") {
       return { enabled: false };
     }
@@ -114,6 +148,38 @@
 
   function resetFrontendErrorRateLimitForTest() {
     frontendErrorTimestamps.length = 0;
+    frontendErrorSamples.clear();
+  }
+
+  function frontendErrorBackoff(repeats, randomValue = Math.random()) {
+    const shift = Math.min(Math.max(repeats, 0), 4);
+    const base = Math.min(FRONTEND_ERROR_DEDUP_MS * (2 ** shift), FRONTEND_ERROR_DEDUP_MAX_MS);
+    const jitter = ((Number.isFinite(randomValue) ? randomValue : 0.5) * 2 - 1) * 0.2;
+    return Math.max(base * (1 + jitter), FRONTEND_ERROR_DEDUP_MS * 0.5);
+  }
+
+  function frontendErrorSuppressed(key, nowMs) {
+    const sample = frontendErrorSamples.get(key);
+    if (!sample) {
+      frontendErrorSamples.set(key, { last: nowMs, repeats: 0 });
+      return false;
+    }
+    if (nowMs - sample.last < frontendErrorBackoff(sample.repeats)) {
+      sample.repeats += 1;
+      return true;
+    }
+    frontendErrorSamples.set(key, { last: nowMs, repeats: 0 });
+    return false;
+  }
+
+  function noteFrontendErrorRepeat(operation) {
+    try {
+      const scope = typeof globalThis === "undefined" ? null : globalThis;
+      const add = scope?.Sentry?.addBreadcrumb;
+      if (typeof add === "function") add.call(scope.Sentry, {
+        message: operation, category: "error.repeat", level: "warning"
+      });
+    } catch { /* breadcrumb never blocks reporting */ }
   }
 
   function canReportFrontendError() {
@@ -146,6 +212,10 @@
       const scope = typeof globalThis === "undefined" ? null : globalThis;
       if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
       const name = (error && typeof error.name === "string" && error.name) || "Error";
+      if (frontendErrorSuppressed(`${operation}\n${String(name).slice(0, 100)}`, Date.now())) {
+        noteFrontendErrorRepeat(operation);
+        return false;
+      }
       const wrapped = new Error(operation);
       wrapped.name = String(name).slice(0, 100) || "Error";
       scope.Sentry.captureException(wrapped, {
@@ -161,7 +231,9 @@
   const api = Object.freeze({
     SDK_VERSION, SDK_URL, SDK_INTEGRITY, SESSION_SAMPLE_RATE, ERROR_SAMPLE_RATE, ENVIRONMENT,
     FRONTEND_ERROR_WINDOW_MS, FRONTEND_ERROR_MAX_PER_WINDOW, FRONTEND_ERROR_MESSAGE_MAX,
+    FRONTEND_ERROR_DEDUP_MS, FRONTEND_ERROR_DEDUP_MAX_MS,
     isUsableDsn, readMetaContent, releaseFromDocument, collectSettings, initializeSdk, start,
+    isDevHostName, hostNameFromHost, isDevHost, frontendErrorBackoff,
     scrubFrontendErrorMessage, reportFrontendError, resetFrontendErrorRateLimitForTest
   });
 

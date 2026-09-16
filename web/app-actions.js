@@ -9,8 +9,17 @@
   // Westminster first quarter (G#4 F#4 E4 B3): one bell per repeat tick so the
   // full phrase emerges over successive alerts without overlapping playback.
   const COMPLETION_CHIME_FREQUENCIES = [415.30, 369.99, 329.63, 246.94];
-  const TIMER_OWNER_LEASE_MS = 60_000;
-  const TIMER_OWNER_HEARTBEAT_MS = 15_000;
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks actions */ }
+    return fallback;
+  }
+
+  const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
+  const TIMER_OWNER_HEARTBEAT_MS = timingMs("timerOwnerHeartbeat", 15_000);
   const MIN_DURATION_MS = 60_000;
   const MAX_DURATION_MS = 14_400_000;
   const FINISH_RESULT_KEYS = Object.freeze([
@@ -190,7 +199,7 @@
     }
 
     async waitForUnlockedAction() {
-      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
+      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
     }
 
     async issueAutoStartOperation(enabled, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {

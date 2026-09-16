@@ -75,6 +75,17 @@
   "bootstrap.kicker": "‏⟦Synchrönïzëd stàtë⟧‏",
   "bootstrap.title": "‏⟦Chöösë synchrönïzëd stàtë⟧‏",
   "bootstrap.summary": "‏⟦Cömpàrïng dëvïcë ànd àccöûnt dàtà.⟧‏",
+  "bootstrap.limitTitle": "‏⟦Löcàl qûëûë töö làrgë⟧‏",
+  "bootstrap.limitSummary": "‏⟦Ûplöàd stöppëd bëförë àny löcàl ör rëmötë dàtà chàngëd.⟧‏",
+  "bootstrap.localRuns": {
+    "one": "‏⟦{count} löcàl cömplëtëd rûn⟧‏",
+    "other": "‏⟦{count} löcàl cömplëtëd rûns⟧‏"
+  },
+  "bootstrap.remoteRuns": {
+    "one": "‏⟦{count} rëmötë cömplëtëd rûn⟧‏",
+    "other": "‏⟦{count} rëmötë cömplëtëd rûns⟧‏"
+  },
+  "bootstrap.divergenceNote": "‏⟦Tïmërs, tàsks, ör sëttïngs màÿ àlsö dïffër.⟧‏",
   "bootstrap.keepLocal": "‏⟦Këëp Löcàl⟧‏",
   "bootstrap.keepLocal.detail": "‏⟦Rëplàcë àccöûnt dàtà wïth thïs dëvïcë's tïmër, hïstöry, tàsks, sëttïngs, ànd qûëûëd chàngës.⟧‏",
   "bootstrap.keepRemote": "‏⟦Këëp Rëmötë⟧‏",
@@ -115,6 +126,7 @@
   "timer.instruction.superseded": "‏⟦Ånöthër dëvïcë ïs càrryïng thïs tïmër.⟧‏",
   "timer.controls": "‏⟦Tïmër cöntröls⟧‏",
   "timer.start": "‏⟦Stàrt {phase}⟧‏",
+  "timer.startFocus": "‏⟦Stàrt föcûs⟧‏",
   "timer.pause": "‏⟦Pàûsë⟧‏",
   "timer.resume": "‏⟦Rësûmë⟧‏",
   "timer.completionLimit": "‏⟦Cömplëtïön söûnd ànd nötïfïcàtïöns rëqûïrë àn àctïvë bröwsër ör ïnstàllëd PWÅ. Övërdûë tïmërs rëcöncïlë whën yöû rëöpën ït.⟧‏",

@@ -35,7 +35,7 @@ function sessionFixture(overrides = {}) {
     location: { assign: (value) => calls.push(["assign", value]) },
     console: { warn: (...args) => calls.push(["warn", ...args]) },
     fetch: async () => ({ ok: true, status: 200 }),
-    setTimeout: () => 1, prompt: () => null, confirm: () => true,
+    setTimeout: () => 1, confirm: () => true,
     EventSource: class { addEventListener() {} close() {} },
     ...overrides.host
   };
@@ -82,10 +82,10 @@ function withSentryStub(t) {
 
 test("S39 account deletion request failure warns, notices, and reports", async (t) => {
   const fixture = sessionFixture({
-    host: { prompt: () => "DELETE", fetch: async () => ({ ok: false, status: 503 }) }
+    host: { fetch: async () => ({ ok: false, status: 503 }) }
   });
   const reports = withSentryStub(t);
-  await fixture.actions.deleteAccount();
+  await fixture.actions.deleteAccount("DELETE");
   assert.equal(fixture.elements.deleteAccountButton.disabled, false);
   assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /503/.test(entry[1])));
   assert.equal(fixture.calls.includes("clear"), false);

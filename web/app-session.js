@@ -8,6 +8,15 @@
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
 
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks session */ }
+    return fallback;
+  }
+
   function reportFrontendError(error, operation) {
     try {
       const reporter = typeof globalThis !== "undefined"
@@ -15,6 +24,35 @@
         : null;
       if (typeof reporter === "function") reporter(error, operation);
     } catch { /* error monitoring must never break the app */ }
+  }
+
+  function safeLoginReturnPath(value) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 1024) return "/app";
+    if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "/app";
+    return value;
+  }
+
+  function currentLoginReturnPath(location) {
+    try {
+      if (!location) return "/app";
+      if (typeof location.pathname === "string" && location.pathname) {
+        const search = typeof location.search === "string" ? location.search : "";
+        const query = search === "" || search.startsWith("?") ? search : "";
+        return safeLoginReturnPath(`${location.pathname}${query}`.split("#")[0] || "/app");
+      }
+      if (typeof location.href === "string" && location.href.startsWith("/")) {
+        return safeLoginReturnPath(location.href.split("#")[0] || "/app");
+      }
+      if (typeof location.href === "string" && location.href) {
+        const parsed = new URL(location.href, "http://localhost");
+        return safeLoginReturnPath(`${parsed.pathname}${parsed.search}` || "/app");
+      }
+    } catch { /* malformed location falls back below */ }
+    return "/app";
+  }
+
+  function loginStartUrl(location) {
+    return `/auth/google/start?return=${encodeURIComponent(currentLoginReturnPath(location))}`;
   }
 
   function bindActions(owner, names) {
@@ -42,7 +80,8 @@
       "queueSessionRevalidation", "restoreSessionAndSync", "handleOnline", "handleOffline",
       "accountDeletionConfirmationIsValid", "pendingLocalLogout", "markPendingLogout",
       "clearPendingLogout", "clearPendingLogoutData", "initializeSession",
-      "requestSessionRevocation", "deleteAccount", "logout", "retryPendingLogout",
+      "requestSessionRevocation", "deleteAccount", "confirmDeleteAccount",
+      "cancelDeleteAccount", "logout", "retryPendingLogout",
       "setFetchForTest", "setStorageMethodForTest", "setRevisionStreamForTest",
       "hasRevisionStreamForTest"
     ],
@@ -132,7 +171,8 @@
         "refreshMutationCsrf", "postMutation", "redirectToLogin", "queueSessionRevalidation",
         "restoreSessionAndSync", "handleOnline", "handleOffline", "accountDeletionConfirmationIsValid",
         "pendingLocalLogout", "markPendingLogout", "clearPendingLogout", "clearPendingLogoutData",
-        "initializeSession", "requestSessionRevocation", "deleteAccount", "logout", "retryPendingLogout",
+        "initializeSession", "requestSessionRevocation", "deleteAccount", "confirmDeleteAccount",
+        "cancelDeleteAccount", "logout", "retryPendingLogout",
         "setFetchForTest", "setStorageMethodForTest"
       ]);
     }
@@ -302,7 +342,7 @@
         return;
       }
       this.redirecting = true;
-      this.host.location.assign("/auth/google/start?return=%2Fapp");
+      this.host.location.assign(loginStartUrl(this.host.location));
     }
 
     queueSessionRevalidation() {
@@ -314,7 +354,7 @@
       this.stream.closeRevisionStream();
       this.use.render();
       if (this.pendingLocalLogout()) return;
-      this.host.setTimeout(() => this.restoreSessionAndSync(), 0);
+      this.host.setTimeout(() => this.restoreSessionAndSync(), timingMs("defer", 0));
     }
 
     async restoreSessionAndSync() {
@@ -444,27 +484,92 @@
       return true;
     }
 
-    async deleteAccount() {
-      const confirmation = this.host.prompt(this.use.tr(
+    deleteAccountDialog() {
+      if (this.deleteAccountDialogRefs) return this.deleteAccountDialogRefs;
+      const document = this.host.document;
+      if (!document?.createElement || !document?.body?.append) return null;
+      const dialog = document.createElement("dialog");
+      if (!dialog) return null;
+      dialog.className = "bootstrap-dialog";
+      dialog.setAttribute?.("aria-labelledby", "deleteAccountTitle");
+      dialog.setAttribute?.("aria-describedby", "deleteAccountMessage");
+      dialog.setAttribute?.("aria-modal", "true");
+      const title = document.createElement("h2");
+      title.id = "deleteAccountTitle";
+      const message = document.createElement("p");
+      message.id = "deleteAccountMessage";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      const buttons = document.createElement("div");
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      confirm.addEventListener?.("click", () => this.confirmDeleteAccount());
+      cancel.addEventListener?.("click", () => this.cancelDeleteAccount());
+      dialog.addEventListener?.("cancel", () => this.cancelDeleteAccount());
+      buttons.append?.(confirm, cancel);
+      dialog.append?.(title, message, input, buttons);
+      document.body.append(dialog);
+      this.deleteAccountDialogRefs = { dialog, title, message, input, confirm, cancel };
+      return this.deleteAccountDialogRefs;
+    }
+
+    openDeleteAccountDialog() {
+      const refs = this.deleteAccountDialog();
+      if (!refs) {
+        this.use.showNotice(this.use.tr(
+          "account.delete.prompt", {},
+          "Delete your Pomodorough account, timer history, tasks, settings, sessions, and server device records permanently? Type DELETE to confirm."
+        ));
+        return false;
+      }
+      refs.title.textContent = this.use.tr("account.delete", {}, "Delete account");
+      refs.message.textContent = this.use.tr(
         "account.delete.prompt", {},
         "Delete your Pomodorough account, timer history, tasks, settings, sessions, and server device records permanently? Type DELETE to confirm."
-      ));
-      if (confirmation === null) return;
-      if (!this.accountDeletionConfirmationIsValid(confirmation)) {
+      );
+      refs.confirm.textContent = this.use.tr("bootstrap.confirm", {}, "Confirm");
+      refs.cancel.textContent = this.use.tr("bootstrap.cancel", {}, "Cancel");
+      refs.input.value = "";
+      refs.input.setAttribute?.("aria-label", refs.message.textContent);
+      if (!refs.dialog.open) refs.dialog.showModal?.();
+      this.host.setTimeout?.(() => refs.input.focus?.(), timingMs("focusDefer", 0));
+      return true;
+    }
+
+    closeDeleteAccountDialog() {
+      try { this.deleteAccountDialogRefs?.dialog.close?.(); } catch { /* close never blocks deletion */ }
+    }
+
+    cancelDeleteAccount() {
+      this.closeDeleteAccountDialog();
+    }
+
+    async deleteAccount(confirmation) {
+      if (typeof confirmation === "string") return this.confirmDeleteAccount(confirmation);
+      this.openDeleteAccountDialog();
+    }
+
+    async confirmDeleteAccount(confirmation) {
+      const value = typeof confirmation === "string" ? confirmation : this.deleteAccountDialogRefs?.input?.value;
+      this.closeDeleteAccountDialog();
+      if (!this.accountDeletionConfirmationIsValid(value)) {
         this.use.showNotice(this.use.tr(
           "account.delete.invalid", {}, "Account was not deleted. Type DELETE exactly to confirm."
         ));
-        return;
+        return false;
       }
       if (!this.state.csrfToken) {
         this.use.showNotice(this.use.tr(
           "account.delete.offline", {}, "Connect to the account server before deleting your account."
         ));
-        return;
+        return false;
       }
       this.elements.deleteAccountButton.disabled = true;
       const context = this.use.captureAccountContext();
-      if (!await this.requestAccountDeletion(confirmation)) return;
+      if (!await this.requestAccountDeletion(value)) return false;
       context.assertCurrent();
       this.markPendingLogout();
       const identity = this.use.cleanupIdentity();
@@ -478,6 +583,7 @@
         reportFrontendError(error, "session.delete-account.cleanup-retry");
       }
       this.redirectToLogin();
+      return true;
     }
 
     async requestAccountDeletion(confirmation) {

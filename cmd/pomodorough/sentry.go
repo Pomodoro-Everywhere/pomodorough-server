@@ -4,12 +4,27 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"testing"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 )
 
-const errorMonitoringEnvironment = "production"
+const defaultErrorMonitoringEnvironment = "production"
+
+var sentryInTest = testing.Testing
+
+func errorMonitoringEnvironment() string {
+	if value := strings.TrimSpace(os.Getenv("SENTRY_ENVIRONMENT")); value != "" {
+		return value
+	}
+	return defaultErrorMonitoringEnvironment
+}
+
+func errorMonitoringBlockedInTests() bool {
+	return sentryInTest() && os.Getenv("SENTRY_ALLOW_IN_TESTS") != "1"
+}
 
 // initErrorMonitoring starts Sentry error monitoring when dsn is non-empty.
 // An empty DSN disables monitoring. Init failure is non-fatal: the service
@@ -19,10 +34,13 @@ func initErrorMonitoring(identity buildIdentity, dsn string, logger *slog.Logger
 	if dsn == "" {
 		return func() {}
 	}
+	if errorMonitoringBlockedInTests() {
+		return func() {}
+	}
 	if err := sentry.Init(sentry.ClientOptions{
 		Dsn:         dsn,
 		Release:     errorMonitoringRelease(identity),
-		Environment: errorMonitoringEnvironment,
+		Environment: errorMonitoringEnvironment(),
 		BeforeSend:  sentryBeforeSend,
 	}); err != nil {
 		logger.Warn("error monitoring disabled", "error", err)
@@ -39,16 +57,34 @@ func errorMonitoringRelease(identity buildIdentity) string {
 
 // sentryBeforeSend drops event material that can carry identity or
 // credential content. Capture sites tag only the route pattern and the
-// static operation; the SDK must not reattach raw requests, users, or
-// breadcrumbs on top of those tags.
+// static operation; the SDK must not reattach raw requests or users on top
+// of those tags. At most one breadcrumb survives: the sampler records a
+// single static repeat marker per suppressed burst, and any older trail is
+// dropped here.
 func sentryBeforeSend(event *sentry.Event, hint *sentry.EventHint) *sentry.Event {
 	if event == nil {
 		return nil
 	}
 	event.Request = nil
 	event.User = sentry.User{}
-	event.Breadcrumbs = nil
+	event.Breadcrumbs = keepLastBreadcrumb(event.Breadcrumbs)
 	return event
+}
+
+// keepLastBreadcrumb retains only the newest breadcrumb. Repeat bursts
+// carry one static marker; SDK-attached trails can carry URLs or tokens.
+func keepLastBreadcrumb(crumbs []*sentry.Breadcrumb) []*sentry.Breadcrumb {
+	if len(crumbs) == 0 {
+		return nil
+	}
+	last := crumbs[len(crumbs)-1]
+	if last == nil {
+		return nil
+	}
+	scrubbed := *last
+	scrubbed.Message = "suppressed repeat"
+	scrubbed.Data = nil
+	return []*sentry.Breadcrumb{&scrubbed}
 }
 
 // captureMainPanic reports a panic escaping main to monitoring, then

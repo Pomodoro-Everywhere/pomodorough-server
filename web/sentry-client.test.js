@@ -120,11 +120,16 @@ test("sentry start loads the SDK on script load and stays silent without a DSN",
 
 function withFrontendReporting(t, { dsn = WEB_DSN } = {}) {
   const calls = [];
+  const breadcrumbs = [];
   const previousSentry = globalThis.Sentry;
   const previousDocument = globalThis.document;
   const hadDsnSlot = Object.hasOwn(globalThis, "__SENTRY_DSN__");
   const previousDsnSlot = globalThis.__SENTRY_DSN__;
-  globalThis.Sentry = { captureException: (error, context) => calls.push({ error, context }) };
+  globalThis.Sentry = {
+    captureException: (error, context) => calls.push({ error, context }),
+    addBreadcrumb: (crumb) => breadcrumbs.push(crumb)
+  };
+  calls.breadcrumbs = breadcrumbs;
   globalThis.document = fakeDocument({ meta: dsn ? { "sentry-dsn": dsn } : {} });
   delete globalThis.__SENTRY_DSN__;
   client.resetFrontendErrorRateLimitForTest();
@@ -186,17 +191,17 @@ test("S69 frontend reports never carry user content, only op tag plus error name
     { name: "CustomError", message: secrets.join(" ") },
     { message: secrets.join(" ") }
   ];
-  for (const input of inputs) {
-    assert.equal(client.reportFrontendError(input, "actions.task.save-failed"), true);
-  }
+  inputs.forEach((input, index) => {
+    assert.equal(client.reportFrontendError(input, `actions.task.save-failed.${index}`), true);
+  });
   assert.equal(calls.length, inputs.length);
   const payload = JSON.stringify(calls);
   for (const secret of secrets) {
     assert.ok(!payload.includes(secret), `reported payload leaks ${secret}`);
   }
-  for (const { error: reported, context } of calls) {
-    assert.equal(reported.message, "actions.task.save-failed");
-    assert.equal(context.tags["error.operation"], "actions.task.save-failed");
+  for (const [index, { error: reported, context }] of calls.entries()) {
+    assert.equal(reported.message, `actions.task.save-failed.${index}`);
+    assert.equal(context.tags["error.operation"], `actions.task.save-failed.${index}`);
     assert.equal(context.level, "warning");
   }
 });
@@ -204,11 +209,41 @@ test("S69 frontend reports never carry user content, only op tag plus error name
 test("frontend errors are rate-safe within a minute window", (t) => {
   const calls = withFrontendReporting(t);
   for (let index = 0; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
-    assert.equal(client.reportFrontendError(new Error(`failure ${index}`), "sync.deferred"), true);
+    assert.equal(client.reportFrontendError(new Error(`failure ${index}`), `sync.deferred.${index}`), true);
   }
   assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
-  assert.equal(client.reportFrontendError(new Error("overflow"), "sync.deferred"), false);
+  assert.equal(client.reportFrontendError(new Error("overflow"), "sync.deferred.overflow"), false);
   assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
+});
+
+test("frontend repeat bursts collapse to one error plus breadcrumbs", (t) => {
+  const calls = withFrontendReporting(t);
+  assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), true);
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), false);
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls.breadcrumbs.length, 4);
+  assert.ok(calls.breadcrumbs.every((crumb) => crumb.message === "sync.deferred"));
+  assert.ok(calls.breadcrumbs.every((crumb) => crumb.category === "error.repeat"));
+});
+
+test("frontend dedup keeps distinct operations and error names separate", (t) => {
+  const calls = withFrontendReporting(t);
+  assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), true);
+  assert.equal(client.reportFrontendError(new Error("boom"), "bootstrap.retry.deferred"), true);
+  const typed = new TypeError("boom");
+  assert.equal(client.reportFrontendError(typed, "sync.deferred"), true);
+  assert.equal(calls.length, 3);
+});
+
+test("frontend dedup backoff stays bounded with jitter", () => {
+  assert.ok(client.frontendErrorBackoff(0, 0) >= client.FRONTEND_ERROR_DEDUP_MS * 0.5);
+  assert.ok(client.frontendErrorBackoff(0, 0) <= client.FRONTEND_ERROR_DEDUP_MS);
+  assert.ok(client.frontendErrorBackoff(0, 1) >= client.FRONTEND_ERROR_DEDUP_MS);
+  assert.ok(client.frontendErrorBackoff(0, 1) <= client.FRONTEND_ERROR_DEDUP_MS * 1.2);
+  const capped = client.frontendErrorBackoff(99, 0.5);
+  assert.equal(capped, client.FRONTEND_ERROR_DEDUP_MAX_MS);
 });
 
 test("frontend scrubber truncates and redacts URLs and emails", () => {
@@ -218,6 +253,37 @@ test("frontend scrubber truncates and redacts URLs and emails", () => {
   const scrubbed = client.scrubFrontendErrorMessage(long);
   assert.ok(scrubbed.length <= client.FRONTEND_ERROR_MESSAGE_MAX);
   assert.doesNotMatch(scrubbed, /user@example\.com/);
+});
+
+test("sentry start stays off for dev hosts", () => {
+  const cases = [
+    ["localhost", false],
+    ["localhost:8790", false],
+    ["127.0.0.1", false],
+    ["127.0.0.1:8790", false],
+    ["::1", false],
+    ["[::1]:8790", false],
+    ["pomodorough.local", false],
+    ["LOCALHOST", false],
+    ["pomodorough.egigoka.me", true],
+    ["192.168.1.10", true]
+  ];
+  for (const [hostname, wantEnabled] of cases) {
+    const document = fakeDocument({ meta: { "sentry-dsn": WEB_DSN } });
+    const started = client.start({ document, window: { location: { hostname } } });
+    assert.deepEqual(started, { enabled: wantEnabled }, `hostname ${hostname}`);
+    assert.equal(document.appended.length, wantEnabled ? 1 : 0, `hostname ${hostname}`);
+  }
+});
+
+test("sentry dev-host matcher covers loopback and .local", () => {
+  for (const host of ["localhost", "127.0.0.1", "::1", "[::1]", "box.local", "box.localhost"]) {
+    assert.equal(client.isDevHostName(host), true, host);
+  }
+  for (const host of ["", null, undefined, "pomodorough.egigoka.me", "192.168.1.10", "example.com"]) {
+    assert.equal(client.isDevHostName(host), false, String(host));
+  }
+  assert.equal(client.isDevHost({ document: fakeDocument(), window: {} }), false);
 });
 
 test("SDK load failure warns instead of staying silent", () => {

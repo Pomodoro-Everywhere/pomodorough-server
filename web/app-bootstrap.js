@@ -5,8 +5,17 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const BOOTSTRAP_LEASE_MS = 5 * 60_000;
-  const TIMER_OWNER_LEASE_MS = 60_000;
+  function timingMs(name, fallback) {
+    try {
+      const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
+      const value = runtime?.TIMING_MS?.[name] ?? runtime?.timingMs?.(name, fallback);
+      if (Number.isFinite(value)) return value;
+    } catch { /* timing config never blocks bootstrap */ }
+    return fallback;
+  }
+
+  const BOOTSTRAP_LEASE_MS = timingMs("bootstrapLease", 5 * 60_000);
+  const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
   const ACK_SUCCESS = new Set(["accepted", "acknowledged", "applied", "duplicate", "ok"]);
 
   function reportFrontendError(error, operation) {
@@ -102,7 +111,7 @@
         this.use.scheduleRetry();
         this.host.console.warn("Pomodorough bootstrap restart deferred:", error);
         reportFrontendError(error, "bootstrap.restart.deferred");
-      }), 0);
+      }), timingMs("defer", 0));
     }
 
     async loadBootstrapPreview() {
@@ -245,7 +254,7 @@
     }
 
     async waitForUnlockedAction() {
-      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, 0));
+      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
     }
 
     async acceptBootstrapResponse(payload, pending, timing) {

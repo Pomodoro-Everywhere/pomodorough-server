@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#142c5c" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c1b39" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A local-first focus timer that continues across your devices.">
-  <meta name="pomodorough-version" content="0.41.0">
+  <meta name="pomodorough-version" content="0.42.0">
   <meta name="sentry-dsn" content="%POMODOROUGH_SENTRY_DSN%">
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
@@ -64,7 +64,7 @@
     <span></span><span></span><span></span><span></span><span></span>
   </div>
 
-  <dialog id="bootstrapDialog" class="bootstrap-dialog" aria-labelledby="bootstrapTitle" aria-describedby="bootstrapSummary" aria-busy="false">
+  <dialog id="bootstrapDialog" class="bootstrap-dialog" aria-labelledby="bootstrapTitle" aria-describedby="bootstrapSummary" aria-modal="true" aria-busy="false">
     <div class="bootstrap-ticket">
       <span class="bootstrap-kicker" data-i18n="bootstrap.kicker">Synchronized state</span>
       <h2 id="bootstrapTitle" data-i18n="bootstrap.title">Choose synchronized state</h2>
@@ -129,7 +129,10 @@
       <button id="conflictDismiss" class="text-button" type="button" data-i18n="action.dismiss">Dismiss</button>
     </aside>
 
-    <p id="notice" class="notice" role="alert" hidden></p>
+    <div id="notice" class="notice" role="alert" aria-live="assertive" hidden>
+      <span id="noticeText"></span>
+      <button id="noticeDismiss" class="text-button" type="button" data-i18n="action.dismiss">Dismiss</button>
+    </div>
 
     <div id="timerScreen" role="tabpanel" aria-labelledby="timerTab">
       <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title" tabindex="-1">
@@ -152,7 +155,7 @@
             <span id="phaseLabel" class="dial-phase" aria-hidden="true" data-i18n="phase.focus">Focus</span>
             <time id="timerDisplay" class="timer-display" role="timer" datetime="PT25M">25:00</time>
             <span id="timerDetail" class="timer-detail" aria-hidden="true">Idle / 25 min</span>
-            <span id="longBreakProgress" class="long-break-progress">○○○○</span>
+            <span id="longBreakProgress" class="long-break-progress" role="img" aria-label="Pomodoro progress: 0 of 4 today">○○○○</span>
           </div>
           <span class="dial-pointer" aria-hidden="true"></span>
         </div>
@@ -160,7 +163,7 @@
         <p id="timerInstruction" class="timer-instruction" data-i18n="timer.instruction.idle">Choose a pattern, then start the clock.</p>
 
         <div class="action-bank" role="group" aria-label="Timer controls" data-i18n-aria-label="timer.controls">
-          <button id="timerToggle" class="action-primary" type="button">Start focus</button>
+          <button id="timerToggle" class="action-primary" type="button" data-i18n="timer.startFocus">Start focus</button>
           <button id="finishButton" class="action-key" type="button" disabled data-i18n="action.finish">Finish</button>
           <button id="cancelButton" class="action-key action-danger" type="button" disabled data-i18n="action.cancel">Cancel</button>
           <button id="clearButton" class="action-clear" type="button" disabled data-i18n="action.stopSound">Stop sound</button>
@@ -252,7 +255,7 @@
           </span>
         </label>
 
-        <p id="appVersion" class="app-version">Version 0.41.0</p>
+        <p id="appVersion" class="app-version">Version 0.42.0</p>
       </div>
       </section>
 

@@ -56,6 +56,17 @@
   "bootstrap.kicker": "Synchronized state",
   "bootstrap.title": "Choose synchronized state",
   "bootstrap.summary": "Comparing device and account data.",
+  "bootstrap.limitTitle": "Local queue too large",
+  "bootstrap.limitSummary": "Upload stopped before any local or remote data changed.",
+  "bootstrap.localRuns": {
+    "one": "{count} local completed run",
+    "other": "{count} local completed runs"
+  },
+  "bootstrap.remoteRuns": {
+    "one": "{count} remote completed run",
+    "other": "{count} remote completed runs"
+  },
+  "bootstrap.divergenceNote": "Timers, tasks, or settings may also differ.",
   "bootstrap.keepLocal": "Keep Local",
   "bootstrap.keepLocal.detail": "Replace account data with this device's timer, history, tasks, settings, and queued changes.",
   "bootstrap.keepRemote": "Keep Remote",
@@ -96,6 +107,7 @@
   "timer.instruction.superseded": "Another device is carrying this timer.",
   "timer.controls": "Timer controls",
   "timer.start": "Start {phase}",
+  "timer.startFocus": "Start focus",
   "timer.pause": "Pause",
   "timer.resume": "Resume",
   "timer.completionLimit": "Completion sound and notifications require an active browser or installed PWA. Overdue timers reconcile when you reopen it.",

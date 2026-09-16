@@ -42,14 +42,14 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "65bd8744c8bf5c656e4ee42e3c3ec9d5a1ce132de86a3a5e43c19005301563a1", false},
+	{"index.html", "4ac05e8b6a1beb61efe3a426b17cbcd151c369167ac92433cfdf18427950a438", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
-	{"landing.css", "4d42859c8f0bc575055f3099b79f0a6d3862a966e8aa955d49933328e4cf86ba", false},
+	{"landing.css", "510c82512246cfb2bb4db1660cfe70b33bd27e8826433ed5d60c947f79904b11", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
-	{"landing.js", "51568abe1282e9578d0709a447868df7d9956c98945543f1e98e28c1a5d68b66", false},
-	{"sentry-client.js", "1ea6c55ebb06f7e79ea6e4e5e4d60fbd1b1b132746b15645e4d7055449ebd4af", false},
-	{"app.html", "85331153eeb58a9c93fdf1741732caf6eec4ed595f7f534731cea4afe40d6edc", false},
-	{"app.css", "98a518584f823ceba56e612a756912b97f7f4607d255f79db5e4863bfede5297", false},
+	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
+	{"sentry-client.js", "a44ce143273fe41b4d4bf359bfaaf095346e54f06463bb761c6f3f040a987a53", false},
+	{"app.html", "688bcc765b79f58837412d208666f5445e838fb0fe228089638c635586a2da93", false},
+	{"app.css", "9e2cd4d8da535919ab91a46b8c840e7f5dea0d5a6e1951ae434bb63f9ecb69df", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "06bd18d37625c53ce6c57186476748a231a1da28b89d8e869683e5da9f2a5b98", false},
 	{"pomodorough_core.wasm", "0c6bb71dfb5949e1fe9c3d4adcc8151b99607ad24545b5d1b2fc00ae8d359a74", true},
@@ -58,17 +58,17 @@ var readinessAssets = []readinessAsset{
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
 	{"sync-storage.js", "526bf59ce753b89da5d96cf1a5a16540b686856684bc52eb79df411dae9a01bf", false},
 	{"i18n.js", "ca2dbece1883165f5297382d24ca94456ebb92e68abf113c8789e74eb0f6c676", false},
-	{"locales/en.json", "41647741780faa35490b35e676a6e49278559377f01a32cab89eede5e0b24085", false},
-	{"locales/ar-XB.json", "24f101db121d782f354eeb35b6ae2e705391ee6fd3c9fece8fad33da1ae73711", false},
-	{"app-runtime.js", "6a39b1c9554f98ba2a7c98d9b72fca837953b1e743c7726bf9c17811bcd00052", false},
+	{"locales/en.json", "6121117577df42749ccf3c1885ad5788dcc8f8404b15cc9c5d6a2d4f0b36f1df", false},
+	{"locales/ar-XB.json", "5989c8330ae9a62f306c156b93a27e557e39e5584e3c84793333ead587c1218c", false},
+	{"app-runtime.js", "76352fdbc3872145e236fa0e1a9a652cf00d6966116f9a8e16737aaee29d0c9d", false},
 	{"app-state.js", "fbde67c896eb733d8f8238d024f62ac1b3487e35cfe70a021b5329c3f6049eb8", false},
-	{"app-storage.js", "ffd0933dbe5429f5f160b6a58b41eb1a7d8a0e184941689450ce9510a0cabee0", false},
-	{"app-actions.js", "f8128a3021c31822fe277ae2939e37073dac780467cfd551f428f27e5fd1af18", false},
-	{"app-sync.js", "8191f5cee2b1553a3edf052961ef7170d49e2f69aeb4ac9129f8c634f8297ed0", false},
-	{"app-bootstrap.js", "114acd027375ac052ba97d45eb055b21af6aa92f4eee1a8cc5f285a875db5810", false},
-	{"app-session.js", "c81d23363aead63afe6515b8e0bbf1df43d9bb01d47a77c018bbdcdef78a901f", false},
-	{"app-view.js", "ca146d39f85663ecad55534ab4dda668e396aa97226480a3b91971532c1af71c", false},
-	{"app.js", "157fac29860c5f98ea523c39d8b50849d78e4d532c23a94b39d8cca423919fbb", false},
+	{"app-storage.js", "63b7de714fdeec1204f8e28ce053e21b7388f8bdcd808d40267bfa4f1cec61e9", false},
+	{"app-actions.js", "f7f974f650aa1359fbf495aab939f021ac4e583ef2f78fc04c91f23cc9c2e0bc", false},
+	{"app-sync.js", "250bb2265ad07ee85645a9959a7c3e844979bf788265b62eee075b270493690f", false},
+	{"app-bootstrap.js", "b1a17445a1ffcb253fb2798dfee4a1b5ffeb4a41f692571f06eabfb26ea3b8f4", false},
+	{"app-session.js", "db83cacca58fda8a8cd42f8ea9eb9f13875e87dcab363d48beaa385ce8efbe21", false},
+	{"app-view.js", "60bd156a7a30dc9c3f758bf508a885b547c7a5134109bc41a4c5abef39786270", false},
+	{"app.js", "83c448e81d51fbd96b855d381e5be7b7a1bf9eb71d3483a1eb5391ab58dc3bd7", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
 	{"sw.js", "783e3d53a4e2079e3bc0c940d4e5f245dcae04af59bf7b329162f8284d203436", false},
@@ -175,7 +175,9 @@ func readinessFileDigest(ctx context.Context, reader io.Reader) ([sha256.Size]by
 		}
 		count, err := limited.Read(buffer)
 		if count > 0 {
-			_, _ = hash.Write(buffer[:count])
+			if _, writeErr := hash.Write(buffer[:count]); writeErr != nil {
+				return [sha256.Size]byte{}, writeErr
+			}
 		}
 		if errors.Is(err, io.EOF) {
 			var digest [sha256.Size]byte

@@ -4,7 +4,9 @@
   const standalone = window.matchMedia?.("(display-mode: standalone)").matches
     || navigator.standalone === true;
   if (standalone && window.location.pathname === "/") {
-    window.location.replace("/app");
+    const search = window.location.search || "";
+    const hash = window.location.hash || "";
+    window.location.replace("/app" + search + hash);
     return;
   }
 

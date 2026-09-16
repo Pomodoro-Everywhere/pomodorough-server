@@ -132,6 +132,27 @@ function memoryStorage(initial = {}) {
   };
 }
 
+function dialogElement(tag) {
+  const listeners = new Map();
+  return {
+    tag, children: [], textContent: "", value: "", open: false, focused: false,
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value); },
+    addEventListener(type, callback) { listeners.set(type, callback); },
+    append(...kids) { this.children.push(...kids); },
+    showModal() { this.open = true; },
+    close() { this.open = false; },
+    focus() { this.focused = true; },
+    click(type = "click") { listeners.get(type)?.(); }
+  };
+}
+
+function dialogDocument() {
+  const created = [];
+  const body = { appended: [], append(node) { this.appended.push(node); } };
+  return { created, body, createElement(tag) { const el = dialogElement(tag); created.push(el); return el; } };
+}
+
 function sessionFixture(overrides = {}) {
   const state = sessionState(overrides.state);
   const calls = [];
@@ -141,7 +162,7 @@ function sessionFixture(overrides = {}) {
     console: { warn: (...args) => calls.push(["warn", ...args]) },
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: incarnationFixture.accountUser("user-1"), csrfToken: "csrf-2" }) }),
     setTimeout: (callback) => { calls.push(["timeout", callback]); return 1; },
-    prompt: () => null, confirm: () => true,
+    document: dialogDocument(), confirm: () => true,
     EventSource: class { addEventListener() {} close() {} }, ...overrides.host
   };
   const syncCore = {
@@ -288,26 +309,40 @@ test("session restore chooses bootstrap, normal sync, and retry recovery", async
   assert.ok(retry.calls.includes("resetRetry"));
 });
 
-test("account deletion cancellation, validation, HTTP failure, and cleanup retry preserve data", async () => {
-  const cancelled = sessionFixture({ host: { prompt: () => null } });
-  await cancelled.actions.deleteAccount();
-  const invalid = sessionFixture({ host: { prompt: () => "delete" } });
-  await invalid.actions.deleteAccount();
-  assert.ok(invalid.calls.some((entry) => entry[0] === "notice"));
-  const offline = sessionFixture({ state: { csrfToken: null }, host: { prompt: () => "DELETE" } });
-  await offline.actions.deleteAccount();
-  assert.ok(offline.calls.some((entry) => entry[0] === "notice"));
+test("account deletion dialog, validation, HTTP failure, and cleanup retry preserve data", async () => {
+  const opened = sessionFixture({ host: { prompt: () => { throw new Error("blocking prompt"); } } });
+  await opened.actions.deleteAccount();
+  const dialog = opened.host.document.body.appended[0];
+  assert.equal(dialog.open, true);
+  assert.match(dialog.children[1].textContent, /Type DELETE/);
+  assert.ok(opened.calls.some((entry) => entry[0] === "timeout"));
+  await opened.actions.cancelDeleteAccount();
+  assert.equal(dialog.open, false);
+  assert.equal(opened.calls.includes("clear"), false);
 
-  const rejected = sessionFixture({ host: { prompt: () => "DELETE", fetch: async () => ({ ok: false, status: 500 }) } });
-  await rejected.actions.deleteAccount();
+  const invalid = sessionFixture();
+  await invalid.actions.deleteAccount("delete");
+  assert.ok(invalid.calls.some((entry) => entry[0] === "notice" && /Type DELETE exactly/.test(entry[1])));
+  const offline = sessionFixture({ state: { csrfToken: null } });
+  await offline.actions.deleteAccount("DELETE");
+  assert.ok(offline.calls.some((entry) => entry[0] === "notice" && /Connect to the account server/.test(entry[1])));
+
+  const rejected = sessionFixture({ host: { fetch: async () => ({ ok: false, status: 500 }) } });
+  await rejected.actions.deleteAccount("DELETE");
   assert.equal(rejected.elements.deleteAccountButton.disabled, false);
   assert.equal(rejected.calls.includes("clear"), false);
 
-  const cleanup = sessionFixture({ host: { prompt: () => "DELETE", fetch: async () => ({ ok: true }) },
+  const cleanup = sessionFixture({ host: { fetch: async () => ({ ok: true }) },
     use: { clearLocalData: async () => { throw new Error("locked"); } } });
-  await cleanup.actions.deleteAccount();
+  await cleanup.actions.deleteAccount("DELETE");
   assert.equal(cleanup.localStorage.getItem("pomodoroughPendingLogout"), "1");
   assert.ok(cleanup.calls.some((entry) => entry[0] === "assign"));
+
+  const confirmed = sessionFixture({ host: { fetch: async () => ({ ok: true }) } });
+  await confirmed.actions.deleteAccount();
+  confirmed.host.document.body.appended[0].children[2].value = "DELETE";
+  await confirmed.actions.confirmDeleteAccount();
+  assert.ok(confirmed.calls.some((entry) => entry[0] === "assign"));
 });
 
 test("logout cancellation and deferred revocation retain the durable retry marker", async () => {

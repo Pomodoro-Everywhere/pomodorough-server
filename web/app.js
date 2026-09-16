@@ -13,7 +13,7 @@
   const SINGLE_ELEMENT_IDS = Object.freeze([
     "installButton", "syncStatus", "syncStatusText", "profile", "profileAvatar",
     "logoutButton", "deleteAccountButton", "conflictPanel", "conflictReason",
-    "conflictDismiss", "notice", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
+    "conflictDismiss", "notice", "noticeText", "noticeDismiss", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
     "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
@@ -54,7 +54,7 @@
     "localBootstrapState", "buildBootstrapPlan", "setFetchForTest", "setStorageMethodForTest",
     "setRevisionStreamForTest", "hasRevisionStreamForTest", "render", "renderTimer", "syncNow",
     "showNotice", "loadLocalState", "loadSharedCore", "setupEvents", "createDialTicks", "dialTickCountFor", "renderDialTicks",
-    "renderSyncStatus", "heartbeatTimerOwnership", "timerOwnerHeartbeatMs"
+    "renderSyncStatus", "heartbeatTimerOwnership", "timerOwnerHeartbeatMs", "dismissNotice"
   ]);
 
   function createBrowserHost(root) {

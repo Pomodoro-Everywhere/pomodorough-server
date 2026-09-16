@@ -24,6 +24,7 @@ func TestReportPanicToErrorMonitoringWithoutMonitoring(t *testing.T) {
 }
 
 func TestInternalAPIErrorReportsOnePatternTaggedEvent(t *testing.T) {
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)
@@ -49,6 +50,7 @@ func TestInternalAPIErrorReportsOnePatternTaggedEvent(t *testing.T) {
 // Monitoring must keep only the static operation; this test fails if the
 // underlying message ever reaches the event payload again.
 func TestS69InternalErrorWithUserContentReportsNoUserContent(t *testing.T) {
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)
@@ -144,6 +146,7 @@ func assertEventHasNoPII(t *testing.T, event *sentry.Event, secrets []string) {
 }
 
 func TestWriteJSONEncodeFailureReportsPatternOnly(t *testing.T) {
+	resetInternalErrorSamplerForTest()
 	transport := &sentry.MockTransport{}
 	if err := sentry.Init(sentry.ClientOptions{Dsn: "https://public@example.com/1", Transport: transport}); err != nil {
 		t.Fatal(err)
