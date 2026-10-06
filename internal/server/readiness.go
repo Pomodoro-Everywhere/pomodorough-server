@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.46.0"
+	readinessCoreVersion   = "0.47.0"
 )
 
 type readinessAsset struct {
@@ -42,17 +42,17 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "4ac05e8b6a1beb61efe3a426b17cbcd151c369167ac92433cfdf18427950a438", false},
+	{"index.html", "1c6a3d770b4664c05ac8285b99c7e8cd500a8161a04d4ef7c167d3571128d9c1", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "510c82512246cfb2bb4db1660cfe70b33bd27e8826433ed5d60c947f79904b11", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
 	{"sentry-client.js", "e7fac5ffee247eb1c18103d07915ab0f919dafbef761b9cf616df2e5f8370843", false},
-	{"app.html", "d2d7d6b65038032a1e30bd0bf7bdd9f513c69b615ec934aacc6497d3261e4308", false},
+	{"app.html", "0d29b8a0a4ed28703a9e273d8f9ffb47be06f02d7236515740e03c34b960b662", false},
 	{"app.css", "cf82c78181143beff051e65818c3b39e6f145ddd0b37af0b971e66a8ea8928b9", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "55cbddc547933a75a4f20dbf46bbfab9f1274689c2f1a8b631af3e6d8a2815a4", true},
+	{"pomodorough_core.wasm", "45501a8ae1dbce441c7b21c1a3862c00c69215ffd59a1754e8ca972224f3fbc3", true},
 	{"sync-core.js", "d28eacbc08fb614c6d5d838f75beb34f9fa33b13ab4339fcd3facee2543a6fca", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},

@@ -123,7 +123,7 @@ test("Core 0.44 real Go HTTP Start and terminal Finish survive lost response, ex
   assert.deepEqual(after.pending, []);
   assert.equal(meta(after, "outgoingSync"), undefined);
   assert.equal(meta(after, "completionState").selection.phase, "short_break");
-  assert.equal(core.call("core.version", {}).coreVersion, "0.46.0");
+  assert.equal(core.call("core.version", {}).coreVersion, "0.47.0");
   if (process.env.PWA044_HTTP_EVIDENCE) fs.writeFileSync(process.env.PWA044_HTTP_EVIDENCE,
     JSON.stringify({ provenance: require("./shared-core-metadata.js"), user, requests, start, lost, aborted, after }, null, 2));
 });

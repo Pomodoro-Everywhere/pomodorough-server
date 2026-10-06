@@ -615,7 +615,7 @@ test("migration ownership change after planning aborts every member before effec
   await assert.rejects(storage.planWorkspaceMutation(client.use.database(), input), storage.AccountOwnershipError);
   assert.deepEqual(await dump(client.use.database()), before);
   assert.equal(checks, 2);
-  assert.equal(call("core.version", {}).coreVersion, "0.46.0");
+  assert.equal(call("core.version", {}).coreVersion, "0.47.0");
 });
 
 test("migration claimed head-covered timer survives reload and permits a scoped Pause without rewriting its claim", async (t) => {
@@ -653,8 +653,8 @@ test("migration timer and preference routes invoke official workspace planners",
   assert.doesNotMatch(source, /buildTimerCommand\(|buildRetargetCommand\(/);
 });
 
-test("migration version provenance is the immutable official 0.46 release", async (t) => {
+test("migration version provenance is the immutable official 0.47 release", async (t) => {
   const { core } = await prepared(t);
-  assert.equal(core.call("core.version", {}).coreVersion, "0.46.0");
+  assert.equal(core.call("core.version", {}).coreVersion, "0.47.0");
   assert.equal(fs.statSync(path.join(__dirname, "pomodorough_core.wasm")).size, 2790028);
 });
