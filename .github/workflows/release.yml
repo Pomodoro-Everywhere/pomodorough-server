@@ -239,6 +239,23 @@ jobs:
             --event-ref "$GITHUB_REF" \
             --workflow-ref "$GITHUB_WORKFLOW_REF" \
             --github-repository "$GITHUB_REPOSITORY"
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache Go build cache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+          key: release-gobuild-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            release-gobuild-${{ runner.os }}-
+      - name: Warm Go toolchain and module cache for PWA HTTP fixture
+        run: go test ./internal/server -run '^TestCorePWA044HTTPFixture$' -count=1 -timeout=120s
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
