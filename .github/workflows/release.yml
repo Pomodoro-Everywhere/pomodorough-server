@@ -631,7 +631,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          printf '%s\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {} --repo "$GH_REPO"
+          # Serial retry avoids transient Sigstore TUF init races under parallel xargs.
+          for asset in dist/*.tar.gz dist/*.identity.json; do
+            attempt=1
+            until gh attestation verify "$asset" --repo "$GH_REPO"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "attestation verification failed for $asset after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep "$attempt"
+              attempt=$((attempt + 1))
+            done
+          done
       - name: Export SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -646,7 +657,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          printf '%s\0' trusted-native-records/*.native.json | xargs -0 -P 5 -I{} sh -c 'record="{}"; gh attestation verify "$record" --repo "$GH_REPO"'
+          # Serial retry avoids transient Sigstore TUF init races under parallel xargs.
+          for record in trusted-native-records/*.native.json; do
+            attempt=1
+            until gh attestation verify "$record" --repo "$GH_REPO"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "attestation verification failed for $record after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep "$attempt"
+              attempt=$((attempt + 1))
+            done
+          done
           cp -- trusted-native-records/*.native.json dist/
       - name: Finalize release identity and checksums
         run: |

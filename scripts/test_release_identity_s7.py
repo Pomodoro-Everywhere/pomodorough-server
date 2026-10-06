@@ -208,6 +208,23 @@ def job_needs(workflow: str, job: str) -> list[str]:
     return [raw]
 
 
+def attestation_retry_errors(workflow: str) -> list[str]:
+    errors = []
+    if "printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}" in workflow:
+        errors.append("redundant attest-verify remains")
+    if "trusted-native-records/*.native.json | xargs" in workflow:
+        errors.append("parallel native attestation remains")
+    if "for record in trusted-native-records/*.native.json" not in workflow:
+        errors.append("native attestation retry missing")
+    if "until gh attestation verify \"$record\" --repo \"$GH_REPO\"" not in workflow:
+        errors.append("native attestation retry policy missing")
+    if "for asset in dist/*.tar.gz dist/*.identity.json" not in workflow:
+        errors.append("package attestations missing")
+    if "until gh attestation verify \"$asset\" --repo \"$GH_REPO\"" not in workflow:
+        errors.append("package attestation retry policy missing")
+    return errors
+
+
 def gate_errors(workflow: str) -> list[str]:
     errors = []
     if re.search(r"^  verify:\n", workflow, re.MULTILINE):
@@ -250,10 +267,7 @@ def gate_errors(workflow: str) -> list[str]:
     if "  preflight:\n" in workflow and "  build:\n" in workflow:
         if workflow.index("  preflight:") > workflow.index("  build:"):
             errors.append("preflight not before builds")
-    if "printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}" in workflow:
-        errors.append("redundant attest-verify remains")
-    if "printf '%s\\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {}" not in workflow:
-        errors.append("package attestations missing")
+    errors.extend(attestation_retry_errors(workflow))
     return errors
 
 
@@ -280,6 +294,7 @@ def required_workflow_errors(workflow: str) -> list[str]:
         "separate native artifact": "name: native-record-${{ matrix.goos }}-${{ matrix.goarch }}",
         "package native binding": "--native-record \"binary/${package}.native.json\"",
         "native attestation verification": "gh attestation verify \"$record\" --repo \"$GH_REPO\"",
+        "package attestation verification": "gh attestation verify \"$asset\" --repo \"$GH_REPO\"",
         "independent native download": "pattern: native-record-*",
         "trusted native path": "path: trusted-native-records",
         "trusted finalizer input": "--native-record-directory trusted-native-records",

@@ -250,7 +250,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn('--target "$GITHUB_SHA"', workflow)
         self.assertIn("python3 -m unittest discover -s scripts -p 'test_release*.py' -v", workflow)
-        self.assertIn("printf '%s\\0' dist/*.tar.gz dist/*.identity.json | xargs -0 -P 4 -I{} gh attestation verify {}", workflow)
+        self.assertIn("for asset in dist/*.tar.gz dist/*.identity.json", workflow)
+        self.assertIn('until gh attestation verify "$asset" --repo "$GH_REPO"', workflow)
+        self.assertNotIn("dist/*.tar.gz dist/*.identity.json | xargs", workflow)
+        self.assertIn("for record in trusted-native-records/*.native.json", workflow)
+        self.assertIn('until gh attestation verify "$record" --repo "$GH_REPO"', workflow)
+        self.assertNotIn("trusted-native-records/*.native.json | xargs", workflow)
         self.assertNotIn("printf '%s\\0' dist/* | xargs -0 -P 4 -I{} gh attestation verify {}", workflow)
         self.assertEqual(workflow.count('--seal "$RUNNER_TEMP/server-release-seal.json"'), 2)
         self.assertLess(workflow.index("release_publication.py verify"),
