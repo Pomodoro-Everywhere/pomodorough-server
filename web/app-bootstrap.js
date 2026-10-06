@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   function timingMs(name, fallback) {
     try {
       const runtime = typeof globalThis !== "undefined" ? globalThis.PomodoroughAppRuntime : null;
@@ -44,7 +47,7 @@
       "emptyTimer", "normalizeDurationsMs", "tr", "reloadPersistedState", "resetSyncRetry",
       "render", "renderBootstrapDialog", "showNotice", "openRevisionStream", "hasPendingOperations",
       "scheduleSync", "syncNow", "scheduleRetry", "postMutation", "redirectToLogin",
-      "queueSessionRevalidation", "refreshAllPendingOperations"
+      "queueSessionRevalidation", "refreshAllPendingOperations", "validatePersistedDisplayContext"
     ],
     provides: [
       "restartBootstrapForCurrentAccount", "queueBootstrapPreparation", "loadBootstrapPreview",
@@ -65,6 +68,7 @@
   class BootstrapSubmission {
     constructor(state, external, use) {
       Object.assign(this, { state, use, preparation: null }, external);
+      this.submissionContext = null;
     }
 
     actions() {
@@ -78,22 +82,27 @@
       ]);
     }
 
-    async restartBootstrapForCurrentAccount() {
+    async restartBootstrapForCurrentAccount(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       if (!this.syncCore.accountOwnerId(this.state.user)) return;
-      const context = this.use.captureAccountContext();
+      await this.use.validatePersistedDisplayContext(context);
+      context.assertCurrent();
       const restarted = await this.syncStorage.invalidateForeignResolution(this.use.database(), {
         ...context, accountBinding: this.state.authenticatedAccountBinding,
         currentUserId: this.syncCore.accountOwnerId(this.state.user), gateToken: this.use.tabId(), nowMs: Date.now(),
         leaseMs: BOOTSTRAP_LEASE_MS
       });
+      context.assertCurrent();
       if (restarted.acquired && !restarted.resolution) {
         restarted.legacyAutoStartMigration = await this.syncStorage.migrateLegacyAutoStart(this.use.database(), {
           ...context, operationId: this.host.crypto.randomUUID(), nowMs: Date.now()
         });
+        context.assertCurrent();
         restarted.legacySelectedTaskMigration = await this.syncStorage.migrateLegacySelectedTask(this.use.database(), {
           ...context, operationId: this.host.crypto.randomUUID(), nowMs: Date.now()
         });
-        await this.use.refreshMigratedPreferences(restarted);
+        context.assertCurrent();
+        await this.use.refreshMigratedPreferences(restarted, context);
       }
       context.assertCurrent();
       Object.assign(this.state, {
@@ -105,18 +114,24 @@
       });
     }
 
-    queueBootstrapPreparation() {
-      this.host.setTimeout(() => this.preparation.prepareBootstrap().catch((error) => {
-        this.state.retrying = true;
-        this.use.scheduleRetry();
-        this.host.console.warn("Pomodorough bootstrap restart deferred:", error);
-        reportFrontendError(error, "bootstrap.restart.deferred");
-      }), timingMs("defer", 0));
+    queueBootstrapPreparation(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
+      this.host.setTimeout(() => {
+        if (!accountOperation.isCurrent(context)) return;
+        return this.preparation.prepareBootstrap(context).catch((error) => {
+          if (!accountOperation.isCurrent(context)) return;
+          this.state.retrying = true;
+          this.use.scheduleRetry(context);
+          this.host.console.warn("Pomodorough bootstrap restart deferred:", error);
+          reportFrontendError(error, "bootstrap.restart.deferred");
+        });
+      }, timingMs("defer", 0));
     }
 
-    async loadBootstrapPreview() {
-      const context = this.use.captureAccountContext();
+    async loadBootstrapPreview(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       const requestSequence = await this.syncStorage.allocateClockRequestSequence(this.use.database(), context);
+      context.assertCurrent();
       const requestAtMs = Date.now();
       const response = await this.host.fetch("/api/v1/bootstrap", {
         credentials: "same-origin", cache: "no-store", headers: this.syncCore.accountHeaders(context.ownerId)
@@ -139,7 +154,8 @@
       });
       const clockOffset = await this.syncStorage.saveClockOffset(
         this.use.database(),
-        this.syncCore.serverClockOffset(payload.serverTime, requestAtMs, receivedAtMs, requestSequence), context
+        this.syncStorage.sampleClock(this.state.clockOffset, payload.serverTime,
+          { requestAtMs, receivedAtMs, requestSequence }), context
       );
       context.assertCurrent();
       this.state.clockOffset = clockOffset;
@@ -159,8 +175,8 @@
       };
     }
 
-    async persistBootstrapResolution(strategy, replaceExisting = false) {
-      const context = this.use.captureAccountContext();
+    async persistBootstrapResolution(strategy, replaceExisting = false, context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       if (this.state.bootstrapOwnershipConfirmation
         && (!this.state.bootstrapOwnershipApproved || strategy !== this.state.bootstrapPlan.strategy)) {
         throw new this.syncStorage.AccountOwnershipError();
@@ -168,9 +184,13 @@
       if (!this.syncCore.isResolutionStrategy(strategy)) {
         throw new this.syncStorage.BootstrapGateError("History resolution changed in another tab.");
       }
-      const lease = await this.use.acquireBootstrapGate();
+      await this.use.validatePersistedDisplayContext(context);
+      context.assertCurrent();
+      const lease = await this.use.acquireBootstrapGate(context);
+      context.assertCurrent();
       if (!lease.acquired) throw new this.syncStorage.BootstrapGateError("Another tab owns history resolution.");
-      await this.use.refreshMigratedPreferences(lease);
+      await this.use.refreshMigratedPreferences(lease, context);
+      context.assertCurrent();
       const pending = await this.syncStorage.captureResolution(this.use.database(), {
         userId: this.syncCore.accountOwnerId(this.state.user), requestId: this.host.crypto.randomUUID(), deviceId: this.state.deviceId,
         expectedRevision: this.state.bootstrapPreview.revision, strategy
@@ -223,14 +243,13 @@
       if (!Number.isFinite(revision) || revision < 0) throw new Error(this.use.tr(
         "bootstrap.missingRevision", {}, "Bootstrap response omitted revision."
       ));
-      const durationsMs = this.use.normalizeDurationsMs(applied.baseDurationsMs);
+      const durationsMs = this.use.clone(applied.baseDurationsMs);
       const clockOffset = this.use.responseClockOffset(payload, timing, true);
       return {
         local, validated,
         snapshot: {
           revision, serverTime: payload.serverTime,
-          canonicalTimer: this.use.clone(applied.baseTimer ? this.use.normalizeTimer(applied.baseTimer)
-            : this.use.emptyTimer(this.state.selectedPhase, durationsMs[this.state.selectedPhase])),
+          canonicalTimer: this.use.clone(applied.baseTimer),
           history: this.use.clone(applied.baseHistory), tasks: this.use.clone(applied.baseTasks),
           durationsMs: this.use.clone(durationsMs), autoStartBreaks: applied.baseAutoStartBreaks,
           selectedTaskId: applied.baseSelectedTaskId, user: this.use.clone(this.state.user)
@@ -257,8 +276,8 @@
       while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
     }
 
-    async acceptBootstrapResponse(payload, pending, timing) {
-      const context = this.use.captureAccountContext();
+    async acceptBootstrapResponse(payload, pending, timing, context) {
+      accountOperation.requireBound(context);
       if (context.ownerId !== pending.userId) throw new this.syncStorage.AccountOwnershipError();
       this.syncCore.assertResponseAccount(payload, pending.userId);
       const validated = this.syncCore.validateCanonicalResponse(payload, pending.payload);
@@ -284,7 +303,8 @@
           }
         });
         context.assertCurrent();
-        await this.use.reloadPersistedState();
+        await this.use.reloadPersistedState(null, context);
+        context.assertCurrent();
         this.resetBootstrapState();
         const conflicts = this.bootstrapConflicts(next.validated);
         if (outcome.applied && conflicts.length) {
@@ -293,13 +313,15 @@
       } finally {
         this.state.actionLocked = false;
       }
+      context.assertCurrent();
       this.use.render();
-      this.use.openRevisionStream();
-      if (this.use.hasPendingOperations()) this.use.scheduleSync(0);
+      context.assertCurrent();
+      this.use.openRevisionStream(context);
+      if (this.use.hasPendingOperations()) this.use.scheduleSync(0, false, context);
     }
 
-    async validateBootstrapSubmission(pending) {
-      const context = this.use.captureAccountContext();
+    async validateBootstrapSubmission(pending, context) {
+      accountOperation.requireBound(context);
       let current = pending;
       if (this.state.bootstrapGateOwned) {
         const normalized = await this.syncStorage.normalizeLegacyDurationOperations(this.use.database(), {
@@ -310,32 +332,34 @@
         current = normalized.resolution || current;
         this.state.bootstrapPending = current;
       }
-      await this.syncStorage.validatePendingForSend(this.use.database(), {
+      const claimed = await this.syncStorage.validatePendingForSend(this.use.database(), {
         ...context,
         pending: current, currentUserId: this.syncCore.accountOwnerId(this.state.user), gateToken: this.use.tabId(),
         nowMs: Date.now(), leaseMs: BOOTSTRAP_LEASE_MS
       });
-      return current;
+      context.assertCurrent();
+      this.state.bootstrapPending = claimed;
+      return claimed;
     }
 
-    async recoverInvalidBootstrapSubmission() {
-      const context = this.use.captureAccountContext();
+    async recoverInvalidBootstrapSubmission(context) {
+      accountOperation.requireBound(context);
       const persisted = await this.syncStorage.readBootstrapState(this.use.database());
       context.assertCurrent();
       if (!this.syncCore.pendingMatchesUser(persisted.resolution, this.syncCore.accountOwnerId(this.state.user))) {
-        this.use.queueSessionRevalidation();
+        this.use.queueSessionRevalidation(context);
         return;
       }
       this.state.bootstrapPending = persisted.resolution;
       this.state.bootstrapGateOwned = false;
-      this.queueBootstrapPreparation();
+      this.queueBootstrapPreparation(context);
     }
 
-    async sendBootstrapResolution(pending) {
-      const context = this.use.captureAccountContext();
+    async sendBootstrapResolution(pending, context) {
+      accountOperation.requireBound(context);
       const body = JSON.stringify(pending.payload);
       const { response, timing } = await this.use.postMutation(
-        "/api/v1/bootstrap/resolve", body, pending.userId
+        "/api/v1/bootstrap/resolve", body, pending.userId, context
       );
       context.assertCurrent();
       if (response.status === 401) {
@@ -346,7 +370,7 @@
         const conflict = await response.json().catch(() => ({}));
         context.assertCurrent();
         if (conflict.error === "account incarnation changed") {
-          this.use.queueSessionRevalidation();
+          this.use.queueSessionRevalidation(context);
           return;
         }
         this.state.bootstrapConflict = true;
@@ -362,31 +386,43 @@
       ));
       const payload = await response.json();
       context.assertCurrent();
-      await this.acceptBootstrapResponse(payload, pending, timing);
+      await this.acceptBootstrapResponse(payload, pending, timing, context);
+      context.assertCurrent();
     }
 
-    async submitBootstrapResolution() {
-      if (this.state.bootstrapSubmitting || !this.state.bootstrapPending || !this.host.navigator.onLine) return;
+    async submitBootstrapResolution(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return;
+      if (this.submissionActive() || !this.state.bootstrapPending || !this.host.navigator.onLine) return;
       let pending = this.state.bootstrapPending;
       if (!this.syncCore.pendingResolutionCanSubmit(pending, this.syncCore.accountOwnerId(this.state.user))) {
-        this.use.queueSessionRevalidation();
+        this.use.queueSessionRevalidation(context);
         return;
       }
       try {
-        pending = await this.validateBootstrapSubmission(pending);
-      } catch {
-        await this.recoverInvalidBootstrapSubmission();
+        pending = await this.validateBootstrapSubmission(pending, context);
+        context.assertCurrent();
+      } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
+        if (/possibly delivered|exceeds Core limits|cannot be rewritten|non-delivery evidence/i.test(error.message || "")) {
+          this.state.bootstrapError = error.message;
+          this.state.bootstrapFocusTarget = this.elements.bootstrapRetry;
+          this.use.renderBootstrapDialog();
+          return;
+        }
+        await this.recoverInvalidBootstrapSubmission(context);
         return;
       }
+      this.submissionContext = context;
       this.state.bootstrapSubmitting = true;
       this.state.bootstrapError = null;
       this.use.renderBootstrapDialog();
       try {
-        await this.sendBootstrapResolution(pending);
+        await this.sendBootstrapResolution(pending, context);
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
         if (!this.syncCore.pendingMatchesUser(this.state.bootstrapPending, this.syncCore.accountOwnerId(this.state.user))) {
           this.state.bootstrapError = null;
-          this.queueBootstrapPreparation();
+          this.queueBootstrapPreparation(context);
           return;
         }
         this.state.bootstrapError = `${error.message || "History resolution was interrupted."} Retry sends the exact saved request.`;
@@ -394,28 +430,41 @@
         this.host.console.warn("Pomodorough bootstrap resolution deferred:", error);
         reportFrontendError(error, "bootstrap.resolution.deferred");
       } finally {
-        this.state.bootstrapSubmitting = false;
-        this.use.render();
+        if (this.submissionContext === context) {
+          this.submissionContext = null;
+          this.state.bootstrapSubmitting = false;
+          if (accountOperation.isCurrent(context)) this.use.render();
+        }
       }
     }
 
-    async retryBootstrapResolution() {
-      if (this.state.bootstrapSubmitting) return;
+    submissionActive() {
+      return this.state.bootstrapSubmitting && (!this.submissionContext || accountOperation.isCurrent(this.submissionContext));
+    }
+
+    async retryBootstrapResolution(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return;
+      if (this.submissionActive()) return;
       try {
         if (this.state.bootstrapConflict) {
           const strategy = this.state.bootstrapStrategy || this.state.bootstrapPending?.payload?.strategy;
           if (!this.syncCore.isResolutionStrategy(strategy)) {
-            this.use.queueSessionRevalidation();
+            this.use.queueSessionRevalidation(context);
             return;
           }
+          this.submissionContext = context;
           this.state.bootstrapSubmitting = true;
           this.use.renderBootstrapDialog();
-          this.state.bootstrapPreview = await this.loadBootstrapPreview();
-          await this.persistBootstrapResolution(strategy, true);
+          const preview = await this.loadBootstrapPreview(context);
+          context.assertCurrent();
+          this.state.bootstrapPreview = preview;
+          await this.persistBootstrapResolution(strategy, true, context);
+          context.assertCurrent();
           this.state.bootstrapSubmitting = false;
         }
-        await this.submitBootstrapResolution();
+        await this.submitBootstrapResolution(context);
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
         if (this.handleResolutionLimit(error)) return;
         reportFrontendError(error, "bootstrap.retry.deferred");
         this.state.bootstrapSubmitting = false;
@@ -426,7 +475,9 @@
     }
 
     async chooseBootstrapStrategy(strategy, confirmed = false) {
-      if (this.state.bootstrapSubmitting || this.state.bootstrapPending) return;
+      const context = this.use.captureAccountContext();
+      accountOperation.requireBound(context);
+      if (this.submissionActive() || this.state.bootstrapPending) return;
       if (this.state.bootstrapLimitError && strategy !== "keep_remote") return;
       if (this.state.bootstrapOwnershipConfirmation && strategy !== this.state.bootstrapPlan?.strategy) return;
       const selectionMode = this.state.bootstrapLimitError || this.state.bootstrapOwnershipConfirmation
@@ -438,11 +489,14 @@
         return;
       }
       this.state.bootstrapOwnershipApproved = confirmed;
+      this.submissionContext = context;
       this.state.bootstrapSubmitting = true;
       this.use.renderBootstrapDialog();
       try {
-        await this.persistBootstrapResolution(strategy);
+        await this.persistBootstrapResolution(strategy, false, context);
+        context.assertCurrent();
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
         if (this.handleResolutionLimit(error)) return;
         reportFrontendError(error, "bootstrap.choice.deferred");
         this.use.showNotice(error.message || this.use.tr(
@@ -454,7 +508,7 @@
         return;
       }
       this.state.bootstrapSubmitting = false;
-      await this.submitBootstrapResolution();
+      await this.submitBootstrapResolution(context);
     }
   }
 
@@ -462,6 +516,7 @@
     constructor(state, external, use, submission) {
       Object.assign(this, { state, use, submission }, external);
       this.bootstrapPromise = null;
+      this.bootstrapContext = null;
     }
 
     actions() {
@@ -473,15 +528,28 @@
       ]);
     }
 
-    async prepareBootstrap() {
-      if (this.bootstrapPromise) return this.bootstrapPromise;
-      this.bootstrapPromise = this.prepareBootstrapOnce();
-      try { return await this.bootstrapPromise; } finally { this.bootstrapPromise = null; }
+    async prepareBootstrap(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return;
+      if (this.bootstrapPromise) {
+        if (accountOperation.isCurrent(this.bootstrapContext)) return this.bootstrapPromise;
+        await this.bootstrapPromise;
+        if (!accountOperation.isCurrent(context)) return;
+        return this.prepareBootstrap(context);
+      }
+      this.bootstrapContext = context;
+      this.bootstrapPromise = this.prepareBootstrapOnce(context).catch((error) => {
+        if (accountOperation.isCurrent(context)) throw error;
+      });
+      try { return await this.bootstrapPromise; } finally {
+        this.bootstrapPromise = null;
+        this.bootstrapContext = null;
+      }
     }
 
-    async resumeNormalSyncFromBootstrap(persisted) {
-      await this.use.reloadPersistedState(persisted);
-      const context = this.use.captureAccountContext();
+    async resumeNormalSyncFromBootstrap(persisted, context) {
+      accountOperation.requireBound(context);
+      await this.use.reloadPersistedState(persisted, context);
+      context.assertCurrent();
       this.state.quarantinedLocal = null;
       await this.syncStorage.clearBootstrapGate(this.use.database(), this.use.tabId(), context);
       context.assertCurrent();
@@ -490,8 +558,9 @@
         bootstrapGateOwned: false, bootstrapBlocked: false, retrying: false
       });
       this.use.render();
-      await this.use.syncNow(true);
-      this.use.openRevisionStream();
+      await this.use.syncNow(true, context);
+      context.assertCurrent();
+      this.use.openRevisionStream(context);
     }
 
     bootstrapPreparationPaused() {
@@ -500,7 +569,8 @@
         || this.state.bootstrapPlan?.mode === "choose" && !this.state.bootstrapPending);
     }
 
-    async reconcileBootstrapAccount() {
+    async reconcileBootstrapAccount(context) {
+      accountOperation.requireBound(context);
       const currentUserId = this.syncCore.accountOwnerId(this.state.user);
       const pendingMatches = !this.state.bootstrapPending
         || this.syncCore.pendingMatchesUser(this.state.bootstrapPending, currentUserId);
@@ -508,67 +578,72 @@
         && this.state.localOwnerId && this.state.localOwnerId !== currentUserId;
       if (pendingMatches && !needsAccountHandoff) return false;
       if (!this.state.sessionIdentityValidated) {
-        this.use.queueSessionRevalidation();
+        this.use.queueSessionRevalidation(context);
         return true;
       }
       try {
-        await this.submission.restartBootstrapForCurrentAccount();
+        await this.submission.restartBootstrapForCurrentAccount(context);
+        context.assertCurrent();
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) throw error;
         if (!(error instanceof this.syncStorage.AccountOwnershipError)) throw error;
-        this.use.queueSessionRevalidation();
+        this.use.queueSessionRevalidation(context);
         return true;
       }
       return false;
     }
 
-    deferBootstrapPreparation() {
+    deferBootstrapPreparation(context) {
+      accountOperation.requireBound(context);
       this.state.retrying = true;
-      this.use.scheduleRetry();
+      this.use.scheduleRetry(context);
       this.use.render();
     }
 
-    async acquireBootstrapPreparationGate() {
+    async acquireBootstrapPreparationGate(context) {
+      accountOperation.requireBound(context);
       if (this.state.bootstrapGateOwned) return false;
-      const context = this.use.captureAccountContext();
-      const lease = await this.use.acquireBootstrapGate();
+      const lease = await this.use.acquireBootstrapGate(context);
       context.assertCurrent();
       if (!lease.acquired) {
-        this.deferBootstrapPreparation();
+        this.deferBootstrapPreparation(context);
         return true;
       }
       this.state.bootstrapGateOwned = true;
       this.state.bootstrapGatePersisted = true;
-      await this.use.refreshMigratedPreferences(lease);
+      await this.use.refreshMigratedPreferences(lease, context);
       context.assertCurrent();
       if (lease.resolution) this.state.bootstrapPending = lease.resolution;
       if (this.state.bootstrapPending
         && !this.syncCore.pendingResolutionCanSubmit(this.state.bootstrapPending, this.syncCore.accountOwnerId(this.state.user))) {
         if (!this.state.sessionIdentityValidated) {
-          this.use.queueSessionRevalidation();
+          this.use.queueSessionRevalidation(context);
           return true;
         }
-        await this.submission.restartBootstrapForCurrentAccount();
+        await this.submission.restartBootstrapForCurrentAccount(context);
+        context.assertCurrent();
       }
       if (this.state.bootstrapPending) return false;
       const persisted = await this.syncStorage.readSyncState(this.use.database());
       context.assertCurrent();
       if (this.syncCore.accountOwnerId(persisted.snapshot?.user) === this.syncCore.accountOwnerId(this.state.user)) {
-        await this.resumeNormalSyncFromBootstrap(persisted);
+        await this.resumeNormalSyncFromBootstrap(persisted, context);
         return true;
       }
       if (this.syncCore.accountOwnerId(persisted.snapshot?.user)) this.state.localOwnerId = this.syncCore.accountOwnerId(persisted.snapshot.user);
       return false;
     }
 
-    async submitMatchingBootstrapResolution() {
+    async submitMatchingBootstrapResolution(context) {
+      accountOperation.requireBound(context);
       if (this.state.bootstrapPending?.userId !== this.syncCore.accountOwnerId(this.state.user)) return false;
       this.state.bootstrapStrategy = this.state.bootstrapPending.payload.strategy;
-      await this.submission.submitBootstrapResolution();
+      await this.submission.submitBootstrapResolution(context);
       return true;
     }
 
-    async reconcilePersistedBootstrapState() {
-      const context = this.use.captureAccountContext();
+    async reconcilePersistedBootstrapState(context) {
+      accountOperation.requireBound(context);
       if (this.state.bootstrapPending || !this.syncCore.canExposeOwnerState({
         sessionValidated: this.state.sessionIdentityValidated, localOwnerId: this.state.localOwnerId,
         currentUserId: this.syncCore.accountOwnerId(this.state.user)
@@ -577,84 +652,101 @@
       context.assertCurrent();
       if (bootstrapState.resolution) {
         this.state.bootstrapPending = bootstrapState.resolution;
-        if (await this.submitMatchingBootstrapResolution()) return true;
+        if (await this.submitMatchingBootstrapResolution(context)) return true;
+        context.assertCurrent();
       }
       if (!this.state.bootstrapPending && bootstrapState.gate && !this.state.bootstrapGateOwned) {
-        this.deferBootstrapPreparation();
+        this.deferBootstrapPreparation(context);
         return true;
       }
       if (this.state.bootstrapPending || !this.state.bootstrapGateOwned) return false;
       const persisted = await this.syncStorage.readSyncState(this.use.database());
       context.assertCurrent();
       if (this.syncCore.accountOwnerId(persisted.snapshot?.user) !== this.syncCore.accountOwnerId(this.state.user)) return false;
-      await this.resumeNormalSyncFromBootstrap(persisted);
+      await this.resumeNormalSyncFromBootstrap(persisted, context);
       return true;
     }
 
-    buildBootstrapPlan(local) {
-      return this.syncStorage.bootstrapPlan({
-        localOwnerId: this.state.localOwnerId, currentUserId: this.syncCore.accountOwnerId(this.state.user),
-        localHistory: local.history, remoteHistory: this.state.bootstrapPreview.history,
-        hasLocalState: this.syncCore.hasLocalState(local),
-        hasRemoteState: this.syncCore.hasRemoteState({
-          ...this.state.bootstrapPreview, defaultDurationsMs: this.use.defaultDurationsMs()
-        })
-      });
+    async buildBootstrapPlan(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
+      const records = await this.syncStorage.readSyncState(this.use.database());
+      context.assertCurrent();
+      const result = this.syncStorage.bootstrapWorkspace({ ...records,
+        deviceId: this.state.deviceId, ownerId: this.syncCore.accountOwnerId(records.snapshot?.user),
+        currentUserId: this.syncCore.accountOwnerId(this.state.user), remote: this.state.bootstrapPreview,
+        nowMs: Date.now(), defaultDurationsMs: this.use.defaultDurationsMs() });
+      this.state.bootstrapClassification = result.classification;
+      return result.plan;
     }
 
-    async prepareBootstrapPlan() {
-      const context = this.use.captureAccountContext();
-      this.state.bootstrapPreview = await this.submission.loadBootstrapPreview();
+    async prepareBootstrapPlan(context) {
+      accountOperation.requireBound(context);
+      const preview = await this.submission.loadBootstrapPreview(context);
       context.assertCurrent();
-      const local = this.submission.localBootstrapState();
-      this.state.bootstrapPlan = this.buildBootstrapPlan(local);
+      this.state.bootstrapPreview = preview;
+      const plan = await this.buildBootstrapPlan(context);
+      context.assertCurrent();
+      this.state.bootstrapPlan = plan;
       this.state.bootstrapOwnershipConfirmation = this.state.bootstrapPlan.reason === "different_owner";
       if (this.state.bootstrapPlan.mode !== "normal_sync") return false;
       const persisted = await this.syncStorage.readSyncState(this.use.database());
       context.assertCurrent();
       if (this.syncCore.accountOwnerId(persisted.snapshot?.user) === this.syncCore.accountOwnerId(this.state.user)) {
-        await this.resumeNormalSyncFromBootstrap(persisted);
+        await this.resumeNormalSyncFromBootstrap(persisted, context);
         return true;
       }
       this.state.localOwnerId = this.syncCore.accountOwnerId(persisted.snapshot?.user) || null;
-      this.state.bootstrapPlan = this.buildBootstrapPlan(local);
+      const revisedPlan = await this.buildBootstrapPlan(context);
+      context.assertCurrent();
+      this.state.bootstrapPlan = revisedPlan;
       this.state.bootstrapOwnershipConfirmation = this.state.bootstrapPlan.reason === "different_owner";
       return false;
     }
 
-    async persistAutomaticBootstrapResolution() {
+    async persistAutomaticBootstrapResolution(context) {
+      accountOperation.requireBound(context);
       try {
         if (!this.syncCore.isResolutionStrategy(this.state.bootstrapPlan.strategy)) {
-          this.use.queueSessionRevalidation();
+          this.use.queueSessionRevalidation(context);
           return;
         }
         await this.submission.persistBootstrapResolution(
           this.state.bootstrapPlan.strategy,
-          Boolean(this.state.bootstrapPending && this.state.bootstrapPending.userId !== this.syncCore.accountOwnerId(this.state.user))
+          Boolean(this.state.bootstrapPending && this.state.bootstrapPending.userId !== this.syncCore.accountOwnerId(this.state.user)), context
         );
+        context.assertCurrent();
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) throw error;
         if (this.submission.handleResolutionLimit(error)) return;
         throw error;
       }
-      await this.submission.submitBootstrapResolution();
+      await this.submission.submitBootstrapResolution(context);
     }
 
-    async prepareBootstrapOnce() {
+    async prepareBootstrapOnce(context) {
+      accountOperation.requireBound(context);
+      await this.use.validatePersistedDisplayContext(context);
+      context.assertCurrent();
       this.state.bootstrapBlocked = true;
       this.use.render();
       if (this.bootstrapPreparationPaused()) return;
-      if (await this.reconcileBootstrapAccount()) return;
-      if (await this.acquireBootstrapPreparationGate()) return;
-      if (await this.submitMatchingBootstrapResolution()) return;
-      if (await this.reconcilePersistedBootstrapState()) return;
-      if (await this.prepareBootstrapPlan()) return;
+      if (await this.reconcileBootstrapAccount(context)) return;
+      context.assertCurrent();
+      if (await this.acquireBootstrapPreparationGate(context)) return;
+      context.assertCurrent();
+      if (await this.submitMatchingBootstrapResolution(context)) return;
+      context.assertCurrent();
+      if (await this.reconcilePersistedBootstrapState(context)) return;
+      context.assertCurrent();
+      if (await this.prepareBootstrapPlan(context)) return;
+      context.assertCurrent();
       if (this.state.bootstrapPlan.mode === "choose" || this.state.bootstrapOwnershipConfirmation) {
         this.state.bootstrapStrategy = null;
         this.state.bootstrapFocusTarget = this.elements.bootstrapChoiceButtons[0];
         this.use.render();
         return;
       }
-      await this.persistAutomaticBootstrapResolution();
+      await this.persistAutomaticBootstrapResolution(context);
     }
   }
 

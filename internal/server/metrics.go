@@ -39,6 +39,7 @@ func newRequestMetrics() *requestMetrics {
 
 func (m *requestMetrics) observe(method, pattern string, status int, duration time.Duration) {
 	route := metricRoute(method, pattern)
+	method = normalizeMetricMethod(method)
 	requestKey := requestMetricKey{method: method, route: route, status: status}
 	durationKey := durationMetricKey{method: method, route: route}
 	m.mu.Lock()
@@ -56,6 +57,17 @@ func metricRoute(method, pattern string) string {
 		return "unmatched"
 	}
 	return pattern
+}
+
+func normalizeMetricMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost,
+		http.MethodPut, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace, http.MethodPatch:
+		return method
+	default:
+		return "OTHER"
+	}
 }
 
 func (m *requestMetrics) writePrometheus(w io.Writer) error {

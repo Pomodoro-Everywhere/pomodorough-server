@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   const COMPLETION_SOUND_INTERVAL_MS = 1_200;
   // Westminster first quarter (G#4 F#4 E4 B3): one bell per repeat tick so the
   // full phrase emerges over successive alerts without overlapping playback.
@@ -20,21 +23,6 @@
 
   const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
   const TIMER_OWNER_HEARTBEAT_MS = timingMs("timerOwnerHeartbeat", 15_000);
-  const MIN_DURATION_MS = 60_000;
-  const MAX_DURATION_MS = 14_400_000;
-  const FINISH_RESULT_KEYS = Object.freeze([
-    "commands", "reason", "selectedPhase", "selectedPhaseDurationMs", "transitioned"
-  ].sort());
-  const FINISH_COMMAND_KEYS = Object.freeze([
-    "id", "deviceId", "deviceSequence", "timerId", "type", "phase", "plannedDurationMs",
-    "occurredAt", "hlcWallMs", "hlcCounter", "observedElapsedMs"
-  ].sort());
-  const DEPENDENT_FINISH_COMMAND_KEYS = Object.freeze(
-    FINISH_COMMAND_KEYS.concat("dependsOnCommandId").sort()
-  );
-  const GENERATED_BREAK_COMMAND_KEYS = Object.freeze([
-    ...DEPENDENT_FINISH_COMMAND_KEYS, "generatedBreak"
-  ].sort());
 
   function reportFrontendError(error, operation) {
     try {
@@ -45,18 +33,35 @@
     } catch { /* error monitoring must never break the app */ }
   }
 
-  function hasExactKeys(value, expectedKeys) {
-    if (!value || Object.getPrototypeOf(value) !== Object.prototype) return false;
-    const actualKeys = Object.keys(value).sort();
-    return actualKeys.length === expectedKeys.length
-      && actualKeys.every((key, index) => key === expectedKeys[index]);
-  }
-
   function bindActions(owner, names) {
     return Object.fromEntries(names.map((name) => {
       owner[name] = owner[name].bind(owner);
       return [name, owner[name]];
     }));
+  }
+
+  function reportMutationFailure(error, operation) {
+    switch (operation) {
+      case "actions.duration.save-failed": reportFrontendError(error, "actions.duration.save-failed"); break;
+      case "actions.auto-start.save-failed": reportFrontendError(error, "actions.auto-start.save-failed"); break;
+      case "actions.selected-task.save-failed": reportFrontendError(error, "actions.selected-task.save-failed"); break;
+      case "actions.selected-task.retarget-missing": reportFrontendError(error, "actions.selected-task.retarget-missing"); break;
+      case "actions.task.save-failed": reportFrontendError(error, "actions.task.save-failed"); break;
+      case "actions.timer.clear-failed": reportFrontendError(error, "actions.timer.clear-failed"); break;
+      case "view.phase.save-failed": reportFrontendError(error, "view.phase.save-failed"); break;
+      default: reportFrontendError(error, "actions.timer.save-failed");
+    }
+  }
+
+  function mutationFailureNotice(use, operation) {
+    switch (operation) {
+      case "actions.duration.save-failed": return use.tr("notice.durationSaveFailed", {}, "Duration change could not be saved.");
+      case "actions.auto-start.save-failed": return use.tr("notice.autoStartSaveFailed", {}, "Auto-start preference could not be saved.");
+      case "actions.selected-task.save-failed": return use.tr("notice.taskChoiceSaveFailed", {}, "Task choice could not be saved.");
+      case "actions.task.save-failed": return use.tr("notice.taskSaveFailed", {}, "Task change could not be saved.");
+      case "view.phase.save-failed": return use.tr("notice.phaseSaveFailed", {}, "Phase choice could not be saved.");
+      default: return use.tr("notice.timerSaveFailed", {}, "Timer action could not be saved.");
+    }
   }
 
   const manifest = Object.freeze({
@@ -65,15 +70,16 @@
     requires: [
       "controlsBlocked", "persistDurationOperation", "persistAutoStartOperation",
       "persistSelectedTaskOperation", "persistTaskOperation", "persistCommand",
-      "persistRetargetOperation", "database",
+      "persistRetargetOperation", "persistWorkspaceIntent", "persistWorkspaceCompletion", "database", "getWorkspaceReadModel",
       "settingsValue", "rebuildOptimisticState", "sharedTaskIdentity", "clone", "trustedNow",
       "elapsedFor", "tr", "phaseLabel", "phaseConfig", "tabId", "render", "renderDurations",
       "renderTaskSelector", "renderTimer", "renderSyncStatus", "showNotice", "scheduleSync",
-      "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext"
+      "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "captureDatabaseContext",
+      "reloadPersistedState"
     ],
     provides: [
       "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
-      "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer",
+      "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "executeWorkspaceEffects",
       "completedFocusCountForDay", "longBreakProgress", "nextBreakPhase", "nextPhaseAfterCompletion",
       "selectedPhaseAfterRejectedFinish", "selectedPhaseAfterCommandAcknowledgements", "finishTimer",
       "completionRetryDelay", "completionAlertTitle", "primeCompletionAlerts", "startCompletionAlert",
@@ -109,18 +115,11 @@
     }
 
     completedFocusCountForDay(history = this.state.history, referenceDate = new Date()) {
-      const reference = new Date(referenceDate);
-      const start = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate()).getTime();
-      const end = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + 1).getTime();
-      return history.filter((item) => {
-        const completed = !item.status || item.status === "completed";
-        const completedAt = this.historyDateMs(item);
-        return completed && item.phase === "focus" && completedAt >= start && completedAt < end;
-      }).length;
+      return this.use.getWorkspaceReadModel().cadence.completedFocusToday;
     }
 
     longBreakProgress(completedFocusCount) {
-      return completedFocusCount > 0 ? ((completedFocusCount - 1) % 4) + 1 : 0;
+      return this.use.getWorkspaceReadModel().cadence.longBreakProgress;
     }
 
     finishPlan(timer, history, referenceDate, commandId = "pending-finish") {
@@ -143,59 +142,30 @@
     }
 
     selectedPhaseAfterRejectedFinish(selectedPhase, finishCommand, history = this.state.history) {
-      if (finishCommand?.type !== "finish" || !this.use.phaseConfig()[finishCommand.phase]) return selectedPhase;
-      const plan = this.finishPlan(
-        { id: finishCommand.timerId, phase: finishCommand.phase }, history,
-        finishCommand.occurredAt, finishCommand.id
-      );
-      return selectedPhase === plan.selectedPhase ? finishCommand.phase : selectedPhase;
+      return this.selectedPhaseAfterCommandAcknowledgements(selectedPhase, [finishCommand],
+        [{ commandId: finishCommand.id, outcome: "rejected" }], history);
     }
 
     selectedPhaseAfterCommandAcknowledgements(selectedPhase, commands, acknowledgements, history = this.state.history) {
-      const rejectedIDs = new Set(acknowledgements
-        .filter((item) => String(item.outcome || "").toLowerCase() === "rejected")
-        .map((item) => item.commandId));
-      const rejectedFinishes = commands
-        .filter((command) => command.type === "finish" && rejectedIDs.has(command.id))
-        .sort((left, right) => Number(right.deviceSequence || 0) - Number(left.deviceSequence || 0));
-      return rejectedFinishes.reduce(
-        (phase, command) => this.selectedPhaseAfterRejectedFinish(phase, command, history), selectedPhase
-      );
+      return this.syncStorage.completionSelection({ selectedPhase, commands, acknowledgements, history }).selection.phase;
     }
   }
 
   class ActionMutations {
-    constructor(state, external, use, timerLifecycle) {
-      Object.assign(this, { state, use, timerLifecycle }, external);
+    constructor(state, external, use) {
+      Object.assign(this, { state, use }, external);
     }
 
     actions() {
       return bindActions(this, [
         "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
-        "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer"
+        "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "executeWorkspaceEffects"
       ]);
     }
 
     async issueDurationOperation(phase, durationMs) {
-      if (this.use.controlsBlocked() || this.state.actionLocked
-        || this.state.durationsMs[phase] === durationMs) return false;
-      this.state.actionLocked = true;
-      try {
-        const persisted = await this.use.persistDurationOperation(phase, durationMs);
-        this.state.pendingDurationOperations = persisted.pendingDurationOperations;
-        this.use.rebuildOptimisticState();
-        this.use.render();
-        this.use.scheduleSync(0);
-        return true;
-      } catch (error) {
-        reportFrontendError(error, "actions.duration.save-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.durationSaveFailed", {}, "Duration change could not be saved."
-        ));
-        return false;
-      } finally {
-        this.state.actionLocked = false;
-      }
+      return this.issueWorkspaceIntent({ kind: "setDuration", phase, minutes: durationMs / 60000 },
+        { preference: true }, "actions.duration.save-failed");
     }
 
     async waitForUnlockedAction() {
@@ -203,131 +173,35 @@
     }
 
     async issueAutoStartOperation(enabled, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      if (this.use.controlsBlocked()) return false;
+      const context = this.use.captureAccountContext();
       await this.waitForUnlockedAction();
-      if (this.use.controlsBlocked() || this.state.autoStartBreaks === enabled) {
-        this.use.renderDurations();
-        return false;
-      }
-      this.state.actionLocked = true;
-      try {
-        const operation = await this.use.persistAutoStartOperation(enabled, expectedUserId);
-        this.state.pendingAutoStartOperations.push(operation);
-        this.use.rebuildOptimisticState();
-        this.use.renderDurations();
-        this.use.renderSyncStatus();
-        this.use.scheduleSync(0);
-        return true;
-      } catch (error) {
-        reportFrontendError(error, "actions.auto-start.save-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.autoStartSaveFailed", {}, "Auto-start preference could not be saved."
-        ));
-        this.use.renderDurations();
-        return false;
-      } finally {
-        this.state.actionLocked = false;
-      }
-    }
-
-    async issueRetargetOperation(timerId, taskId) {
-      try {
-        const command = await this.use.persistRetargetOperation(timerId, taskId);
-        this.state.pending.push(command);
-        this.state.projectionPending = null;
-        return true;
-      } catch (error) {
-        if (error?.name === "AccountOwnershipError") throw error;
-        reportFrontendError(error, "actions.retarget.save-failed");
-        return false;
-      }
+      return this.issueWorkspaceIntent({ kind: "setAutoStart", enabled }, { preference: true, context, ownerId: expectedUserId }, "actions.auto-start.save-failed");
     }
 
     async issueSelectedTaskOperation(taskId, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      if (this.use.controlsBlocked()) return false;
+      const context = this.use.captureAccountContext();
       await this.waitForUnlockedAction();
-      if (this.use.controlsBlocked() || this.state.selectedTaskId === taskId) {
-        this.use.renderTaskSelector();
-        return false;
-      }
-      const timerId = this.state.timer?.id || null;
-      const retargetable = Boolean(timerId
-        && ["running", "paused"].includes(this.state.timer?.status)
-        && this.state.timer?.phase === "focus"
-        && (taskId === null || this.state.tasks.some((task) => task.id === taskId)
-          || this.state.pendingTaskOperations.some((operation) => operation.taskId === taskId)));
-      this.state.actionLocked = true;
-      try {
-        const operation = await this.use.persistSelectedTaskOperation(taskId, expectedUserId);
-        this.state.pendingSelectedTaskOperations.push(operation);
-        if (retargetable) await this.issueRetargetOperation(timerId, taskId);
-        this.use.rebuildOptimisticState();
-        this.use.renderTaskSelector();
-        this.use.renderSyncStatus();
-        this.use.scheduleSync(0);
-        return true;
-      } catch (error) {
-        reportFrontendError(error, "actions.selected-task.save-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.taskChoiceSaveFailed", {}, "Task choice could not be saved."
-        ));
-        this.use.renderTaskSelector();
-        return false;
-      } finally {
-        this.state.actionLocked = false;
-      }
+      return this.issueWorkspaceIntent({ kind: "selectTask", taskId }, { preference: true, context, ownerId: expectedUserId }, "actions.selected-task.save-failed");
     }
 
     async issueTaskOperation(type, task, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      if (this.use.controlsBlocked() || this.state.actionLocked) return false;
-      this.state.actionLocked = true;
-      try {
-        const operation = await this.use.persistTaskOperation(type, task, expectedUserId);
-        this.state.pendingTaskOperations.push(operation);
-        this.use.rebuildOptimisticState();
-        this.use.render();
-        this.use.scheduleSync(0);
-        return true;
-      } catch (error) {
-        reportFrontendError(error, "actions.task.save-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.taskSaveFailed", {}, "Task change could not be saved."
-        ));
-        return false;
-      } finally {
-        this.state.actionLocked = false;
-      }
+      const intent = type === "upsert" ? { kind: "upsertTask", title: task.title } : { kind: "deleteTask", taskId: task.id };
+      return this.issueWorkspaceIntent(intent, { preference: true, ownerId: expectedUserId }, "actions.task.save-failed");
     }
 
     async addTask(title) {
-      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
-      let identity;
-      try {
-        identity = await this.use.sharedTaskIdentity(String(title || ""));
-      } catch (error) {
+      const context = this.use.captureAccountContext();
+      try { await this.use.sharedTaskIdentity(String(title || "")); }
+      catch (error) {
         const message = String(error?.message || "");
-        if (message.includes("printable") || message.includes("must not be empty")) {
-          throw new Error(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."));
-        }
-        if (message.includes("512") || message.includes("too long")) {
-          throw new Error(this.use.tr("notice.taskTooLong", {}, "Task name is too long."));
-        }
+        if (/printable|must not be empty|title is empty/.test(message)) throw new Error(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."));
+        if (/512|too long/.test(message)) throw new Error(this.use.tr("notice.taskTooLong", {}, "Task name is too long."));
         this.host.console.warn("Pomodorough task identity failed:", error);
         reportFrontendError(error, "actions.task.identity-failed");
         throw error;
       }
-      const { id, title: normalized } = identity;
-      const existing = this.state.tasks.find((task) => task.id === id);
-      if (existing) {
-        const selected = await this.issueSelectedTaskOperation(existing.id, expectedUserId);
-        if (selected) this.use.showNotice(this.use.tr(
-          "notice.taskExists", {}, "Task already exists and is now selected."
-        ));
-        return true;
-      }
-      const saved = await this.issueTaskOperation("upsert", { id, title: normalized }, expectedUserId);
-      if (saved) await this.issueSelectedTaskOperation(id, expectedUserId);
-      return saved;
+      return this.issueWorkspaceIntent({ kind: "addAndSelectTask", title: String(title || "") },
+        { preference: true, context }, "actions.task.save-failed");
     }
 
     async deleteTask(task) {
@@ -335,20 +209,49 @@
     }
 
     async issueCommand(type, options = {}) {
+      return this.issueWorkspaceIntent({ kind: type }, {}, "actions.timer.save-failed");
+    }
+
+    async issuePhaseSelection(phase) {
+      return this.issueWorkspaceIntent({ kind: "selectPhase", phase }, {}, "view.phase.save-failed");
+    }
+
+    async issueWorkspaceIntent(intent, options, operation) {
       if (this.use.controlsBlocked() || this.state.actionLocked) return false;
+      if (!options.preference && this.state.workspaceBlocked) {
+        this.use.showNotice(this.state.conflict);
+        return false;
+      }
+      const context = options.context || this.use.captureAccountContext();
       this.state.actionLocked = true;
       try {
-        const command = await this.use.persistCommand(type, options);
-        this.state.pending.push(command);
-        this.use.rebuildOptimisticState();
+        const plan = await this.use.persistWorkspaceIntent(intent, { ...options, context });
+        context.assertCurrent();
+        if (plan.outcome === "noop") {
+          if (intent.kind === "selectTask" && await this.selectedTaskRetargetMissing(intent.taskId, context)) {
+            const error = new Error(this.use.tr("notice.taskRetargetMissing", {},
+              "Focus timer still shows the previous task. Choose another task, then choose this one again."));
+            reportMutationFailure(error, "actions.selected-task.retarget-missing");
+            this.use.showNotice(error.message);
+            return false;
+          }
+          return intent.kind === "addAndSelectTask";
+        }
         this.use.render();
-        this.use.scheduleSync(0);
+        context.assertCurrent();
+        if (intent.kind === "addAndSelectTask" && plan.operations.taskOperations.length === 0) {
+          this.use.showNotice(this.use.tr("notice.taskExists", {}, "Task already exists and is now selected."));
+        }
+        const outcomes = plan.commandOutcomes || Object.values(plan.groupOutcomes || {}).flat();
+        if (outcomes.some((item) => item.outcome === "queued")) {
+          this.use.showNotice(this.use.tr("notice.coreQueued", {}, "Change saved. Display waits for synchronization of retained work."));
+        }
+        this.executeWorkspaceEffects(plan.effectsAfterCommit, context);
         return true;
       } catch (error) {
-        reportFrontendError(error, "actions.timer.save-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.timerSaveFailed", {}, "Timer action could not be saved."
-        ));
+        if (error.name === "AccountOwnershipError") { reportMutationFailure(error, operation); return false; }
+        reportMutationFailure(error, operation);
+        this.use.showNotice(error.message || mutationFailureNotice(this.use, operation));
         return false;
       } finally {
         this.state.actionLocked = false;
@@ -356,36 +259,39 @@
     }
 
     async cancelAndClearTimer() {
-      const context = this.use.captureAccountContext();
-      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
-      if (this.use.controlsBlocked() || this.state.actionLocked) return false;
-      const timer = this.use.clone(this.state.timer);
-      const now = this.use.trustedNow();
-      this.state.actionLocked = true;
+      return this.issueWorkspaceIntent({ kind: "cancelAndClear" }, { requestedTimer: this.use.clone(this.state.timer) }, "actions.timer.clear-failed");
+    }
+
+    async selectedTaskRetargetMissing(taskId, context) {
+      const diverged = (timer) => Boolean(timer?.id) && ["running", "paused"].includes(timer.status)
+        && timer.phase === "focus" && (timer.taskId ?? null) !== (taskId ?? null);
+      if (!diverged(this.state.timer)) return false;
       try {
-        const outcome = await this.syncStorage.cancelAndClearTimer(this.use.database(), {
-          ...context, expectedUserId,
-          timerId: timer.id, phase: timer.phase, deviceId: this.state.deviceId, nowMs: now,
-          observedElapsedMs: Math.round(this.use.elapsedFor(timer, now)), withUuidV7: true
-        });
         context.assertCurrent();
-        this.use.assertExpectedAccount(expectedUserId);
-        if (!outcome.transitioned) return false;
-        this.state.pending.push(...outcome.commands);
-        this.timerLifecycle.recordLastCommand(outcome.commands);
-        this.use.rebuildOptimisticState();
-        this.use.render();
-        this.use.scheduleSync(0);
-        return true;
-      } catch (error) {
-        if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
-        else reportFrontendError(error, "actions.timer.clear-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.timerSaveFailed", {}, "Timer action could not be saved."
-        ));
-        return false;
-      } finally {
-        this.state.actionLocked = false;
+        await this.use.reloadPersistedState(null, context, "mutation");
+        context.assertCurrent();
+      } catch { return false; }
+      return diverged(this.state.timer);
+    }
+
+    executeWorkspaceEffects(effects, context) {
+      accountOperation.requireBound(context);
+      for (const effect of effects) {
+        context.assertCurrent();
+        switch (effect.kind) {
+          case "launchSync": this.use.scheduleSync(0, false, context); break;
+          case "clearCompletionAlert": this.use.stopCompletionAlert(); break;
+          case "cancelAlarm": case "pauseAlarm": this.host.clearTimeout(this.alarmTimer); break;
+          case "scheduleAlarm": case "resumeAlarm": {
+            this.host.clearTimeout(this.alarmTimer);
+            this.alarmTimer = this.host.setTimeout(() => {
+              try { context.assertCurrent(); this.use.renderTimer(); }
+              catch (error) { if (error.name !== "AccountOwnershipError") throw error; }
+            }, effect.durationMs);
+            break;
+          }
+          default: throw new Error("Unsupported Core browser effect.");
+        }
       }
     }
   }
@@ -401,6 +307,7 @@
       this.completionAlertTimerID = null;
       this.completionAlertDismissedTimerID = null;
       this.completionAlertSnapshot = null;
+      this.heartbeatRenewal = null;
       this.playCompletionTone = this.playCompletionTone.bind(this);
     }
 
@@ -415,124 +322,34 @@
       ]);
     }
 
-    finishTimerRequest(timer, automatic, localNow, now, expectedUserId) {
-      return {
-        ...this.use.captureAccountContext(), expectedUserId,
-        timerId: timer.id, phase: timer.phase, deviceId: this.state.deviceId, tabId: this.use.tabId(),
-        requestedTimer: timer,
-        leaseMs: TIMER_OWNER_LEASE_MS, manual: !automatic,
-        requireOwner: automatic && timer.phase === "focus", nowMs: now, localNowMs: localNow,
-        observedElapsedMs: Math.round(this.use.elapsedFor(timer, now)), withUuidV7: true,
-        autoStartBreaks: this.state.autoStartBreaks === true,
-        breakTimerId: this.host.crypto.randomUUID(), settings: this.use.settingsValue()
-      };
-    }
-
-    recordLastCommand(commands) {
-      const last = commands[commands.length - 1];
-      this.state.deviceSequence = last.deviceSequence;
-      this.state.hlcWallMs = last.hlcWallMs;
-      this.state.hlcCounter = last.hlcCounter;
-    }
-
-    validFinishedCommand(command, expectedKeys) {
-      const occurredAtMs = typeof command?.occurredAt === "string" ? Date.parse(command.occurredAt) : NaN;
-      return hasExactKeys(command, expectedKeys)
-        && typeof command.id === "string" && command.id.length > 0
-        && typeof command.deviceId === "string" && command.deviceId.length > 0
-        && typeof command.timerId === "string" && command.timerId.length > 0
-        && ["finish", "start"].includes(command.type)
-        && Object.hasOwn(this.use.phaseConfig(), command.phase)
-        && Number.isSafeInteger(command.plannedDurationMs)
-        && command.plannedDurationMs >= MIN_DURATION_MS && command.plannedDurationMs <= MAX_DURATION_MS
-        && Number.isSafeInteger(command.deviceSequence) && command.deviceSequence > 0
-        && Number.isSafeInteger(command.hlcWallMs) && command.hlcWallMs >= 0
-        && Number.isSafeInteger(command.hlcCounter) && command.hlcCounter >= 0
-        && Number.isFinite(occurredAtMs) && new Date(occurredAtMs).toISOString() === command.occurredAt
-        && occurredAtMs === command.hlcWallMs
-        && Number.isSafeInteger(command.observedElapsedMs) && command.observedElapsedMs >= 0
-        && command.observedElapsedMs <= command.plannedDurationMs;
-    }
-
-    validatedFinishedOutcome(outcome, request) {
-      const commands = outcome?.commands;
-      const first = commands?.[0];
-      const generated = commands?.[1];
-      const finishKeys = request.requestedTimer.dependsOnCommandId
-        ? DEPENDENT_FINISH_COMMAND_KEYS : FINISH_COMMAND_KEYS;
-      const validFirst = this.validFinishedCommand(first, finishKeys)
-        && first.type === "finish" && first.timerId === request.requestedTimer.id
-        && first.phase === request.requestedTimer.phase
-        && first.plannedDurationMs === request.requestedTimer.plannedDurationMs
-        && first.observedElapsedMs === Math.min(
-          first.plannedDurationMs, Math.max(0, Number(request.observedElapsedMs) || 0)
-        )
-        && first.dependsOnCommandId === (request.requestedTimer.dependsOnCommandId || undefined)
-        && first.hlcWallMs >= request.nowMs
-        && first.deviceId === request.deviceId;
-      const validGenerated = commands?.length === 1
-        || this.validFinishedCommand(generated, GENERATED_BREAK_COMMAND_KEYS)
-        && generated.type === "start" && generated.generatedBreak === true
-        && generated.dependsOnCommandId === first?.id && generated.deviceId === request.deviceId
-        && generated.timerId === request.breakTimerId && generated.phase === outcome?.selectedPhase
-        && generated.plannedDurationMs === outcome?.selectedPhaseDurationMs
-        && generated.deviceSequence === first?.deviceSequence + 1
-        && generated.hlcWallMs === first?.hlcWallMs && generated.hlcCounter === first?.hlcCounter + 1
-        && generated.observedElapsedMs === 0;
-      if (!hasExactKeys(outcome, FINISH_RESULT_KEYS)
-        || outcome.transitioned !== true || outcome.reason !== ""
-        || !Array.isArray(commands) || ![1, 2].includes(commands.length)
-        || !Number.isSafeInteger(outcome.selectedPhaseDurationMs)
-        || outcome.selectedPhaseDurationMs < MIN_DURATION_MS
-        || outcome.selectedPhaseDurationMs > MAX_DURATION_MS
-        || !validFirst || !validGenerated) {
-        throw new Error("Timer completion returned an invalid command batch.");
-      }
-      if (!Object.hasOwn(this.use.phaseConfig(), outcome.selectedPhase)) {
-        throw new Error("Timer completion returned an invalid selected phase.");
-      }
-      return { commands, selectedPhase: outcome.selectedPhase };
-    }
-
-    acceptFinishedTimer(timer, commands) {
-      this.host.clearTimeout(this.completionRetryTimer);
-      this.completionRetryTimer = null;
-      this.state.pending.push(...commands);
-      this.recordLastCommand(commands);
-      this.startCompletionAlert(timer);
-      this.use.rebuildOptimisticState();
-      this.use.render();
-      this.use.scheduleSync(0);
-    }
-
     async finishTimer(automatic = false, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       if (this.use.controlsBlocked() || this.state.actionLocked) return false;
+      if (this.state.workspaceBlocked) return false;
+      const context = this.use.captureAccountContext();
       const timer = this.use.clone(this.state.timer);
-      const localNow = Date.now();
       this.state.actionLocked = true;
       try {
-        const now = this.use.trustedNow(localNow);
-        const request = this.finishTimerRequest(timer, automatic, localNow, now, expectedUserId);
-        const outcome = await this.syncStorage.finishTimer(this.use.database(), request);
-        request.assertCurrent();
         this.use.assertExpectedAccount(expectedUserId);
-        if (!outcome.transitioned) {
-          if (automatic && outcome.reason === "not_owner") {
-            this.scheduleCompletionRetry(timer.id, outcome);
+        const plan = await this.use.persistWorkspaceCompletion(automatic ? "automaticFinishCommit" : "finishCommit", timer, context);
+        context.assertCurrent();
+        if (plan.outcome === "noop") {
+          if (automatic && plan.reason === "not_owner") {
+            this.scheduleCompletionRetry(timer.id, plan, context);
             return true;
           }
           return automatic;
         }
-        const validated = this.validatedFinishedOutcome(outcome, request);
-        this.state.selectedPhase = validated.selectedPhase;
-        this.acceptFinishedTimer(timer, validated.commands);
+        this.host.clearTimeout(this.completionRetryTimer);
+        this.completionRetryTimer = null;
+        this.startCompletionAlert(timer);
+        context.assertCurrent();
+        this.use.render();
+        this.executeEffects(plan.effectsAfterCommit, context);
         return true;
       } catch (error) {
-        if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
-        else {
-          this.host.console.warn("Pomodorough timer finish failed:", error);
-          reportFrontendError(error, "actions.timer.finish-failed");
-        }
+        if (error.name === "AccountOwnershipError") return false;
+        this.host.console.warn("Pomodorough timer finish failed:", error);
+        reportFrontendError(error, "actions.timer.finish-failed");
         this.use.showNotice(error.message || this.use.tr(
           "notice.timerSaveFailed", {}, "Timer action could not be saved."
         ));
@@ -656,14 +473,16 @@
       this.completionAlertSnapshot = null;
     }
 
-    scheduleCompletionRetry(timerId, outcome) {
-      const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+    scheduleCompletionRetry(timerId, outcome, context = this.use.captureAccountContext()) {
+      context.assertCurrent();
       const delay = this.completionRetryDelay(outcome);
       if (delay === null) return;
       this.host.clearTimeout(this.completionRetryTimer);
       this.completionRetryTimer = this.host.setTimeout(() => {
+        try { context.assertCurrent(); }
+        catch (error) { if (error.name === "AccountOwnershipError") return; throw error; }
         this.completionRetryTimer = null;
-        if (!this.releaseCompletionRetry(timerId, expectedUserId)) return;
+        if (!this.releaseCompletionRetry(timerId, context.ownerId)) return;
         this.use.renderTimer();
       }, delay);
     }
@@ -687,22 +506,36 @@
       if (status === "completed") this.startCompletionAlert(timer);
     }
 
-    heartbeatTimerOwnership() {
+    heartbeatTimerOwnership(context = null) {
+      if (context && !accountOperation.isCurrent(context)) return;
+      if (this.heartbeatRenewal) return this.heartbeatRenewal;
       const database = this.use.database();
       if (!database || !this.state.ready || !this.state.deviceId || !this.state.timer.id
         || !["running", "paused"].includes(this.state.timer.status)) return;
-      this.syncStorage.renewTimerOwnership(database, {
-        ...this.use.captureAccountContext(),
-        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
+      context ||= this.use.captureDatabaseContext();
+      accountOperation.requireBound(context);
+      const input = {
+        ...context, expectedUserId: context.ownerId,
         timerId: this.state.timer.id, deviceId: this.state.deviceId, tabId: this.use.tabId(),
         nowMs: Date.now(), leaseMs: TIMER_OWNER_LEASE_MS
-      }).catch((error) => {
+      };
+      // Coalesce interval ticks with this renewal. Only a later independent tick
+      // may capture a new scope after the issuing operation releases its guard.
+      const operation = Promise.resolve().then(() => {
+        if (!accountOperation.isCurrent(context)) return;
+        return this.syncStorage.renewTimerOwnership(context.database, input);
+      }).then((renewed) => accountOperation.isCurrent(context) ? renewed : undefined).catch((error) => {
+        if (!accountOperation.isCurrent(context)) return;
         if (error.name === "AccountOwnershipError") this.use.quarantineAccountMismatch();
         else {
           this.host.console.warn("Timer ownership renewal failed:", error);
           reportFrontendError(error, "actions.timer-ownership.renewal-failed");
         }
+      }).finally(() => {
+        if (this.heartbeatRenewal === operation) this.heartbeatRenewal = null;
       });
+      this.heartbeatRenewal = operation;
+      return operation;
     }
 
     activeCompletionAlertTimerId() { return this.completionAlertTimerID; }
@@ -717,7 +550,8 @@
   function create({ state, external, use }) {
     const phasePolicy = new CompletionPlanPolicy(state, use, external.syncStorage);
     const timerLifecycle = new TimerLifecycle(state, external, use);
-    const mutations = new ActionMutations(state, external, use, timerLifecycle);
+    const mutations = new ActionMutations(state, external, use);
+    timerLifecycle.executeEffects = mutations.executeWorkspaceEffects.bind(mutations);
     return { ...phasePolicy.actions(), ...timerLifecycle.actions(), ...mutations.actions() };
   }
 

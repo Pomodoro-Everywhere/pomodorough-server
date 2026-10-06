@@ -4,16 +4,18 @@
   const dependencies = typeof module === "object" && module.exports
     ? {
       core: require("./sync-core.js"), authority: require("./sync-authority.js"),
-      uuid: require("./sync-storage-uuid.js")
+      uuid: require("./sync-storage-uuid.js"), workspace: require("./workspace-core.js"),
+      transaction: require("./workspace-transaction.js")
     }
     : {
       core: root.PomodoroughSync, authority: root.PomodoroughSyncAuthority,
-      uuid: root.PomodoroughStorageUuid
+      uuid: root.PomodoroughStorageUuid, workspace: root.PomodoroughWorkspaceCore,
+      transaction: root.PomodoroughWorkspaceTransaction
     };
-  const api = factory(dependencies.core, dependencies.authority, dependencies.uuid);
+  const api = factory(dependencies.core, dependencies.authority, dependencies.uuid, dependencies.workspace, dependencies.transaction);
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.PomodoroughStorage = api;
-})(typeof globalThis === "object" ? globalThis : this, function (core, authorityModule, uuidModule) {
+})(typeof globalThis === "object" ? globalThis : this, function (core, authorityModule, uuidModule, workspaceCore, workspaceTransaction) {
   "use strict";
 
   const META_STORE = "meta";
@@ -53,6 +55,294 @@
   });
   let sharedCore = null;
   let sharedAuthority = null;
+
+  function callWorkspaceCore(operation, input, instance = sharedCore) {
+    if (typeof instance?.call !== "function") throw new Error("Official workspace Core is unavailable.");
+    return instance.call(operation, input);
+  }
+
+  function workspaceRecords(input) {
+    assertPersistedDisplayContext(input, input.deviceId);
+    const records = { ...input, deliveryProof: neverSentFromProof(input.deliveryProof, input, input.outgoingSync?.sent || input.outgoing?.sent) };
+    return workspaceCore.workspace(records, input.deviceId,
+      validatedTimerDependencies(records, input.deviceId, input.nowMs ?? Date.now()));
+  }
+
+  function observeClock(state, reading) {
+    return workspaceCore.clockCurrent(callWorkspaceCore, state, reading);
+  }
+
+  function sampleClock(clockOffset, serverTime, timing) {
+    return workspaceCore.clockSample(callWorkspaceCore, clockOffset, serverTime, timing);
+  }
+
+  function readWorkspace(input) {
+    const raw = workspaceRecords(input);
+    const context = workspaceCore.completionContext(input);
+    const request = workspaceCore.readRequest(raw, context.selection.phase, input.nowMs, input.monotonic ?? null, context);
+    return callWorkspaceCore("workspace.readModel.v1", request);
+  }
+
+  function observeWorkspace(input) {
+    const at = new Date(input.nowMs).toISOString();
+    // PWA restart is a documented no-op. Its pure result supplies Core's live
+    // anchor, which readModel consumes without rewriting the canonical timer.
+    return callWorkspaceCore("workspace.intent.v1", {
+      compatibility: "pwaStorage", replicationMode: "centralized", intent: { kind: "restart" },
+      workspace: workspaceRecords(input), ...workspaceCore.completionContext(input),
+      allocation: { deviceId: input.deviceId, deviceSequence: input.deviceSequence,
+        hlc: input.hlc, lastUuid: input.uuidV7 ?? null },
+      observation: input.workspaceObservation || { canonicalAnchorAt: null, commandTimes: {} },
+      clock: { occurredAt: at, physicalNow: at, observedAt: at,
+        ...(input.monotonicMs == null ? {} : { monotonicNowMs: input.monotonicMs, continuityId: input.continuityId }) },
+      identities: { commandUuids: [], timerUuid: null }, calendarIntervals: []
+    });
+  }
+
+  function projectWorkspace(input) {
+    return callWorkspaceCore("workspace.project.v1", {
+      ...workspaceRecords(input), now: new Date(input.nowMs).toISOString()
+    });
+  }
+
+  function bootstrapWorkspace(input) {
+    return callWorkspaceCore("bootstrap.workspacePlan.v1", workspaceCore.bootstrapRequest(
+      input, input.deviceId, input.timerDependencies ?? [], input.currentUserId,
+      input.nowMs, input.defaultDurationsMs || DEFAULT_DURATIONS_MS
+    ));
+  }
+
+  class PersistedDisplayContextError extends Error {
+    constructor(cause) {
+      super(cause.message, { cause });
+      this.name = "PersistedDisplayContextError";
+    }
+  }
+
+  function assertPersistedDisplayContext(records, deviceId = records.deviceId) {
+    if (records.projectionPending == null) return;
+    const ownerId = core.accountOwnerId(records.snapshot?.user) || null;
+    try {
+      const legacyRecords = workspaceCore.DOMAINS.some((domain) => (records[domain] || []).some((item) => !Object.hasOwn(item, "deviceId")));
+      if (legacyRecords) {
+        const plan = dependencyPlan(records, deviceId, Date.now());
+        if (plan.outcome === "blocked") throw new LegacyDependencyRecoveryError(plan);
+        return;
+      }
+      // Bootstrap is the official operation that accepts raw PWA display queues.
+      // Its result is not used to decide mutation eligibility or rewrite proof.
+      const deliveryProof = neverSentFromProof(records.deliveryProof, records, records.outgoingSync?.sent || records.outgoing?.sent);
+      bootstrapWorkspace({ ...records, deliveryProof, deviceId, ownerId, currentUserId: ownerId,
+        remote: workspaceCore.base(records.snapshot), nowMs: Date.now(), defaultDurationsMs: DEFAULT_DURATIONS_MS });
+    } catch (error) { throw new PersistedDisplayContextError(error); }
+  }
+
+  function assertResponseDisplayContext(results, deviceId) {
+    assertPersistedDisplayContext({ snapshot: results.snapshot?.value,
+      projectionPending: results.projectionPending?.value, canonicalHead: results.canonicalHead?.value,
+      deliveryProof: results.deliveryProof?.value, outgoing: results.outgoing?.value,
+      timerDependencies: results.timerDependencies?.value,
+      ...Object.fromEntries(workspaceCore.DOMAINS.map((domain) => [domain, results[domain] || []])) },
+    deviceId || results.deviceId?.value);
+  }
+
+  function completionSelection(input) {
+    const history = input.history || [];
+    const commands = input.commands || [];
+    const referenceTime = input.referenceTime || new Date().toISOString();
+    return callWorkspaceCore("timer.completionState.v1", {
+      kind: "install", compatibility: "pwaRejectedFinish", beforeHistory: input.beforeHistory || [],
+      afterHistory: input.afterHistory || history, canonicalTimer: input.canonicalTimer || null,
+      ...workspaceCore.completionContext(input),
+      pending: { commandIds: input.pendingCommandIds || [], sendableCommandIds: input.sendableCommandIds || [],
+        otherOperationIds: input.otherOperationIds || [] },
+      advances: [], acknowledgements: input.acknowledgements.map(({ commandId, outcome }) => ({ commandId, outcome })),
+      discardedCommandIds: input.discardedCommandIds || [],
+      referenceTime, calendarIntervals: workspaceCore.calendarIntervals([referenceTime, ...commands.map((command) => command.occurredAt)]),
+      sentContext: { kind: "pwa", commands, rollbackHistory: history }
+    });
+  }
+
+  function assertWorkspaceContext(records, input) {
+    input.assertCurrent?.();
+    const expectedOwnerId = Object.hasOwn(input, "ownerId") ? input.ownerId : input.expectedUserId ?? null;
+    assertAccountOwnership(records.snapshot, expectedOwnerId);
+    if (records.bootstrapGate || records.bootstrapResolution) throw new BootstrapGateError();
+    if (records.deviceId != null && records.deviceId !== input.deviceId) throw new AccountOwnershipError();
+    if (typeof input.deviceId !== "string" || !input.deviceId) throw new AccountOwnershipError();
+  }
+
+  function workspaceMutationRequest(records, input) {
+    const raw = workspaceRecords(records);
+    const inFlight = new Set(input.inFlightDurationOperationIds || []);
+    raw.neverSent.durationOperations = (raw.neverSent.durationOperations || []).filter((id) => !inFlight.has(id));
+    const nowMs = input.nowMs;
+    const allocation = { deviceId: records.deviceId, deviceSequence: records.deviceSequence ?? 0,
+      hlc: records.hlc ?? { wallMs: 0, counter: 0 }, lastUuid: records.uuidV7 ?? null };
+    const tick = callWorkspaceCore("hlc.tick.v1", { local: allocation.hlc, physicalNowMs: nowMs }, input.sharedCore || sharedCore);
+    const pendingIds = workspaceCore.DOMAINS.flatMap((domain) => (records[domain] || []).map((item) => item.id));
+    const identities = { commandUuids: reserveUuid7(tick.wallMs, input.preference ? 3 : 2, allocation.lastUuid, pendingIds, input.entropy),
+      timerUuid: input.timerUuid };
+    const occurredAt = new Date(nowMs).toISOString();
+    return {
+      compatibility: "pwaStorage", replicationMode: "centralized", workspace: raw,
+      ...workspaceCore.completionContext(records), allocation,
+      observation: records.workspaceObservation || { canonicalAnchorAt: null, commandTimes: {} },
+      clock: { occurredAt, physicalNow: occurredAt, observedAt: occurredAt,
+        ...(input.continuityId ? { continuityId: input.continuityId } : {}),
+        ...(input.monotonicMs == null ? {} : { monotonicNowMs: input.monotonicMs }) },
+      identities, calendarIntervals: workspaceCore.calendarIntervals([nowMs,
+        ...(records.commands || []).map((command) => command.occurredAt)]),
+      ...(input.requestedTimer ? { requestedTimer: input.requestedTimer } : {})
+    };
+  }
+
+  function mutationDurability(records, input) {
+    const sentIds = records.outgoingSync?.sent?.durationOperations?.map((item) => item.id) || [];
+    return {
+      ownership: { expectedOwnerId: Object.hasOwn(input, "ownerId") ? input.ownerId : input.expectedUserId ?? null,
+        ownerId: core.accountOwnerId(records.snapshot?.user) },
+      durability: { outgoingDurationOperationIds: [...new Set([...sentIds, ...(input.inFlightDurationOperationIds || [])])],
+        localTabId: input.tabId }
+    };
+  }
+
+  function planWorkspaceMutation(database, input) {
+    input = { ...input };
+    return workspaceTransaction.run(database, "readwrite", (records, transaction) => {
+      assertWorkspaceContext(records, input);
+      const newIdentity = records.deviceId == null;
+      if (newIdentity) records.deviceId = input.deviceId;
+      assertPersistedDisplayContext(records, input.deviceId);
+      migrateDependencyMetadata(records, input, transaction);
+      const request = workspaceMutationRequest(records, input);
+      let plan;
+      if (input.stage) {
+        Object.assign(request, { stage: input.stage, ownership: records.timerOwner ?? null,
+          localTabId: input.tabId, leaseNowMs: input.localNowMs, leaseDurationMs: input.leaseMs });
+        plan = callWorkspaceCore("workspace.completionMutation.v1", request, input.sharedCore || sharedCore);
+      } else {
+        if (input.preference) Object.assign(request, mutationDurability(records, input));
+        request.intent = input.intent;
+        plan = callWorkspaceCore("workspace.intent.v1", request, input.sharedCore || sharedCore);
+      }
+      input.assertCurrent?.();
+      workspaceTransaction.writePlan(transaction, records, plan,
+        { tabId: input.tabId, nowMs: input.localNowMs, durationMs: input.leaseMs });
+      if (newIdentity && plan.outcome === "planned") {
+        const meta = transaction.objectStore(META_STORE);
+        workspaceTransaction.put(meta, "deviceId", input.deviceId);
+        if (!records.snapshot) workspaceTransaction.put(meta, "snapshot", { ...plan.workspace.base, revision: 0, user: null });
+      }
+      return plan;
+    });
+  }
+
+  function encodeSelectedBatch(selected) {
+    return {
+      commands: selected.commands.map(core.timerRequestCommand),
+      taskOperations: selected.taskOperations,
+      durationOperations: selected.durationOperations.map(core.durationRequestOperation),
+      autoStartOperations: selected.autoStartOperations.map(core.autoStartRequestOperation),
+      selectedTaskOperations: selected.selectedTaskOperations.map(core.selectedTaskRequestOperation)
+    };
+  }
+
+  function selectWorkspaceBatch(records, deviceId, nextDomain = "commands", limits = null, mode = "sync") {
+    const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.batchRequest(
+      records, deviceId, records.timerDependencies ?? [], nextDomain, mode, limits
+    ));
+    return { plan, sent: encodeSelectedBatch(workspaceCore.selectedRecords(plan, records)) };
+  }
+
+  function claimWorkspaceBatch(database, input) {
+    return workspaceTransaction.run(database, "readwrite", (records, transaction) => {
+      assertWorkspaceContext(records, input);
+      assertPersistedDisplayContext(records, input.deviceId);
+      const saved = records.outgoingSync;
+      if (saved?.sent) {
+        if (saved.ownerId != null && saved.ownerId !== input.ownerId) throw new AccountOwnershipError();
+        const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.savedBatchRequest(saved.sent));
+        if (plan.status !== "replay_saved") return { plan, claim: saved, proof: records.deliveryProof };
+        if (saved.body != null) {
+          const body = JSON.parse(saved.body);
+          if (body.deviceId !== records.deviceId || workspaceCore.DOMAINS.some((domain) =>
+            !workspaceCore.recordsEqual(body[domain], saved.sent[domain]))) {
+            throw new Error("Saved request bytes disagree with retained claim metadata. Recovery is required.");
+          }
+        }
+        return { plan, claim: saved, proof: records.deliveryProof };
+      }
+      const dependencies = migrateDependencyMetadata(records, input, transaction).timerDependencies;
+      const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.batchRequest(
+        records, records.deviceId, dependencies, records.batchNextDomain
+      ));
+      if (plan.status !== "planned") return { plan, claim: null, proof: records.deliveryProof };
+      const sent = encodeSelectedBatch(workspaceCore.selectedRecords(plan, records));
+      const claim = { claimId: globalThis.crypto.randomUUID(), sent, ownerId: input.ownerId,
+        retiredAt: new Date(input.localNowMs).toISOString(),
+        body: JSON.stringify({ deviceId: records.deviceId, lastRevision: records.snapshot.revision, ...sent }) };
+      const proof = removeProofIds(records.deliveryProof, sent);
+      const meta = transaction.objectStore(META_STORE);
+      workspaceTransaction.put(meta, DELIVERY_PROOF_KEY, proof);
+      workspaceTransaction.put(meta, OUTGOING_KEY, claim);
+      workspaceTransaction.put(meta, "batchNextDomain", plan.nextDomain);
+      input.assertCurrent?.();
+      return { plan, claim, proof, timerDependencies: records.timerDependencies };
+    });
+  }
+
+  function savedClaimRecoveryQueues(saved, queues = null) {
+    const sent = plainObject(saved?.sent) ? saved.sent : {};
+    const retained = plainObject(queues) ? queues : {};
+    return workspaceCore.DOMAINS.filter((domain) => {
+      if (Array.isArray(sent[domain]) && sent[domain].length > 0) return true;
+      return Array.isArray(retained[domain]) && retained[domain].length > 0;
+    });
+  }
+
+  function savedClaimRecoveryMessage(saved, tr = (key, values, fallback) => fallback, queues = null) {
+    const names = savedClaimRecoveryQueues(saved, queues);
+    const list = names.length ? names.join(", ") : "sync queue";
+    const fallback = `Saved sync request lacks original request bytes. Sync of ${list} remains blocked. Queued work is intact.`;
+    try {
+      return tr("sync.savedClaimBlocked", { queues: list }, fallback);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function discardUnrecoverableSavedClaim(database, input) {
+    return workspaceTransaction.run(database, "readwrite", (records, transaction) => {
+      assertWorkspaceContext(records, input);
+      assertPersistedDisplayContext(records, input.deviceId);
+      if (input?.confirmed !== true) {
+        throw new Error("Discarding the unrecoverable saved claim requires explicit confirmation.");
+      }
+      const saved = records.outgoingSync;
+      if (!saved?.sent) throw new Error("No unrecoverable saved sync claim is retained.");
+      if (saved.body != null) throw new Error("Saved sync claim retains its original request body and must replay exactly.");
+      if (saved.ownerId != null && saved.ownerId !== input.ownerId) throw new AccountOwnershipError();
+      const meta = transaction.objectStore(META_STORE);
+      meta.delete(OUTGOING_KEY);
+      records.outgoingSync = undefined;
+      const dependencies = migrateDependencyMetadata(records, input, transaction).timerDependencies;
+      const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.batchRequest(
+        records, records.deviceId, dependencies, records.batchNextDomain
+      ));
+      if (plan.status !== "planned") return { plan, claim: null, proof: records.deliveryProof };
+      const sent = encodeSelectedBatch(workspaceCore.selectedRecords(plan, records));
+      const retiredAt = new Date(input.localNowMs ?? Date.now()).toISOString();
+      const claim = { claimId: globalThis.crypto.randomUUID(), sent, ownerId: input.ownerId,
+        retiredAt, body: JSON.stringify({ deviceId: records.deviceId, lastRevision: records.snapshot.revision, ...sent }) };
+      const proof = removeProofIds(records.deliveryProof, sent);
+      workspaceTransaction.put(meta, DELIVERY_PROOF_KEY, proof);
+      workspaceTransaction.put(meta, OUTGOING_KEY, claim);
+      workspaceTransaction.put(meta, "batchNextDomain", plan.nextDomain);
+      input.assertCurrent?.();
+      return { plan, claim, proof, timerDependencies: records.timerDependencies };
+    });
+  }
 
   function setSharedCore(instance) {
     const methods = [
@@ -110,9 +400,6 @@
     let canonicalTimer = plainObject(snapshot?.canonicalTimer) && snapshot.canonicalTimer.id
       ? snapshot.canonicalTimer
       : null;
-    if (canonicalTimer && history.some((item) => item?.timerId === canonicalTimer.id)) {
-      canonicalTimer = null;
-    }
     return {
       canonicalTimer,
       history,
@@ -245,7 +532,12 @@
       throw new RangeError("Synchronized projection time is invalid.");
     }
     const pending = projectionQueues(input.queues, input.deviceId);
-    const value = dispatcher.projectSynchronizedState({
+    const value = typeof dispatcher.call === "function" ? dispatcher.call("workspace.project.v1", {
+      base: workspaceCore.base(input.snapshot), local: pending, now: new Date(input.nowMs).toISOString(),
+      canonicalHead: input.canonicalHead ?? null, neverSent: input.deliveryProof ?? {},
+      timerDependencies: input.timerDependencies ?? [],
+      displayContext: { profile: "pwaStorage", projectionPending: input.projectionPending ?? null }
+    }).workspace : dispatcher.projectSynchronizedState({
       base: projectionBase(input.snapshot),
       pending,
       now: new Date(input.nowMs).toISOString()
@@ -290,62 +582,44 @@
     }));
   }
 
-  function localDayBounds(value) {
-    const instant = new Date(value);
-    if (!Number.isFinite(instant.getTime())) throw new Error("Timer dependency has an invalid source time.");
-    const start = new Date(instant.getFullYear(), instant.getMonth(), instant.getDate());
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
-    return { sourceDayStart: start.toISOString(), sourceDayEnd: end.toISOString() };
-  }
-
-  function timerDependencies(commands = []) {
-    const commandById = new Map(commands.map((command) => [command.id, command]));
-    return commands.flatMap((command) => {
-      if (typeof command?.dependsOnCommandId !== "string" || !command.dependsOnCommandId) return [];
-      const dependency = {
-        operationId: command.id,
-        dependsOnOperationId: command.dependsOnCommandId
-      };
-      if (command.generatedBreak === true) {
-        const source = commandById.get(command.dependsOnCommandId);
-        const bounds = typeof command.sourceDayStart === "string" && typeof command.sourceDayEnd === "string"
-          ? { sourceDayStart: command.sourceDayStart, sourceDayEnd: command.sourceDayEnd }
-          : localDayBounds(source?.physicalOccurredAt || source?.occurredAt);
-        Object.assign(dependency, { generatedBreak: true, ...bounds });
-      }
-      return [dependency];
-    });
-  }
-
-  function validateReconciliationOutput(value) {
-    const expectedKeys = [
-      "autoStartBreaks", "baseAutoStartBreaks", "baseDurationsMs", "baseHistory",
-      "baseSelectedTaskId", "baseTasks", "baseTimer", "droppedTimerIds",
-      "droppedTimerOperationIds", "durationsMs", "history", "pending",
-      "pendingAutoStartOperations", "pendingDurationOperations", "pendingSelectedTaskOperations",
-      "pendingTaskOperations", "pendingTimerDependencies", "promotedTimerOperationIds", "revision",
-      "selectedTaskId", "tasks", "timer"
-    ];
-    const actualKeys = Object.keys(value || {}).sort();
-    const baseKeys = actualKeys.filter((key) => key !== "projectionPending");
-    if (!plainObject(value)
-      || JSON.stringify(baseKeys) !== JSON.stringify([...expectedKeys].sort())
-      || !Number.isSafeInteger(value.revision) || value.revision < 0
-      || !Array.isArray(value.pending) || !Array.isArray(value.pendingTaskOperations)
-      || !Array.isArray(value.pendingDurationOperations) || !Array.isArray(value.pendingAutoStartOperations)
-      || !Array.isArray(value.pendingSelectedTaskOperations) || !Array.isArray(value.pendingTimerDependencies)
-      || !Array.isArray(value.promotedTimerOperationIds) || !Array.isArray(value.droppedTimerOperationIds)
-      || !Array.isArray(value.droppedTimerIds) || !Array.isArray(value.baseHistory)
-      || !Array.isArray(value.baseTasks) || !Array.isArray(value.history) || !Array.isArray(value.tasks)
-      || typeof value.baseAutoStartBreaks !== "boolean" || typeof value.autoStartBreaks !== "boolean"
-      || !plainObject(value.baseDurationsMs) || !plainObject(value.durationsMs)) {
-      throw new Error("Shared core returned an invalid reconciliation.");
+  class LegacyDependencyRecoveryError extends Error {
+    constructor(plan) {
+      super("Legacy timer dependencies need recovery. Retained operations and saved requests remain unchanged.");
+      this.name = "LegacyDependencyRecoveryError";
+      this.recovery = plan.recovery;
     }
-    validateCanonicalTimer(value.baseTimer);
-    validateCanonicalTimer(value.timer);
-    if (value.projectionPending !== undefined) validateProjectionPending(value.projectionPending);
-    return value;
+  }
+
+  function dependencyPlan(records, deviceId, nowMs, expectedOwnerId = core.accountOwnerId(records.snapshot?.user)) {
+    return callWorkspaceCore("workspace.legacyDependencyPlan.v1", workspaceCore.dependencyRequest(
+      records, deviceId || records.deviceId || "legacy-web", expectedOwnerId,
+      core.accountOwnerId(records.snapshot?.user), nowMs ?? Date.now()
+    ));
+  }
+
+  function validatedTimerDependencies(records, deviceId, nowMs) {
+    if (records.timerDependencies != null) return records.timerDependencies;
+    const plan = dependencyPlan(records, deviceId, nowMs);
+    if (plan.outcome === "blocked") throw new LegacyDependencyRecoveryError(plan);
+    return plan.timerDependencies;
+  }
+
+  function migrateDependencyMetadata(records, input, transaction) {
+    if (records.timerDependencies != null) return { timerDependencies: records.timerDependencies, metadataWrites: [] };
+    return writeDependencyMigration(records, input, transaction);
+  }
+
+  function writeDependencyMigration(records, input, transaction) {
+    const expectedOwnerId = Object.hasOwn(input, "expectedUserId") ? input.expectedUserId : input.ownerId ?? null;
+    const plan = dependencyPlan(records, records.deviceId || input.deviceId, input.nowMs ?? input.localNowMs, expectedOwnerId);
+    if (plan.outcome === "blocked") throw new LegacyDependencyRecoveryError(plan);
+    input.assertCurrent?.();
+    for (const write of plan.metadataWrites) {
+      if (write.kind !== "recordTimerDependencies") throw new Error("Unsupported legacy dependency write.");
+      workspaceTransaction.put(transaction.objectStore(META_STORE), "timerDependencies", write.value);
+    }
+    records.timerDependencies = plan.timerDependencies;
+    return plan;
   }
 
   function validateProjectionPending(pending) {
@@ -436,62 +710,6 @@
     };
   }
 
-  function reconciliationProjection(value, queues, input, dispatcher) {
-    return projectState({
-      snapshot: {
-        canonicalTimer: value.baseTimer,
-        history: value.baseHistory,
-        tasks: value.baseTasks,
-        durationsMs: value.baseDurationsMs,
-        autoStartBreaks: value.baseAutoStartBreaks,
-        selectedTaskId: value.baseSelectedTaskId
-      },
-      queues,
-      nowMs: Date.parse(input.response?.serverTime),
-      deviceId: input.deviceId,
-      sharedCore: dispatcher
-    });
-  }
-
-  function assertReconciliationProjection(value, projection) {
-    const projectedFields = {
-      timer: projection.canonicalTimer,
-      history: projection.history,
-      tasks: projection.tasks,
-      durationsMs: projection.durationsMs,
-      autoStartBreaks: projection.autoStartBreaks,
-      selectedTaskId: projection.selectedTaskId
-    };
-    const reconciledFields = {
-      timer: value.timer,
-      history: value.history,
-      tasks: value.tasks,
-      durationsMs: value.durationsMs,
-      autoStartBreaks: value.autoStartBreaks,
-      selectedTaskId: value.selectedTaskId
-    };
-    if (JSON.stringify(projectedFields) !== JSON.stringify(reconciledFields)) {
-      throw new Error("Shared core reconciliation disagrees with synchronized projection.");
-    }
-  }
-
-  function restoreTimerDependencies(commands, dependencies) {
-    const dependencyById = new Map(dependencies.map((dependency) => [dependency.operationId, dependency]));
-    return commands.map((command) => {
-      const dependency = dependencyById.get(command.id);
-      if (!dependency) return command;
-      return {
-        ...command,
-        dependsOnCommandId: dependency.dependsOnOperationId,
-        ...(dependency.generatedBreak === true ? {
-          generatedBreak: true,
-          sourceDayStart: dependency.sourceDayStart,
-          sourceDayEnd: dependency.sourceDayEnd
-        } : {})
-      };
-    });
-  }
-
   function cloneOutgoing(sent) {
     return JSON.parse(JSON.stringify({
       commands: sent?.commands || [], taskOperations: sent?.taskOperations || [],
@@ -517,6 +735,22 @@
       && sameItems(outgoing.sent.selectedTaskOperations, sent?.selectedTaskOperations);
   }
 
+  function captureSyncClaim(claim, sent, ownerId, deviceId) {
+    if (!plainObject(claim) || typeof claim.body !== "string" || !core.validDateTime(claim.retiredAt)
+      || claim.claimId != null && (typeof claim.claimId !== "string" || !claim.claimId)
+      || !plainObject(claim.sent) || !workspaceCore.recordsEqual(claim.sent, sent)) {
+      throw new TypeError("An exact captured sync claim is required.");
+    }
+    if (claim.ownerId !== ownerId) throw new AccountOwnershipError();
+    const body = JSON.parse(claim.body);
+    if (body.deviceId !== deviceId || !Number.isSafeInteger(body.lastRevision) || body.lastRevision < 0
+      || workspaceCore.DOMAINS.some((domain) => !Array.isArray(body[domain])
+        || !workspaceCore.recordsEqual(body[domain], sent[domain]))) {
+      throw new Error("Captured request bytes disagree with the acknowledged sync claim.");
+    }
+    return JSON.parse(JSON.stringify(claim));
+  }
+
   function sanitizeCanonicalHead(head) {
     if (!plainObject(head)) return null;
     const wallMs = Number(head.wallMs);
@@ -527,13 +761,8 @@
   }
 
   function sanitizeProjectionPending(value) {
-    if (!plainObject(value)) return null;
-    try {
-      validateProjectionPending(value);
-      return projectionPendingQueues(value);
-    } catch {
-      return null;
-    }
+    // Keep the legacy exported name, but never repair persisted validator input.
+    return value ?? null;
   }
 
   function reconcileState(input) {
@@ -545,27 +774,19 @@
     const local = projectionQueues(input.queues, input.deviceId);
     const sent = input.sent || {};
     const neverSent = input.neverSent || neverSentFromProof(input.deliveryProof, local, sent);
-    const value = validateReconciliationOutput(dispatcher.reconcileSynchronizedState({
+    const value = dispatcher.reconcileSynchronizedState({
       local,
       sent,
       response: input.response,
-      timerDependencies: input.timerDependencies || timerDependencies(input.queues?.commands || []),
-      neverSent
-    }));
-    const queues = reconciledQueues(value);
-    const safeQueues = value.projectionPending ? projectionPendingQueues(value.projectionPending) : queues;
-    const projection = reconciliationProjection(value, safeQueues, input, dispatcher);
-    assertReconciliationProjection(value, projection);
-    queues.commands = restoreTimerDependencies(value.pending, value.pendingTimerDependencies);
-    const projectionPending = value.projectionPending
-      ? { ...projectionPendingQueues(value.projectionPending) }
-      : { ...queues, commands: [...queues.commands] };
-    if (value.projectionPending) {
-      projectionPending.commands = restoreTimerDependencies(
-        value.projectionPending.commands || [], value.pendingTimerDependencies
-      );
+      timerDependencies: input.timerDependencies ?? [],
+      neverSent,
+      displayContext: { profile: "pwaStorage", projectionPending: input.projectionPending ?? null }
+    });
+    if (value?.schemaVersion !== 3 || !plainObject(value.canonicalResponse) || !plainObject(value.workspace)) {
+      throw new Error("Core returned an invalid reconciliation envelope for terminal-aware v3.");
     }
-    return { ...value, queues, projection, projectionPending, neverSent };
+    const queues = reconciledQueues(value);
+    return { ...value, queues, projection: value.workspace, neverSent };
   }
 
   const RESOLUTION_ACKNOWLEDGEMENTS = Object.freeze([
@@ -602,9 +823,10 @@
       sent: shaped.sent,
       response: shaped.response,
       deviceId: shaped.deviceId,
-      timerDependencies: timerDependencies(shaped.queues?.commands || []),
-      neverSent: shaped.neverSent,
+      timerDependencies: shaped.timerDependencies ?? [],
+      neverSent: shaped.sent?.strategy === "keep_remote" ? neverSentFromProof(shaped.deliveryProof, shaped.queues, shaped.sent) : shaped.neverSent,
       deliveryProof: shaped.deliveryProof,
+      projectionPending: shaped.projectionPending,
       sharedCore: shaped.sharedCore
     });
   }
@@ -622,46 +844,9 @@
       deviceId: input.deviceId,
       neverSent: input.neverSent,
       deliveryProof: input.deliveryProof,
+      projectionPending: input.projectionPending,
       sharedCore: input.sharedCore
     });
-  }
-
-  function validateProspectiveProjection(projection, operation, storeName) {
-    const winners = projection.winningOperationIds;
-    if (storeName === PENDING_STORE) {
-      if (projection.timerOutcomes[operation.id]?.outcome !== "applied") {
-        throw new Error("Shared core rejected the timer command projection.");
-      }
-      return;
-    }
-    if (storeName === TASK_PENDING_STORE) {
-      const projected = projection.tasks.find((task) => task.id === operation.taskId) || null;
-      const expected = operation.type === "upsert"
-        ? { id: operation.taskId, title: operation.title }
-        : null;
-      if (winners.tasks[operation.taskId] !== operation.id
-        || JSON.stringify(projected) !== JSON.stringify(expected)) {
-        throw new Error("Shared core returned an invalid task projection.");
-      }
-      return;
-    }
-    if (storeName === DURATION_PENDING_STORE) {
-      if (winners.durations[operation.phase] !== operation.id
-        || projection.durationsMs[operation.phase] !== operation.durationMs) {
-        throw new Error("Shared core returned an invalid duration projection.");
-      }
-      return;
-    }
-    if (storeName === AUTO_START_PENDING_STORE) {
-      if (winners.autoStart !== operation.id || projection.autoStartBreaks !== operation.enabled) {
-        throw new Error("Shared core returned an invalid auto-start projection.");
-      }
-      return;
-    }
-    if (storeName === SELECTED_TASK_PENDING_STORE
-      && (winners.selectedTask !== operation.id || projection.selectedTaskId !== operation.taskId)) {
-      throw new Error("Shared core returned an invalid selected-task projection.");
-    }
   }
 
   class BootstrapGateError extends Error {
@@ -678,9 +863,13 @@
         taskOperations: "task operations",
         durationOperations: "duration operations",
         autoStartOperations: "auto-start operations",
-        selectedTaskOperations: "selected-task operations"
+        selectedTaskOperations: "selected-task operations",
+        oversized: "operations"
       };
-      super(`Cannot upload ${violation.count.toLocaleString("en-US")} queued ${labels[violation.field]}; server limit is ${violation.limit.toLocaleString("en-US")}. Keep Remote can discard local queued data without uploading it.`);
+      const message = violation.field === "blocked_dependency"
+        ? "Atomic history request waits for retained timer acknowledgements. No partial request was saved."
+        : `Cannot upload ${violation.count.toLocaleString("en-US")} queued ${labels[violation.field]}; server limit is ${violation.limit.toLocaleString("en-US")}. Keep Remote can discard local queued data without uploading it.`;
+      super(message);
       this.name = "ResolutionLimitError";
       this.field = violation.field;
       this.count = violation.count;
@@ -710,48 +899,6 @@
     }
   }
 
-  function uuid7RequestSet(transaction, metaStore) {
-    return {
-      uuidV7: metaStore.get(UUID7_KEY),
-      uuidCommands: transaction.objectStore(PENDING_STORE).getAllKeys(),
-      uuidTasks: transaction.objectStore(TASK_PENDING_STORE).getAllKeys(),
-      uuidDurations: transaction.objectStore(DURATION_PENDING_STORE).getAllKeys(),
-      uuidAutoStarts: transaction.objectStore(AUTO_START_PENDING_STORE).getAllKeys(),
-      uuidSelectedTasks: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAllKeys()
-    };
-  }
-
-  function pendingUuidIds(results) {
-    return [
-      ...(results.uuidCommands || []),
-      ...(results.uuidTasks || []),
-      ...(results.uuidDurations || []),
-      ...(results.uuidAutoStarts || []),
-      ...(results.uuidSelectedTasks || [])
-    ];
-  }
-
-  function reserveTransactionUuid7(metaStore, results, timestampMs, count, entropy) {
-    const identifiers = reserveUuid7(
-      timestampMs,
-      count,
-      results.uuidV7?.value || null,
-      pendingUuidIds(results),
-      entropy
-    );
-    metaStore.put({ key: UUID7_KEY, value: identifiers.at(-1) });
-    return identifiers;
-  }
-
-  function requireMutationRange(nowMs, wallMs, counter, deviceSequence) {
-    if (!Number.isSafeInteger(nowMs) || nowMs <= 0
-      || !Number.isSafeInteger(wallMs) || wallMs <= 0
-      || !Number.isSafeInteger(counter) || counter < 0
-      || deviceSequence !== undefined && (!Number.isSafeInteger(deviceSequence) || deviceSequence <= 0)) {
-      throw new ClockRangeError();
-    }
-  }
-
   function requestResult(request) {
     return new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -776,10 +923,7 @@
   }
 
   function laterHlc(left, right) {
-    const leftWallMs = Number(left?.wallMs) || 0;
-    const rightWallMs = Number(right?.wallMs) || 0;
-    if (leftWallMs !== rightWallMs) return leftWallMs > rightWallMs ? left : right;
-    return (Number(left?.counter) || 0) >= (Number(right?.counter) || 0) ? left : right;
+    return callWorkspaceCore("hlc.head.v1", { physicalNowMs: 0, observed: [left, right].filter((clock) => clock != null) });
   }
 
   function latestClockOffset(stored, incoming) {
@@ -814,15 +958,16 @@
 
   function accountMetadataMutation(database, input, keys, change) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction(META_STORE, "readwrite");
+      const transaction = database.transaction(workspaceTransaction.STORES, "readwrite");
       const store = transaction.objectStore(META_STORE);
-      const requests = Object.fromEntries([...new Set(["snapshot", GATE_KEY, RESOLUTION_KEY, ...keys])]
-        .map((key) => [key === GATE_KEY ? "gate" : key === RESOLUTION_KEY ? "resolution" : key, store.get(key)]));
+      const requests = mutationContextRequests(transaction, Object.fromEntries([...new Set(keys)]
+        .map((key) => [key, store.get(key)])));
       let outcome;
       let failure;
       const results = {};
       collectTransactionRequests(requests, results, () => {
         assertStorageContext(results, input);
+        assertResponseDisplayContext(results, input.deviceId);
         outcome = change(store, results);
       }, (error) => { failure = error; transaction.abort(); });
       transaction.oncomplete = () => resolve(outcome);
@@ -910,24 +1055,21 @@
   function guardedMutation(database, storeNames, operation, input = {}) {
     const expectedUserId = input.expectedUserId ?? null;
     return new Promise((resolve, reject) => {
-      const names = [...new Set([META_STORE, ...storeNames])];
+      const names = [...new Set([...workspaceTransaction.STORES, ...storeNames])];
       const transaction = database.transaction(names, "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
       const outcome = { value: undefined };
       let failure = null;
-      const requests = {
-        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
-        snapshot: metaStore.get("snapshot")
-      };
+      const requests = mutationContextRequests(transaction);
       collectRequestResults(requests, (results) => {
         try {
           if (!input.allowBootstrap && (results.gate || results.resolution)) throw new BootstrapGateError();
           assertStorageContext(results, input);
           assertAccountOwnership(results.snapshot?.value, expectedUserId);
+          assertResponseDisplayContext(results, input.deviceId);
           operation(transaction, outcome, (error) => {
             failure = error;
             transaction.abort();
-          });
+          }, results);
         } catch (error) {
           failure = error;
           transaction.abort();
@@ -937,40 +1079,6 @@
       transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
       transaction.onerror = () => {};
     });
-  }
-
-  function synchronizedMutationStores(input) {
-    if (!input.withUuidV7) return [META_STORE, input.storeName];
-    return [
-      META_STORE,
-      PENDING_STORE,
-      TASK_PENDING_STORE,
-      DURATION_PENDING_STORE,
-      AUTO_START_PENDING_STORE,
-      SELECTED_TASK_PENDING_STORE
-    ];
-  }
-
-  function mutationAllocationRequests(transaction, metaStore, input, requiresProjection) {
-    const requests = {
-      gate: metaStore.get(GATE_KEY),
-      resolution: metaStore.get(RESOLUTION_KEY),
-      projectionSnapshot: metaStore.get("snapshot"),
-      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
-      hlc: metaStore.get("hlc")
-    };
-    if (input.withDeviceSequence) requests.deviceSequence = metaStore.get("deviceSequence");
-    if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
-    if (!requiresProjection) return requests;
-    Object.assign(requests, {
-      projectionDeviceId: metaStore.get("deviceId"),
-      projectionCommands: transaction.objectStore(PENDING_STORE).getAll(),
-      projectionTasks: transaction.objectStore(TASK_PENDING_STORE).getAll(),
-      projectionDurations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
-      projectionAutoStarts: transaction.objectStore(AUTO_START_PENDING_STORE).getAll(),
-      projectionSelectedTasks: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()
-    });
-    return requests;
   }
 
   function collectRequestResults(requests, onComplete) {
@@ -985,165 +1093,56 @@
     }
   }
 
-  function allocateAuthorityHlc(input, storedHlc, count) {
-    try {
-      return storageAuthority(input).allocateHlcBatch(storedHlc, input.nowMs, count);
-    } catch (error) {
-      if (/invalid shared-core input:.*(?:counter|wallMs)|overflow/i.test(String(error?.message || ""))) {
-        throw new ClockRangeError();
-      }
-      throw error;
-    }
-  }
-
-  function mutationClock(input, results) {
-    const storedHlc = results.hlc?.value || { wallMs: 0, counter: 0 };
-    const tick = allocateAuthorityHlc(input, storedHlc, 1);
-    const wallMs = tick.wallMs;
-    const counter = tick.counter;
-    const deviceSequence = input.withDeviceSequence
-      ? (Number(results.deviceSequence?.value) || 0) + 1
-      : undefined;
-    requireMutationRange(input.nowMs, wallMs, counter, deviceSequence);
-    const id = input.withUuidV7
-      ? reserveUuid7(wallMs, 1, results.uuidV7?.value || null, pendingUuidIds(results), input.entropy)[0]
-      : undefined;
-    return { id, wallMs, counter, deviceSequence };
-  }
-
-  function validateAllocatedMutation(transaction, input, results, allocated, wallMs) {
-    const queues = {
-      commands: results.projectionCommands || [],
-      taskOperations: results.projectionTasks || [],
-      durationOperations: results.projectionDurations || [],
-      autoStartOperations: results.projectionAutoStarts || [],
-      selectedTaskOperations: results.projectionSelectedTasks || []
-    };
-    const queueField = PROJECTION_QUEUE_FIELDS[input.storeName];
-    if (!queueField) throw new Error("Synchronized mutation store is unsupported.");
-    const superseded = typeof input.supersede === "function"
-      ? queues[queueField].filter((operation) => input.supersede(operation, allocated))
-      : [];
-    const supersededIds = new Set(superseded.map((operation) => operation.id));
-    queues[queueField] = queues[queueField]
-      .filter((operation) => !supersededIds.has(operation.id))
-      .concat(allocated);
-    const projection = projectState({
-      snapshot: results.projectionSnapshot?.value || null,
-      queues,
-      nowMs: wallMs,
-      deviceId: allocated?.deviceId || results.projectionDeviceId?.value || null,
-      sharedCore: input.sharedCore
-    });
-    validateProspectiveProjection(projection, allocated, input.storeName);
-    for (const operation of superseded) transaction.objectStore(input.storeName).delete(operation.id);
-  }
-
-  function persistAllocatedMutation(transaction, metaStore, input, allocated, clock, proof) {
-    transaction.objectStore(input.storeName).add(allocated);
-    if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: clock.id });
-    metaStore.put({ key: "hlc", value: { wallMs: clock.wallMs, counter: clock.counter } });
-    const queue = PROJECTION_QUEUE_FIELDS[input.storeName];
-    if (queue && allocated?.id) {
-      metaStore.put({ key: DELIVERY_PROOF_KEY, value: addProofId(proof, queue, allocated.id) });
-    }
-    if (input.withDeviceSequence) {
-      metaStore.put({ key: "deviceSequence", value: clock.deviceSequence });
-    }
-    if (input.timerOwner && allocated?.type === "start" && allocated.timerId) {
-      metaStore.put({
-        key: TIMER_OWNER_KEY,
-        value: timerOwnerValue(allocated.timerId, input.timerOwner)
-      });
-    }
-  }
-
-  function allocateMutation(database, input) {
-    const expectedUserId = input.expectedUserId ?? null;
-    return new Promise((resolve, reject) => {
-      const requiresProjection = input.requireProjection === true || input.sharedCore != null;
-      const transaction = database.transaction(synchronizedMutationStores(input), "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
-      let allocated;
-      let failure = null;
-      const requests = mutationAllocationRequests(transaction, metaStore, input, requiresProjection);
-      collectRequestResults(requests, (results) => {
-        try {
-          if (results.gate || results.resolution) throw new BootstrapGateError();
-          input.assertCurrent?.();
-          assertAccountOwnership(results.projectionSnapshot?.value, expectedUserId);
-          const clock = mutationClock(input, results);
-          allocated = input.build(clock);
-          if (requiresProjection) {
-            validateAllocatedMutation(transaction, input, results, allocated, clock.wallMs);
-          }
-          const proof = results.deliveryProof?.value || null;
-          persistAllocatedMutation(transaction, metaStore, input, allocated, clock, proof);
-        } catch (error) {
-          failure = error;
-          transaction.abort();
-        }
-      });
-      transaction.oncomplete = () => resolve(allocated);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
+  function ownershipPlan(records, input, action) {
+    return callWorkspaceCore("workspace.ownershipPlan.v1", {
+      profile: "pwaStorage", action, workspace: workspaceRecords({ ...records, deviceId: input.deviceId }),
+      ownership: records.timerOwner ?? null, localDeviceId: input.deviceId, localTabId: input.tabId,
+      clock: action.kind === "release" ? { nowMs: input.nowMs }
+        : { nowMs: input.nowMs, leaseDurationMs: input.leaseMs }
     });
   }
 
-  function projectedTimer(snapshot, commands, nowMs, overrideCore = null) {
-    const result = projectState({
-      snapshot,
-      queues: { commands: commands || [] },
-      nowMs,
-      sharedCore: overrideCore
-    });
-    const timer = result.canonicalTimer;
-    if (timer === null) return null;
-    const start = [...(commands || [])]
-      .filter((command) => command.type === "start" && command.timerId === timer.id)
-      .sort(core.compareTimerCommands)
-      .at(-1);
-    return start?.dependsOnCommandId
-      ? { ...timer, dependsOnCommandId: start.dependsOnCommandId }
-      : timer;
+  function transactionWorkspace(results, snapshot = results.snapshot?.value, queues = results, overrides = {}) {
+    return { snapshot, deviceId: results.deviceId?.value,
+      projectionPending: results.projectionPending?.value, canonicalHead: results.canonicalHead?.value,
+      deliveryProof: results.deliveryProof?.value, outgoing: results.outgoing?.value,
+      timerDependencies: results.timerDependencies?.value, timerOwner: results.timerOwner?.value,
+      sourceAcknowledgements: results.sourceAcknowledgements?.value,
+      ...Object.fromEntries(workspaceCore.DOMAINS.map((domain) => [domain, queues[domain] || []])), ...overrides };
   }
 
-  function timerOwnerValue(timerId, input) {
-    return {
-      timerId,
-      deviceId: input.deviceId,
-      tabId: input.tabId,
-      leaseExpiresAtMs: input.nowMs + input.leaseMs
-    };
+  function migrateLegacyPreferences(database, input = {}) {
+    return guardedMutation(database, [], (transaction, outcome, _abort, results) => {
+      const records = { ...transactionWorkspace(results), settings: results.settings?.value || {} };
+      const ownerId = core.accountOwnerId(records.snapshot?.user);
+      const deviceId = results.deviceId?.value || input.deviceId || "legacy-web";
+      migrateDependencyMetadata(records, { ...input, deviceId }, transaction);
+      const plan = callWorkspaceCore("workspace.legacyPreferences.v1", workspaceCore.preferenceRequest(records,
+        deviceId, input.expectedUserId ?? null, ownerId, Date.now(),
+        input.operationUuids || Array.from({ length: 5 }, () => globalThis.crypto.randomUUID())));
+      input.assertCurrent?.();
+      workspaceTransaction.writeLegacyPreferences(transaction, plan);
+      outcome.value = plan;
+    }, { ...input, allowBootstrap: true });
   }
 
-  function canClaimMissingTimerOwner(snapshot, commands, timer, deviceId) {
-    if (!timer || !["running", "paused"].includes(timer.status)) return false;
-    const canonicalTimer = snapshot?.canonicalTimer || null;
-    if (canonicalTimer?.id === timer.id && canonicalTimer.startedByDeviceId !== undefined) {
-      return canonicalTimer.startedByDeviceId === deviceId;
-    }
-    return (commands || []).some((command) => command.type === "start" && command.timerId === timer.id);
+  function migrateLegacyDependencies(database, input = {}) {
+    return guardedMutation(database, [], (transaction, outcome, _abort, results) => {
+      const records = transactionWorkspace(results);
+      outcome.value = writeDependencyMigration(records, input, transaction);
+    }, { ...input, allowBootstrap: true });
   }
 
-  function plannedMissingTimerOwner(owner, snapshot, commands, input) {
-    if (owner || !input?.deviceId || !input.tabId) return null;
-    const timer = projectedTimer(snapshot, commands, input.nowMs, input.sharedCore);
-    if (!canClaimMissingTimerOwner(snapshot, commands, timer, input.deviceId)) return null;
-    return timerOwnerValue(timer.id, input);
-  }
-
-  function claimMissingTimerOwner(metaStore, owner, snapshot, commands, input) {
-    const claimed = plannedMissingTimerOwner(owner, snapshot, commands, input);
-    if (claimed) metaStore.put({ key: TIMER_OWNER_KEY, value: claimed });
-    return claimed;
-  }
-
-  function retainedCommands(commands, removedIds, promotedCommands) {
-    const retained = new Map((commands || []).map((command) => [command.id, command]));
-    for (const id of removedIds || []) retained.delete(id);
-    for (const command of promotedCommands || []) retained.set(command.id, command);
-    return [...retained.values()];
+  function installationOwnership(input, results, rebased = null) {
+    const claim = input.timerOwnerClaim;
+    if (!claim) return { ownershipWrites: [] };
+    const records = rebased ? transactionWorkspace(results, input.snapshot, rebased.queues ?? results, {
+      projectionPending: rebased.projectionPending, timerDependencies: rebased.timerDependencies,
+      canonicalHead: input.serverHlc ?? results.canonicalHead?.value,
+      deliveryProof: neverSentFromProof(results.deliveryProof?.value, rebased.queues ?? results, input.reconciliation?.sent),
+      outgoing: null
+    }) : transactionWorkspace(results);
+    return ownershipPlan(records, claim, { kind: "install" });
   }
 
   function responseTransactionRebase(input, results, discardedQueueIds = null) {
@@ -1162,55 +1161,39 @@
       autoStartOperations: results.autoStartOperations || [],
       selectedTaskOperations: results.selectedTaskOperations || []
     };
-    const proof = results.deliveryProof?.value || input.deliveryProof || null;
+    const proof = results.deliveryProof?.value || null;
+    const neverSent = neverSentFromProof(proof, storedQueues, input.reconciliation.sent);
+    const dependencies = validatedTimerDependencies({ ...transactionWorkspace(results), ...storedQueues },
+      input.reconciliation.deviceId, Date.parse(input.reconciliation.response.serverTime));
     const rebased = discardedQueueIds
       ? reconcileResolution({
         queues: storedQueues,
         queueIds: discardedQueueIds,
         deliveryProof: proof,
-        neverSent: input.neverSent,
-        ...input.reconciliation
+        ...input.reconciliation, neverSent, timerDependencies: dependencies,
+        projectionPending: results.projectionPending?.value ?? null
       })
       : reconcileState({
         queues: storedQueues,
         deliveryProof: proof,
-        neverSent: input.neverSent,
-        ...input.reconciliation
+        ...input.reconciliation, neverSent, timerDependencies: dependencies,
+        projectionPending: results.projectionPending?.value ?? null
       });
     return {
       queues: rebased.queues,
       droppedCommandIds: rebased.droppedTimerOperationIds,
       droppedTimerIds: rebased.droppedTimerIds,
-      projectionPending: rebased.projectionPending || null
+      projectionPending: rebased.displayContext.projectionPending,
+      timerDependencies: rebased.pendingTimerDependencies, projection: rebased.projection,
+      canonicalResponse: rebased.canonicalResponse, workspace: rebased.workspace
     };
   }
 
-  function timerMutationStoreNames(withUuidV7) {
-    if (!withUuidV7) return [META_STORE, PENDING_STORE];
-    return [
-      META_STORE,
-      PENDING_STORE,
-      TASK_PENDING_STORE,
-      DURATION_PENDING_STORE,
-      AUTO_START_PENDING_STORE,
-      SELECTED_TASK_PENDING_STORE
-    ];
-  }
-
-  function timerMutationRequests(transaction, input, includeOwner) {
-    const metaStore = transaction.objectStore(META_STORE);
-    const requests = {
-      gate: metaStore.get(GATE_KEY),
-      resolution: metaStore.get(RESOLUTION_KEY),
-      snapshot: metaStore.get("snapshot"),
-      deviceSequence: metaStore.get("deviceSequence"),
-      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
-      hlc: metaStore.get("hlc")
-    };
-    if (includeOwner) requests.timerOwner = metaStore.get(TIMER_OWNER_KEY);
-    requests.commands = transaction.objectStore(PENDING_STORE).getAll();
-    if (input.withUuidV7) Object.assign(requests, uuid7RequestSet(transaction, metaStore));
-    return requests;
+  function retainedObservation(observation, queues) {
+    if (!observation) return null;
+    const retainedIds = new Set((queues?.commands || []).map((command) => command.id));
+    return { ...observation, commandTimes: Object.fromEntries(Object.entries(observation.commandTimes || {})
+      .filter(([id]) => retainedIds.has(id))) };
   }
 
   function collectTransactionRequests(requests, results, onReady, onFailure) {
@@ -1229,420 +1212,29 @@
     }
   }
 
-  function timerMutationPosition(results, commands, input, count) {
-    const highestSequence = commands.reduce(
-      (highest, command) => Math.max(highest, Number(command.deviceSequence) || 0),
-      Number(results.deviceSequence?.value) || 0
-    );
-    const storedHlc = results.hlc?.value || { wallMs: 0, counter: 0 };
-    const batch = allocateAuthorityHlc(input, storedHlc, count);
-    requireMutationRange(input.nowMs, batch.wallMs, batch.counter, highestSequence + count);
-    return { highestSequence, wallMs: batch.wallMs, firstCounter: batch.firstCounter };
-  }
-
-  function timerMutationIds(results, input, position, count, fallbackIds) {
-    if (!input.withUuidV7) return fallbackIds.slice(0, count);
-    return reserveUuid7(
-      position.wallMs,
-      count,
-      results.uuidV7?.value || null,
-      pendingUuidIds(results),
-      input.entropy
-    );
-  }
-
-  function validateTimerCommandBatch(results, input, commands, persisted, wallMs) {
-    const projection = projectState({
-      snapshot: results.snapshot?.value || null,
-      queues: { commands: commands.concat(persisted) },
-      nowMs: wallMs,
-      deviceId: input.deviceId,
-      sharedCore: input.sharedCore
-    });
-    for (const command of persisted) {
-      validateProspectiveProjection(projection, command, PENDING_STORE);
-    }
-  }
-
-  function cancelCommandTypes(timer, input) {
-    if (!timer || timer.id !== input.timerId || timer.phase !== input.phase) return [];
-    if (["running", "paused"].includes(timer.status)) return ["cancel", "clear"];
-    if (["completed", "cancelled"].includes(timer.status)) return ["clear"];
-    return [];
-  }
-
-  function cancelCommandBatch(results, input, timer, commands, types) {
-    const position = timerMutationPosition(results, commands, input, types.length);
-    const fallbackIds = types.map((type) => type === "cancel" ? input.cancelCommandId : input.clearCommandId);
-    const commandIds = timerMutationIds(results, input, position, types.length, fallbackIds);
-    const occurredAt = new Date(position.wallMs).toISOString();
-    const elapsedMs = Math.min(
-      Number(timer.plannedDurationMs),
-      Math.max(0, Number(input.observedElapsedMs) || 0)
-    );
-    const persisted = types.map((type, index) => {
-      const command = {
-        id: commandIds[index],
-        deviceId: input.deviceId,
-        deviceSequence: position.highestSequence + index + 1,
-        timerId: timer.id,
-        type,
-        phase: timer.phase,
-        plannedDurationMs: timer.plannedDurationMs,
-        occurredAt,
-        hlcWallMs: position.wallMs,
-        hlcCounter: position.firstCounter + index,
-        observedElapsedMs: elapsedMs
-      };
-      if (timer.dependsOnCommandId) command.dependsOnCommandId = timer.dependsOnCommandId;
-      return command;
-    });
-    return { ...position, commandIds, persisted };
-  }
-
-  function persistCancelledTimer(metaStore, pendingStore, input, batch, proof) {
-    for (const command of batch.persisted) pendingStore.add(command);
-    if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: batch.commandIds.at(-1) });
-    metaStore.delete(TIMER_OWNER_KEY);
-    metaStore.put({ key: "deviceSequence", value: batch.highestSequence + batch.persisted.length });
-    metaStore.put({
-      key: "hlc",
-      value: { wallMs: batch.wallMs, counter: batch.firstCounter + batch.persisted.length - 1 }
-    });
-    let nextProof = sanitizeDeliveryProof(proof);
-    for (const command of batch.persisted) {
-      nextProof = addProofId(nextProof, "commands", command.id);
-    }
-    metaStore.put({ key: DELIVERY_PROOF_KEY, value: nextProof });
-  }
-
-  function applyCancelAndClearTimer(transaction, input, results) {
-    if (results.gate || results.resolution) throw new BootstrapGateError();
-    input.assertCurrent?.();
-    assertAccountOwnership(results.snapshot?.value, input.expectedUserId);
-    const commands = results.commands || [];
-    const timer = projectedTimer(results.snapshot?.value, commands, input.nowMs, input.sharedCore);
-    const types = cancelCommandTypes(timer, input);
-    if (types.length === 0) return { transitioned: false, reason: "stale", commands: [] };
-    const batch = cancelCommandBatch(results, input, timer, commands, types);
-    validateTimerCommandBatch(results, input, commands, batch.persisted, batch.wallMs);
-    persistCancelledTimer(
-      transaction.objectStore(META_STORE),
-      transaction.objectStore(PENDING_STORE),
-      input,
-      batch,
-      results.deliveryProof?.value || null
-    );
-    return { transitioned: true, reason: "", commands: batch.persisted };
-  }
-
-  function cancelAndClearTimer(database, input) {
-    input = { ...input };
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(timerMutationStoreNames(input.withUuidV7), "readwrite");
-      const requests = timerMutationRequests(transaction, input, false);
-      const results = {};
-      let outcome;
-      let failure = null;
-      collectTransactionRequests(requests, results, () => {
-        outcome = applyCancelAndClearTimer(transaction, input, results);
-      }, (error) => {
-        failure = error;
-        transaction.abort();
-      });
-      transaction.oncomplete = () => resolve(outcome);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
-    });
-  }
-
-  function finishTimerOwnership(metaStore, results, input, commands, timer) {
-    let owner = results.timerOwner?.value || null;
-    if (!owner && canClaimMissingTimerOwner(results.snapshot?.value, commands, timer, input.deviceId)) {
-      owner = timerOwnerValue(timer.id, input);
-      metaStore.put({ key: TIMER_OWNER_KEY, value: owner });
-    }
-    const ownerIsCurrentTimer = owner?.timerId === input.timerId;
-    const ownerDeviceMatches = ownerIsCurrentTimer && owner.deviceId === input.deviceId;
-    const leaseNowMs = input.localNowMs ?? input.nowMs;
-    const ownerLeaseLive = Number(owner?.leaseExpiresAtMs) > leaseNowMs;
-    const ownerGranted = input.manual === true || ownerDeviceMatches
-      && (owner.tabId === input.tabId || !ownerLeaseLive);
-    let denied = null;
-    if (input.requireOwner === true && !ownerGranted) {
-      denied = { transitioned: false, reason: "not_owner", commands: [] };
-      if (ownerDeviceMatches && Number.isFinite(Number(owner.leaseExpiresAtMs))) {
-        denied.retryAtMs = Number(owner.leaseExpiresAtMs);
-      }
-    }
-    return { ownerGranted, leaseNowMs, denied };
-  }
-
-  function completionOwnership(timerId, input, ownerGranted) {
-    return ownerGranted
-      ? { timerId, ownerDeviceId: input.deviceId }
-      : null;
-  }
-
-  function completionCommandRequest(input, timer, projection, ownerGranted) {
-    return storageAuthority(input).completionPlan({
-      kind: "commandRequest",
-      commandType: "finish",
-      requestedTimer: input.requestedTimer || timer,
-      projectedTimer: projection.canonicalTimer,
-      automatic: input.manual !== true,
-      generateAutoBreak: true,
-      autoStartBreaks: projection.autoStartBreaks,
-      localDeviceId: input.deviceId,
-      ownership: completionOwnership(timer.id, input, ownerGranted)
-    });
-  }
-
-  function finishTimerCommand(timer, input, id, position) {
-    const command = {
-      id,
-      deviceId: input.deviceId,
-      deviceSequence: position.highestSequence + 1,
-      timerId: timer.id,
-      type: "finish",
-      phase: timer.phase,
-      plannedDurationMs: timer.plannedDurationMs,
-      occurredAt: position.occurredAt,
-      hlcWallMs: position.wallMs,
-      hlcCounter: position.firstCounter,
-      observedElapsedMs: Math.min(
-        Number(timer.plannedDurationMs),
-        Math.max(0, Number(input.observedElapsedMs) || 0)
-      )
-    };
-    if (timer.dependsOnCommandId) command.dependsOnCommandId = timer.dependsOnCommandId;
-    return command;
-  }
-
-  function generatedBreakCommand(input, id, finishCommand, position, phase, durationMs) {
-    return {
-      id,
-      deviceId: input.deviceId,
-      deviceSequence: position.highestSequence + 2,
-      timerId: input.breakTimerId,
-      type: "start",
-      phase,
-      plannedDurationMs: durationMs,
-      occurredAt: position.occurredAt,
-      hlcWallMs: position.wallMs,
-      hlcCounter: position.firstCounter + 1,
-      observedElapsedMs: 0,
-      dependsOnCommandId: finishCommand.id,
-      generatedBreak: true
-    };
-  }
-
-  function finishProjection(results, input, commands, finishCommand, wallMs) {
-    const pending = commands.concat(finishCommand);
-    const projection = projectState({
-      snapshot: results.snapshot?.value || null,
-      queues: {
-        commands: pending,
-        taskOperations: results.taskOperations,
-        durationOperations: results.durationOperations,
-        autoStartOperations: results.autoStartOperations,
-        selectedTaskOperations: results.selectedTaskOperations
-      },
-      nowMs: wallMs,
-      deviceId: input.deviceId,
-      sharedCore: input.sharedCore
-    });
-    const timer = projection.canonicalTimer;
-    const start = pending.filter((command) => command.type === "start" && command.timerId === timer?.id)
-      .sort(core.compareTimerCommands).at(-1);
-    if (timer && start?.dependsOnCommandId) {
-      projection.canonicalTimer = { ...timer, dependsOnCommandId: start.dependsOnCommandId };
-    }
-    return projection;
-  }
-
-  function finishAppliedCompletion(input, finishCommand, projection, ownerGranted) {
-    return storageAuthority(input).finishAppliedPlan({
-      commandId: finishCommand.id,
-      timerId: finishCommand.timerId,
-      phase: finishCommand.phase,
-      occurredAt: finishCommand.occurredAt,
-      history: projection.history,
-      autoStartBreaks: projection.autoStartBreaks,
-      localDeviceId: input.deviceId,
-      ownsTimer: ownerGranted,
-      referenceMs: Date.parse(finishCommand.occurredAt)
-    });
-  }
-
-  function finishCommandBatch(results, input, timer, commands, ownerGranted, requestPlan) {
-    const generatedCount = requestPlan.reserveGeneratedBreak ? 2 : 1;
-    const position = timerMutationPosition(results, commands, input, generatedCount);
-    position.occurredAt = new Date(position.wallMs).toISOString();
-    const commandIds = timerMutationIds(
-      results, input, position, generatedCount, [input.finishCommandId, input.breakCommandId]
-    );
-    const finishCommand = finishTimerCommand(timer, input, commandIds[0], position);
-    const projection = finishProjection(results, input, commands, finishCommand, position.wallMs);
-    const completion = finishAppliedCompletion(input, finishCommand, projection, ownerGranted);
-    if (completion.queueAutoBreak !== requestPlan.reserveGeneratedBreak) {
-      throw new Error("Shared core returned inconsistent generated-break plans.");
-    }
-    const selectedPhaseDurationMs = projection.durationsMs[completion.selectedPhase];
-    const persisted = [finishCommand];
-    if (completion.queueAutoBreak) {
-      const phase = completion.selectedPhase;
-      persisted.push(generatedBreakCommand(
-        input, commandIds[1], finishCommand, position, phase, selectedPhaseDurationMs
-      ));
-    }
-    return {
-      ...position, commandIds, persisted, selectedPhase: completion.selectedPhase,
-      selectedPhaseDurationMs, counter: position.firstCounter + generatedCount - 1
-    };
-  }
-
-  function persistFinishedTimer(metaStore, pendingStore, input, batch, ownership, settings, proof) {
-    for (const command of batch.persisted) pendingStore.add(command);
-    if (input.withUuidV7) metaStore.put({ key: UUID7_KEY, value: batch.commandIds.at(-1) });
-    if (batch.persisted.length === 2 && ownership.ownerGranted) {
-      const breakCommand = batch.persisted[1];
-      metaStore.put({
-        key: TIMER_OWNER_KEY,
-        value: {
-          timerId: breakCommand.timerId,
-          deviceId: input.deviceId,
-          tabId: input.tabId,
-          leaseExpiresAtMs: ownership.leaseNowMs + input.leaseMs
-        }
-      });
-    } else if (ownership.ownerGranted) metaStore.delete(TIMER_OWNER_KEY);
-    metaStore.put({ key: "deviceSequence", value: batch.highestSequence + batch.persisted.length });
-    metaStore.put({ key: "hlc", value: { wallMs: batch.wallMs, counter: batch.counter } });
-    let nextProof = sanitizeDeliveryProof(proof);
-    for (const command of batch.persisted) {
-      nextProof = addProofId(nextProof, "commands", command.id);
-    }
-    metaStore.put({ key: DELIVERY_PROOF_KEY, value: nextProof });
-    if (input.settings) {
-      metaStore.put({ key: "settings", value: { ...settings, selectedPhase: batch.selectedPhase } });
-    }
-  }
-
-  function applyFinishedTimer(transaction, input, results) {
-    if (results.gate || results.resolution) throw new BootstrapGateError();
-    input.assertCurrent?.();
-    assertAccountOwnership(results.snapshot?.value, input.expectedUserId);
-    const commands = results.commands || [];
-    const projection = finishProjection(results, input, commands, [], input.nowMs);
-    const projected = projection.canonicalTimer;
-    const timer = input.requestedTimer || finishProjection(
-      results, input, commands, [], input.localNowMs ?? input.nowMs
-    ).canonicalTimer;
-    if (!timer || timer.id !== input.timerId || timer.phase !== input.phase
-      || !["running", "paused"].includes(timer.status) || projected?.id !== timer.id
-      || projected.lastIntent?.type === "finish") {
-      return { transitioned: false, reason: "stale", commands: [] };
-    }
-    const metaStore = transaction.objectStore(META_STORE);
-    const ownership = finishTimerOwnership(metaStore, results, input, commands, timer);
-    if (ownership.denied) return ownership.denied;
-    const requestPlan = completionCommandRequest(input, timer, projection, ownership.ownerGranted);
-    if (!requestPlan.commandEligible) {
-      return { transitioned: false, reason: "stale", commands: [] };
-    }
-    const batch = finishCommandBatch(
-      results, input, timer, commands, ownership.ownerGranted, requestPlan
-    );
-    const prospective = finishProjection(results, input, commands, batch.persisted, batch.wallMs);
-    for (const command of batch.persisted) {
-      validateProspectiveProjection(prospective, command, PENDING_STORE);
-    }
-    persistFinishedTimer(
-      metaStore,
-      transaction.objectStore(PENDING_STORE),
-      input,
-      batch,
-      ownership,
-      results.settings?.value || {},
-      results.deliveryProof?.value || null
-    );
-    return {
-      transitioned: true, reason: "", commands: batch.persisted, selectedPhase: batch.selectedPhase,
-      selectedPhaseDurationMs: batch.selectedPhaseDurationMs
-    };
-  }
-
-  function finishTimer(database, input) {
-    input = { ...input };
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(timerMutationStoreNames(true), "readwrite");
-      const requests = finishedTimerRequests(transaction, input);
-      const results = {};
-      let outcome;
-      let failure = null;
-      collectTransactionRequests(requests, results, () => {
-        outcome = applyFinishedTimer(transaction, input, results);
-      }, (error) => {
-        failure = error;
-        transaction.abort();
-      });
-      transaction.oncomplete = () => resolve(outcome);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
-    });
-  }
-
-  function finishedTimerRequests(transaction, input) {
-    return {
-      ...timerMutationRequests(transaction, input, true),
-      settings: transaction.objectStore(META_STORE).get("settings"),
-      taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
-      durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
-      autoStartOperations: transaction.objectStore(AUTO_START_PENDING_STORE).getAll(),
-      selectedTaskOperations: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()
-    };
-  }
-
   function renewTimerOwnership(database, input) {
     return guardedMutation(database, [PENDING_STORE], (transaction, outcome, abort) => {
-      const store = transaction.objectStore(META_STORE);
-      const requests = {
-        owner: store.get(TIMER_OWNER_KEY),
-        snapshot: store.get("snapshot"),
-        commands: transaction.objectStore(PENDING_STORE).getAll()
-      };
       const results = {};
       outcome.value = false;
-      collectTransactionRequests(requests, results, () => {
+      collectTransactionRequests(syncResponseRequests(transaction), results, () => {
         input.assertCurrent?.();
-        let owner = results.owner?.value || null;
-        owner ||= claimMissingTimerOwner(
-          store,
-          owner,
-          results.snapshot?.value,
-          results.commands || [],
-          input
-        );
-        const sameTimerAndDevice = owner?.timerId === input.timerId && owner.deviceId === input.deviceId;
-        const leaseLive = Number(owner?.leaseExpiresAtMs) > input.nowMs;
-        if (!sameTimerAndDevice || owner.tabId !== input.tabId && leaseLive) return;
-        store.put({ key: TIMER_OWNER_KEY, value: timerOwnerValue(input.timerId, input) });
-        outcome.value = true;
+        const plan = ownershipPlan(transactionWorkspace(results), input, { kind: "renew", timerId: input.timerId });
+        input.assertCurrent?.();
+        workspaceTransaction.writeOwnership(transaction.objectStore(META_STORE), plan.ownershipWrites);
+        outcome.value = plan.renewed;
       }, abort);
     }, { ...input, allowBootstrap: true });
   }
 
   function releaseTimerOwnership(database, input) {
     return guardedMutation(database, [], (transaction, outcome, abort) => {
-      const store = transaction.objectStore(META_STORE);
-      const request = store.get(TIMER_OWNER_KEY);
-      request.onsuccess = () => {
-        try { input.assertCurrent?.(); } catch (error) { abort(error); return; }
-        const owner = request.result?.value || null;
-        if (owner?.deviceId !== input.deviceId || owner.tabId !== input.tabId) return;
-        store.put({ key: TIMER_OWNER_KEY, value: { ...owner, leaseExpiresAtMs: input.nowMs } });
-      };
+      const results = {};
+      collectTransactionRequests(syncResponseRequests(transaction), results, () => {
+        input.assertCurrent?.();
+        const plan = ownershipPlan(transactionWorkspace(results), input, { kind: "release" });
+        input.assertCurrent?.();
+        workspaceTransaction.writeOwnership(transaction.objectStore(META_STORE), plan.ownershipWrites);
+      }, abort);
     }, { ...input, allowBootstrap: true });
   }
 
@@ -1652,6 +1244,9 @@
       snapshot: metaStore.get("snapshot"),
       gate: metaStore.get(GATE_KEY),
       resolution: metaStore.get(RESOLUTION_KEY),
+      deliveryProof: metaStore.get(DELIVERY_PROOF_KEY), outgoing: metaStore.get(OUTGOING_KEY),
+      projectionPending: metaStore.get(PROJECTION_PENDING_KEY), canonicalHead: metaStore.get(CANONICAL_HEAD_KEY),
+      timerDependencies: metaStore.get("timerDependencies"),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
       taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
       durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
@@ -1667,6 +1262,9 @@
       throw new BootstrapGateError("Bootstrap gate is owned by another tab.");
     }
     const existingResolution = results.resolution?.value || null;
+    if (existingResolution && options.replaceExisting && existingResolution.deliveryState !== "neverSent") {
+      throw new BootstrapGateError("Possibly delivered history request cannot be replaced without non-delivery evidence.");
+    }
     if (existingResolution && !options.replaceExisting) {
       throw new BootstrapGateError("Saved history resolution already exists.");
     }
@@ -1677,53 +1275,51 @@
     }
   }
 
-  function compareResolutionOperations(left, right) {
-    return Number(left.hlcWallMs) - Number(right.hlcWallMs)
-      || Number(left.hlcCounter) - Number(right.hlcCounter)
-      || String(left.id).localeCompare(String(right.id));
-  }
-
-  function canonicalCapturedDurations(durationStore, operations) {
-    return operations.map((operation) => {
-      const normalized = core.durationRequestOperation(operation);
-      if (normalized.occurredAt !== operation.occurredAt) {
-        durationStore.put({ ...operation, occurredAt: normalized.occurredAt });
-      }
-      return { ...operation, occurredAt: normalized.occurredAt };
-    }).sort(compareResolutionOperations);
-  }
-
-  function resolutionCaptureInput(transaction, results, input) {
-    const commands = (results.commands || []).sort(core.compareTimerCommands);
-    const durationOperations = canonicalCapturedDurations(
-      transaction.objectStore(DURATION_PENDING_STORE),
-      results.durationOperations || []
-    );
-    const resolutionInput = {
-      ...input,
-      commands,
-      taskOperations: (results.taskOperations || []).sort(compareResolutionOperations),
-      durationOperations,
-      selectedTaskOperations: (results.selectedTaskOperations || []).sort(compareResolutionOperations)
-    };
-    const autoStartOperations = (results.autoStartOperations || []).sort(compareResolutionOperations);
-    if (autoStartOperations.length > 0 || input.autoStartOperationsPresent === true) {
-      resolutionInput.autoStartOperations = autoStartOperations;
-    }
-    return resolutionInput;
-  }
-
   function createCapturedResolution(transaction, results, input, options) {
     validateResolutionCapture(results, input, options);
+    assertResponseDisplayContext(results, input.deviceId);
+    const queues = { commands: results.commands || [], taskOperations: results.taskOperations || [],
+      durationOperations: results.durationOperations || [], autoStartOperations: results.autoStartOperations || [],
+      selectedTaskOperations: results.selectedTaskOperations || [] };
+    const planningQueues = input.strategy === "keep_remote" ? core.emptyNeverSent() : queues;
+    const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.batchRequest(
+      planningQueues, input.deviceId, input.strategy === "keep_remote" ? [] : validatedTimerDependencies(
+        transactionWorkspace(results), input.deviceId, Date.now()),
+      "commands", input.strategy
+    ));
+    if (plan.status !== "planned") {
+      throw new ResolutionLimitError({ field: plan.status, count: plan.total, limit: 8192 });
+    }
+    const selected = encodeSelectedBatch(workspaceCore.selectedRecords(plan, planningQueues));
+    persistCapturedDurationEncoding(transaction, results, queues, selected.durationOperations);
+    const payload = { requestId: input.requestId, deviceId: input.deviceId,
+      expectedRevision: input.expectedRevision, strategy: input.strategy,
+      commands: selected.commands, taskOperations: selected.taskOperations,
+      durationOperations: selected.durationOperations, selectedTaskOperations: selected.selectedTaskOperations };
+    if (queues.autoStartOperations.length || input.autoStartOperationsPresent) payload.autoStartOperations = selected.autoStartOperations;
     const pending = {
-      ...core.createPendingResolution(resolutionCaptureInput(transaction, results, input)),
+      userId: input.userId, payload, queueIds: Object.fromEntries(workspaceCore.DOMAINS.map((domain) =>
+        [domain, queues[domain].map((item) => item.id)])), deliveryState: "neverSent",
       gateToken: options.gateToken,
       sourceOwnerId: core.accountOwnerId(results.snapshot?.value?.user) || null
     };
-    const violation = core.resolutionLimitViolation(pending.payload);
-    if (violation) throw new ResolutionLimitError(violation);
     transaction.objectStore(META_STORE).put({ key: RESOLUTION_KEY, value: pending });
     return pending;
+  }
+
+  function persistCapturedDurationEncoding(transaction, results, queues, encoded) {
+    const proven = new Set(neverSentFromProof(results.deliveryProof?.value, queues,
+      results.outgoing?.value?.sent).durationOperations);
+    const retained = new Map(queues.durationOperations.map((operation) => [operation.id, operation]));
+    if (encoded.some((operation) => operation.occurredAt !== retained.get(operation.id).occurredAt
+      && !proven.has(operation.id))) {
+      throw new BootstrapGateError("Possibly delivered legacy duration cannot be rewritten for history resolution.");
+    }
+    for (const operation of encoded) {
+      const original = retained.get(operation.id);
+      if (operation.occurredAt !== original.occurredAt) transaction.objectStore(DURATION_PENDING_STORE)
+        .put({ ...original, occurredAt: operation.occurredAt });
+    }
   }
 
   function captureResolution(database, input, options) {
@@ -1791,7 +1387,7 @@
   }
 
   function validatePendingForSend(database, input) {
-    return accountMetadataMutation(database, input, [], (store, results) => {
+    return accountMetadataMutation(database, input, [DELIVERY_PROOF_KEY], (store, results) => {
       const resolution = results.resolution?.value || null;
       if (!input.pending || input.pending.userId !== input.currentUserId
         || !resolution || resolution.userId !== input.currentUserId
@@ -1799,8 +1395,13 @@
         throw new BootstrapGateError("Saved history resolution does not match current account.");
       }
       validateResolutionApply(results, input.pending);
+      const plan = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.savedBatchRequest(resolution.payload, resolution.payload.strategy));
+      if (plan.status !== "replay_saved") throw new BootstrapGateError("Saved history request exceeds Core limits. Retained request remains blocked and unchanged.");
+      const claimed = { ...resolution, deliveryState: "possiblyDelivered" };
+      store.put({ key: RESOLUTION_KEY, value: claimed });
+      store.put({ key: DELIVERY_PROOF_KEY, value: removeProofIds(results[DELIVERY_PROOF_KEY]?.value, resolution.payload) });
       store.put({ key: GATE_KEY, value: boundBootstrapLease(input.gateToken, input) });
-      return resolution;
+      return claimed;
     });
   }
 
@@ -1815,6 +1416,11 @@
       clockOffset: metaStore.get(CLOCK_OFFSET_KEY),
       timerOwner: metaStore.get(TIMER_OWNER_KEY),
       deliveryProof: metaStore.get(DELIVERY_PROOF_KEY),
+      timerDependencies: metaStore.get("timerDependencies"),
+      workspaceObservation: metaStore.get("workspaceObservation"),
+      completionState: metaStore.get("completionState"), sourceAcknowledgements: metaStore.get("sourceAcknowledgements"),
+      projectionPending: metaStore.get(PROJECTION_PENDING_KEY), canonicalHead: metaStore.get(CANONICAL_HEAD_KEY),
+      outgoing: metaStore.get(OUTGOING_KEY),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
       taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
       durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
@@ -1845,13 +1451,9 @@
       && Number(storedSnapshot.revision) >= Number(canonical.snapshot.revision);
     if (!isStaleSuccess) return null;
     completeResolutionLegacyMigrations(metaStore, results.settings, pending);
-    claimMissingTimerOwner(
-      metaStore,
-      results.timerOwner?.value || null,
-      storedSnapshot,
-      results.commands || [],
-      canonical.timerOwnerClaim
-    );
+    const ownerPlan = installationOwnership(canonical, results);
+    canonical.assertCurrent?.();
+    workspaceTransaction.writeOwnership(metaStore, ownerPlan.ownershipWrites);
     const outcome = {
       applied: false,
       staleSuccess: true,
@@ -1920,30 +1522,15 @@
   }
 
   function applyResolutionTimerOwner(metaStore, results, canonical, queueIds, rebased) {
-    const owner = results.timerOwner?.value || null;
-    if (rebased.droppedTimerIds.includes(owner?.timerId)) {
-      metaStore.delete(TIMER_OWNER_KEY);
-      return;
-    }
-    const commands = canonical.reconciliation
-      ? rebased.queues.commands
-      : retainedCommands(
-        results.commands,
-        [...(queueIds.commands || []), ...rebased.droppedCommandIds],
-        canonical.promoteCommands
-      );
-    claimMissingTimerOwner(
-      metaStore,
-      owner,
-      canonical.snapshot,
-      commands,
-      canonical.timerOwnerClaim
-    );
+    const plan = installationOwnership(canonical, results, rebased);
+    canonical.assertCurrent?.();
+    workspaceTransaction.writeOwnership(metaStore, plan.ownershipWrites);
   }
 
   function applyPendingResolution(transaction, results, pending, canonical) {
     canonical.assertCurrent?.();
     assertAccountOwnership(canonical.snapshot, pending.userId);
+    assertResponseDisplayContext(results, pending.payload?.deviceId);
     const metaStore = transaction.objectStore(META_STORE);
     const staleOutcome = staleResolutionOutcome(metaStore, results, pending, canonical);
     if (staleOutcome) return staleOutcome;
@@ -1959,6 +1546,12 @@
       metaStore.delete(PROJECTION_PENDING_KEY);
     }
     applyResolutionTimerOwner(metaStore, results, canonical, queueIds, rebased);
+    if (rebased.timerDependencies) metaStore.put({ key: "timerDependencies", value: rebased.timerDependencies });
+    metaStore.put({ key: "workspaceObservation", value: retainedObservation(results.workspaceObservation?.value, rebased.queues) });
+    if (rebased.queues) metaStore.put({ key: DELIVERY_PROOF_KEY,
+      value: neverSentFromProof(results.deliveryProof?.value, rebased.queues, pending.payload) });
+    metaStore.put({ key: "displayHistory", value: rebased.projection?.history || canonical.snapshot.history });
+    metaStore.delete(OUTGOING_KEY);
     metaStore.delete(RESOLUTION_KEY);
     metaStore.delete(GATE_KEY);
     return { applied: true, staleSuccess: false, snapshot: canonical.snapshot, hlc, clockOffset };
@@ -1989,8 +1582,7 @@
     });
   }
 
-  function syncResponseRequests(transaction) {
-    const metaStore = transaction.objectStore(META_STORE);
+  function syncResponseRequests(transaction, metaStore = transaction.objectStore(META_STORE)) {
     return {
       gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
       snapshot: metaStore.get("snapshot"), hlc: metaStore.get("hlc"),
@@ -1999,12 +1591,23 @@
       outgoing: metaStore.get(OUTGOING_KEY),
       canonicalHead: metaStore.get(CANONICAL_HEAD_KEY),
       projectionPending: metaStore.get(PROJECTION_PENDING_KEY),
+      settings: metaStore.get("settings"), displayHistory: metaStore.get("displayHistory"),
+      timerDependencies: metaStore.get("timerDependencies"), deviceId: metaStore.get("deviceId"),
+      deviceSequence: metaStore.get("deviceSequence"), uuidV7: metaStore.get(UUID7_KEY),
+      workspaceGroups: metaStore.get("workspaceGroups"), completionRecords: metaStore.get("completionRecords"),
+      workspaceObservation: metaStore.get("workspaceObservation"),
       commands: transaction.objectStore(PENDING_STORE).getAll(),
       taskOperations: transaction.objectStore(TASK_PENDING_STORE).getAll(),
       durationOperations: transaction.objectStore(DURATION_PENDING_STORE).getAll(),
       autoStartOperations: transaction.objectStore(AUTO_START_PENDING_STORE).getAll(),
       selectedTaskOperations: transaction.objectStore(SELECTED_TASK_PENDING_STORE).getAll()
     };
+  }
+
+  function mutationContextRequests(transaction, requests = {}) {
+    // The same transaction reads the raw context and every retained queue before
+    // any metadata, migration, proof, gate, or operation callback may write.
+    return { ...syncResponseRequests(transaction), ...requests };
   }
 
   function validateSyncResponseApply(input, results, storedSnapshot) {
@@ -2019,31 +1622,49 @@
     }
   }
 
-  function plannedTimerOwner(input, results, rebased) {
-    const owner = results.timerOwner?.value || null;
-    if (rebased.droppedTimerIds.includes(owner?.timerId)) return { remove: true, value: null };
-    const commands = retainedCommands(
-      results.commands,
-      [...(input.queueIds.commands || []), ...rebased.droppedCommandIds],
-      rebased.queues?.commands || input.promoteCommands
-    );
-    return {
-      remove: false,
-      value: plannedMissingTimerOwner(owner, input.snapshot, commands, input.timerOwnerClaim)
-    };
+  function responseClaimPlan(input, results) {
+    const saved = results.outgoing?.value || null;
+    // Unclaimed snapshot installation cannot release a retained request. Network
+    // response callers supply the immutable claim captured before their send.
+    if (input.capturedClaim == null) return { applicable: !saved, clearClaim: false };
+    const captured = captureSyncClaim(input.capturedClaim, input.reconciliation?.sent,
+      input.expectedUserId, input.reconciliation?.deviceId);
+    const matches = workspaceCore.recordsEqual(saved, captured);
+    return { applicable: matches, clearClaim: matches };
+  }
+
+  function responseCompletionState(input, results, rebased) {
+    if (!input.reconciliation) return null;
+    const sendable = callWorkspaceCore("sync.batchPlan.v1", workspaceCore.batchRequest(
+      rebased.queues, input.reconciliation.deviceId, rebased.timerDependencies, "commands"
+    ));
+    return completionSelection({
+      selectedPhase: results.settings?.value?.selectedPhase || "focus", commands: results.commands,
+      acknowledgements: input.reconciliation.response.acknowledgements,
+      beforeHistory: results.snapshot.value.history, afterHistory: input.snapshot.history,
+      history: results.displayHistory?.value || results.snapshot.value.history,
+      canonicalTimer: input.snapshot.canonicalTimer?.id ? input.snapshot.canonicalTimer : null,
+      referenceTime: input.snapshot.serverTime, discardedCommandIds: rebased.droppedCommandIds,
+      pendingCommandIds: rebased.queues.commands.map((command) => command.id),
+      sendableCommandIds: sendable.selected.commands,
+      otherOperationIds: workspaceCore.DOMAINS.slice(1).flatMap((domain) => rebased.queues[domain].map((operation) => operation.id)),
+      completionState: results.completionState?.value
+    });
   }
 
   function planSyncResponse(input, results) {
     const storedSnapshot = results.snapshot?.value || null;
     validateSyncResponseApply(input, results, storedSnapshot);
+    const claim = responseClaimPlan(input, results);
+    if (!claim.applicable) return { kind: "ignored", outcome: {
+      applied: false, stale: true, claimChanged: true, snapshot: storedSnapshot
+    } };
+    assertResponseDisplayContext(results, input.reconciliation?.deviceId);
     const clockOffset = latestClockOffset(results.clockOffset?.value || null, input.clockOffset);
     if (Number(storedSnapshot?.revision || 0) > Number(input.snapshot.revision)) {
-      const owner = results.timerOwner?.value || null;
-      const ownerClaim = plannedMissingTimerOwner(
-        owner, storedSnapshot, results.commands || [], input.timerOwnerClaim
-      );
+      const ownerPlan = installationOwnership(input, results);
       return {
-        kind: "stale", clockOffset, ownerClaim,
+        kind: "stale", clockOffset, ownerPlan,
         outcome: { applied: false, stale: true, snapshot: storedSnapshot, clockOffset }
       };
     }
@@ -2054,9 +1675,15 @@
     const hlc = laterHlc(results.hlc?.value, responseHlc);
     const canonicalHead = sanitizeCanonicalHead(input.serverHlc)
       || sanitizeCanonicalHead(results.canonicalHead?.value) || null;
+    const settings = results.settings?.value || {};
+    const completion = responseCompletionState(input, results, rebased);
+    const selectedPhase = completion?.selection.phase ?? input.settings?.selectedPhase ?? settings.selectedPhase ?? "focus";
     return {
-      kind: "apply", rebased, clockOffset, hlc, canonicalHead,
-      owner: plannedTimerOwner(input, results, rebased),
+      kind: "apply", rebased, clockOffset, hlc, canonicalHead, completion, clearClaim: claim.clearClaim,
+      settings: { ...settings, selectedPhase },
+      observation: retainedObservation(results.workspaceObservation?.value, rebased.queues),
+      proof: neverSentFromProof(results.deliveryProof?.value, rebased.queues, input.reconciliation?.sent),
+      ownerPlan: installationOwnership(input, results, rebased),
       outcome: { applied: true, stale: false, snapshot: input.snapshot, hlc, clockOffset }
     };
   }
@@ -2067,12 +1694,13 @@
   }
 
   function persistSyncResponsePlan(transaction, input, plan) {
+    if (plan.kind === "ignored") return;
     const metaStore = transaction.objectStore(META_STORE);
     if (plan.clockOffset === input.clockOffset) {
       metaStore.put({ key: CLOCK_OFFSET_KEY, value: input.clockOffset });
     }
     if (plan.kind === "stale") {
-      if (plan.ownerClaim) metaStore.put({ key: TIMER_OWNER_KEY, value: plan.ownerClaim });
+      workspaceTransaction.writeOwnership(metaStore, plan.ownerPlan.ownershipWrites);
       return;
     }
     const pendingStore = transaction.objectStore(PENDING_STORE);
@@ -2088,33 +1716,39 @@
     persistReconciledQueue(transaction.objectStore(SELECTED_TASK_PENDING_STORE),
       input.queueIds.selectedTaskOperations, plan.rebased.queues?.selectedTaskOperations);
     metaStore.put({ key: "snapshot", value: input.snapshot });
+    if (plan.rebased.canonicalResponse) metaStore.put({ key: "canonicalResponse", value: plan.rebased.canonicalResponse });
+    if (plan.rebased.workspace) metaStore.put({ key: "reconciledWorkspace", value: plan.rebased.workspace });
+    if (plan.completion) metaStore.put({ key: "completionState", value: plan.completion });
     if (plan.canonicalHead) metaStore.put({ key: CANONICAL_HEAD_KEY, value: plan.canonicalHead });
     if (plan.rebased.projectionPending) {
       metaStore.put({ key: PROJECTION_PENDING_KEY, value: plan.rebased.projectionPending });
     } else {
       metaStore.delete(PROJECTION_PENDING_KEY);
     }
-    metaStore.delete(OUTGOING_KEY);
-    if (input.settings) metaStore.put({ key: "settings", value: input.settings });
-    if (plan.owner.remove) metaStore.delete(TIMER_OWNER_KEY);
-    else if (plan.owner.value) metaStore.put({ key: TIMER_OWNER_KEY, value: plan.owner.value });
+    if (plan.clearClaim) metaStore.delete(OUTGOING_KEY);
+    if (plan.settings) metaStore.put({ key: "settings", value: plan.settings });
+    if (plan.rebased.timerDependencies) metaStore.put({ key: "timerDependencies", value: plan.rebased.timerDependencies });
+    metaStore.put({ key: "workspaceObservation", value: plan.observation });
+    metaStore.put({ key: "displayHistory", value: plan.rebased.projection?.history || input.snapshot.history });
+    metaStore.put({ key: DELIVERY_PROOF_KEY, value: plan.proof });
+    workspaceTransaction.writeOwnership(metaStore, plan.ownerPlan.ownershipWrites);
     metaStore.put({ key: "hlc", value: plan.hlc });
   }
 
-  function retireProofAndPersistOutgoing(database, sent) {
+  function retireProofAndPersistOutgoing(database, sent, context = {}) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE], "readwrite");
+      const transaction = database.transaction(workspaceTransaction.STORES, "readwrite");
       const metaStore = transaction.objectStore(META_STORE);
-      const requests = {
-        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY),
-        snapshot: metaStore.get("snapshot"), proof: metaStore.get(DELIVERY_PROOF_KEY)
-      };
+      const requests = syncResponseRequests(transaction, metaStore);
       const results = {};
       let outcome = null;
       let failure = null;
       collectTransactionRequests(requests, results, () => {
+        context.assertCurrent?.();
+        assertAccountOwnership(results.snapshot?.value, context.ownerId);
         if (results.gate || results.resolution) throw new BootstrapGateError();
-        const proof = sanitizeDeliveryProof(results.proof?.value);
+        assertResponseDisplayContext(results, context.deviceId);
+        const proof = sanitizeDeliveryProof(results.deliveryProof?.value);
         const retired = removeProofIds(proof, sent);
         metaStore.put({ key: DELIVERY_PROOF_KEY, value: retired });
         metaStore.put({ key: OUTGOING_KEY, value: { sent: cloneOutgoing(sent), retiredAt: new Date().toISOString() } });
@@ -2132,6 +1766,11 @@
   }
 
   function applySyncResponseCoordinator(database, input) {
+    try {
+      if (input.capturedClaim != null) input = { ...input,
+        capturedClaim: captureSyncClaim(input.capturedClaim, input.reconciliation?.sent,
+          input.expectedUserId, input.reconciliation?.deviceId) };
+    } catch (error) { return Promise.reject(error); }
     if (input.clockOffset != null && !core.validClockSample(input.clockOffset)) {
       return Promise.reject(new ClockRangeError());
     }
@@ -2195,7 +1834,7 @@
       "readonly"
     );
     const metaStore = transaction.objectStore(META_STORE);
-    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations, proof, outgoing, head, projectionPending] = await Promise.all([
+    const [snapshot, hlc, clockOffset, commands, taskOperations, durationOperations, autoStartOperations, selectedTaskOperations, proof, outgoing, head, projectionPending, dependencies, observation, settings, deviceSequence, completionState, sourceAcknowledgements, deviceId] = await Promise.all([
       requestResult(metaStore.get("snapshot")),
       requestResult(metaStore.get("hlc")),
       requestResult(metaStore.get(CLOCK_OFFSET_KEY)),
@@ -2207,7 +1846,10 @@
       requestResult(metaStore.get(DELIVERY_PROOF_KEY)),
       requestResult(metaStore.get(OUTGOING_KEY)),
       requestResult(metaStore.get(CANONICAL_HEAD_KEY)),
-      requestResult(metaStore.get(PROJECTION_PENDING_KEY))
+      requestResult(metaStore.get(PROJECTION_PENDING_KEY)),
+      requestResult(metaStore.get("timerDependencies")), requestResult(metaStore.get("workspaceObservation")),
+      requestResult(metaStore.get("settings")), requestResult(metaStore.get("deviceSequence")),
+      requestResult(metaStore.get("completionState")), requestResult(metaStore.get("sourceAcknowledgements")), requestResult(metaStore.get("deviceId"))
     ]);
     return {
       snapshot: snapshot?.value || null,
@@ -2221,56 +1863,24 @@
       deliveryProof: sanitizeDeliveryProof(proof?.value),
       outgoing: outgoing?.value || null,
       canonicalHead: sanitizeCanonicalHead(head?.value),
-      projectionPending: sanitizeProjectionPending(projectionPending?.value)
+      projectionPending: projectionPending?.value ?? null,
+      timerDependencies: dependencies?.value ?? null, workspaceObservation: observation?.value ?? null,
+      settings: settings?.value ?? null, deviceSequence: deviceSequence?.value ?? null,
+      completionState: completionState?.value ?? null, sourceAcknowledgements: sourceAcknowledgements?.value ?? [], deviceId: deviceId?.value ?? null
     };
   }
 
   function migrateLegacySelectedTask(database, input) {
-    return legacySettingsMutation(database, SELECTED_TASK_PENDING_STORE, input, (transaction, settings) => {
-      if (settings.selectedTaskSyncBootstrapped === true) return { migrated: false, operation: null };
-      const { selectedTaskId, ...nextSettings } = settings;
-      const operation = typeof selectedTaskId === "string" && selectedTaskId
-        ? { id: input.operationId, taskId: selectedTaskId, occurredAt: LEGACY_EPOCH, hlcWallMs: 0, hlcCounter: 0 }
-        : null;
-      if (operation) transaction.objectStore(SELECTED_TASK_PENDING_STORE).add(operation);
-      transaction.objectStore(META_STORE).put({
-        key: "settings", value: { ...nextSettings, selectedTaskSyncBootstrapped: true }
-      });
+    return migrateLegacyPreferences(database, input).then((plan) => {
+      const operation = plan.operations.selectedTaskOperations[0] || null;
       return { migrated: operation !== null, operation };
     });
   }
 
   function migrateLegacyAutoStart(database, input) {
-    return legacySettingsMutation(database, AUTO_START_PENDING_STORE, input, (transaction, settings) => {
-      if (settings.autoStartSyncBootstrapped === true) return { migrated: false, operation: null };
-      const { autoStartBreaks, autoStartBreaksExplicit, ...nextSettings } = settings;
-      const operation = autoStartBreaks === true || autoStartBreaksExplicit === true
-        ? { id: input.operationId, enabled: autoStartBreaks === true,
-          occurredAt: LEGACY_EPOCH, hlcWallMs: 0, hlcCounter: 0 } : null;
-      if (operation) transaction.objectStore(AUTO_START_PENDING_STORE).add(operation);
-      transaction.objectStore(META_STORE).put({
-        key: "settings", value: { ...nextSettings, autoStartSyncBootstrapped: true }
-      });
+    return migrateLegacyPreferences(database, input).then((plan) => {
+      const operation = plan.operations.autoStartOperations[0] || null;
       return { migrated: operation !== null, operation };
-    });
-  }
-
-  function legacySettingsMutation(database, storeName, input, change) {
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, storeName], "readwrite");
-      const metaStore = transaction.objectStore(META_STORE);
-      const results = {};
-      const requests = { settings: metaStore.get("settings"), snapshot: metaStore.get("snapshot"),
-        gate: metaStore.get(GATE_KEY), resolution: metaStore.get(RESOLUTION_KEY) };
-      let result;
-      let failure;
-      collectTransactionRequests(requests, results, () => {
-        assertStorageContext(results, input);
-        result = change(transaction, results.settings?.value || {});
-      }, (error) => { failure = error; transaction.abort(); });
-      transaction.oncomplete = () => resolve(result);
-      transaction.onabort = () => reject(failure || transaction.error || new Error("Storage transaction aborted."));
-      transaction.onerror = () => {};
     });
   }
 
@@ -2299,6 +1909,9 @@
     const needsRotation = Array.isArray(capturedOperations)
       && capturedOperations.some(needsLegacyDurationCanonicalization);
     if (!needsRotation || !options.gateToken) return captured;
+    if (captured.deliveryState !== "neverSent") {
+      throw new BootstrapGateError("Possibly delivered legacy history request cannot be rewritten.");
+    }
     const gate = gateRecord?.value || null;
     if (gate?.token !== options.gateToken || captured.gateToken !== options.gateToken) {
       throw new BootstrapGateError("Bootstrap gate is owned by another tab.");
@@ -2318,20 +1931,28 @@
 
   function normalizeLegacyDurationOperations(database, options = {}) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction([META_STORE, DURATION_PENDING_STORE], "readwrite");
+      const transaction = database.transaction(workspaceTransaction.STORES, "readwrite");
       const metaStore = transaction.objectStore(META_STORE);
       const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
-      const requests = {
+      const requests = mutationContextRequests(transaction, {
         snapshot: metaStore.get("snapshot"),
+        proof: metaStore.get(DELIVERY_PROOF_KEY), outgoing: metaStore.get(OUTGOING_KEY),
         durations: durationStore.getAll(),
         gate: metaStore.get(GATE_KEY),
         resolution: metaStore.get(RESOLUTION_KEY)
-      };
+      });
       const results = {};
       const state = { changed: 0, resolution: null };
       let failure = null;
       collectTransactionRequests(requests, results, () => {
         assertStorageContext(results, options);
+        assertResponseDisplayContext(results, options.deviceId);
+        const outgoingIds = new Set((results.outgoing?.value?.sent?.durationOperations || []).map((item) => item.id));
+        const proven = new Set(sanitizeDeliveryProof(results.proof?.value).durationOperations);
+        if ((results.durations || []).some((item) => needsLegacyDurationCanonicalization(item)
+          && (!proven.has(item.id) || outgoingIds.has(item.id)))) {
+          throw new BootstrapGateError("Possibly delivered legacy duration cannot be rewritten.");
+        }
         canonicalizeLegacyDurationQueue(durationStore, results.durations || [], state);
         state.resolution = rotateLegacyDurationResolution(
           metaStore,
@@ -2362,19 +1983,22 @@
     UUID7_KEY,
     UUID7_MAX_TIMESTAMP_MS,
     UUID7_RANDOM_MAX,
+    callWorkspaceCore, recordsEqual: workspaceCore.recordsEqual, workspaceRecords, observeClock, sampleClock,
+    observeWorkspace, readWorkspace, projectWorkspace,
+    bootstrapWorkspace, completionSelection, planWorkspaceMutation, claimWorkspaceBatch, selectWorkspaceBatch,
+    savedClaimRecoveryQueues, savedClaimRecoveryMessage, discardUnrecoverableSavedClaim,
+    migrateLegacyPreferences, migrateLegacyDependencies, LegacyDependencyRecoveryError,
+    assertPersistedDisplayContext, PersistedDisplayContextError,
     acquireBootstrapGate,
     acquireBootstrapGateWithLegacyAutoStart,
     allocateClockRequestSequence,
-    allocateMutation,
     applyResolution,
     applySyncResponse,
     applySyncResponseCoordinator,
     planSyncResponse,
-    cancelAndClearTimer,
     captureResolution,
     clearBootstrapGate,
     finishAppliedPlan,
-    finishTimer,
     guardedMutation,
     invalidateForeignResolution,
     readAccountBinding,
@@ -2408,7 +2032,7 @@
     sanitizeCanonicalHead,
     sanitizeProjectionPending,
     cloneOutgoing,
-    outgoingMatchesStored,
+    outgoingMatchesStored, captureSyncClaim,
     DELIVERY_PROOF_KEY,
     OUTGOING_KEY,
     CANONICAL_HEAD_KEY,

@@ -207,15 +207,16 @@
     try {
       if (typeof operation !== "string" || !operation) return false;
       if (error === null || error === undefined) return false;
-      if (frontendErrorRateLimited(Date.now())) return false;
       if (!canReportFrontendError()) return false;
       const scope = typeof globalThis === "undefined" ? null : globalThis;
       if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
       const name = (error && typeof error.name === "string" && error.name) || "Error";
-      if (frontendErrorSuppressed(`${operation}\n${String(name).slice(0, 100)}`, Date.now())) {
+      const nowMs = Date.now();
+      if (frontendErrorSuppressed(`${operation}\n${String(name).slice(0, 100)}`, nowMs)) {
         noteFrontendErrorRepeat(operation);
         return false;
       }
+      if (frontendErrorRateLimited(nowMs)) return false;
       const wrapped = new Error(operation);
       wrapped.name = String(name).slice(0, 100) || "Error";
       scope.Sentry.captureException(wrapped, {

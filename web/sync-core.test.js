@@ -4,7 +4,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const productionSync = require("./sync-core.js");
 const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
-const sync = Object.freeze({ ...productionSync, ...legacyDecisionCompat });
+require("./test/official-core-fixture.js");
+const sync = Object.freeze({ ...productionSync, ...legacyDecisionCompat, ...require("./test/core-observation-fixture.js") });
 
 const defaults = { focus: 1_500_000, short_break: 300_000, long_break: 900_000 };
 
@@ -239,7 +240,8 @@ test("remote-state detection covers every synchronized canonical domain", () => 
   };
   assert.equal(sync.hasRemoteState(empty), false);
   for (const remote of [
-    { ...empty, canonicalTimer: { id: "timer-remote" } },
+    { ...empty, canonicalTimer: { id: "timer-remote", phase: "focus", status: "running",
+      plannedDurationMs: 1500000, elapsedAtAnchorMs: 0, anchorAt: "2026-07-22T12:00:00Z" } },
     { ...empty, history: [{ ...history("cancelled"), status: "cancelled" }] },
     { ...empty, tasks: [{ id: "task-remote", title: "Remote" }] },
     { ...empty, durationsMs: { ...defaults, short_break: 600_000 } },
@@ -562,10 +564,11 @@ test("server clock offset uses response midpoint and trusted now survives one-ho
   assert.equal(sync.trustedNow(fastLocal + 1_000, fast), serverTimeMs + 950);
   assert.equal(sync.trustedNow(slowLocal + 1_000, slow), serverTimeMs + 950);
   assert.equal(sync.trustedNow(fastLocal - 7_200_000, fast, serverTimeMs + 2_000), serverTimeMs + 2_000);
-  assert.throws(() => sync.serverClockOffset(serverTime, fastLocal + 1, fastLocal, 3), /timing/);
+  assert.throws(() => sync.serverClockOffset(serverTime, fastLocal + 1, fastLocal, 3), /response wall moved backwards/);
 });
 
-test("trusted clock rejects high uncertainty and invalid persisted tuples", () => {
+test("trusted clock rejects high uncertainty and invalid persisted tuples", async (t) => {
+  const { client } = await require("./test/p222-completion-fixture.js").fixture(t);
   const serverTime = "2026-07-22T12:30:00Z";
   const localTime = Date.parse(serverTime) + 3_600_000;
   assert.doesNotThrow(() => sync.serverClockOffset(serverTime, localTime, localTime + 60_000, 1));
@@ -578,7 +581,12 @@ test("trusted clock rejects high uncertainty and invalid persisted tuples", () =
     { offsetMs: 0, uncertaintyMs: 0, sampledAtWallMs: localTime, requestSequence: 1, receivedAtWallMs: localTime - 1 }
   ]) {
     assert.equal(sync.validClockSample(sample), false);
-    assert.throws(() => sync.trustedNow(localTime, sample), /outside/);
+    const observed = require("./test/official-core-fixture.js").storage.observeClock(
+      { clockOffset: sample }, { wallMs: localTime, monotonicMs: null });
+    assert.equal(observed.trustedNowMs, localTime, "invalid tuple never changes trusted time");
+    assert.deepEqual(observed.state.clockOffset, sample, "raw invalid observation is not silently rewritten");
+    await assert.rejects(require("./test/official-core-fixture.js").storage.saveClockOffset(client.use.database(), sample),
+      { name: "ClockRangeError" });
   }
   assert.equal(sync.trustedNow(localTime, null), localTime);
 });
@@ -593,22 +601,25 @@ test("legacy duration wire migration always uses Unix epoch sentinel", () => {
 
 test("timer batches order by HLC, device, and command ID, never device sequence", () => {
   const laterSequenceEarlierHlc = { ...command("command-a", 99), hlcWallMs: 100 };
-  laterSequenceEarlierHlc.deviceId = "device-1";
+  laterSequenceEarlierHlc.deviceId = "device-0";
   const earlierSequenceLaterHlc = { ...command("command-b", 1), deviceId: "device-1", hlcWallMs: 200 };
-  const tied = { ...command("command-c", 50), deviceId: "device-2", hlcWallMs: 200 };
+  const tied = { ...command("command-d", 50), deviceId: "device-2", hlcWallMs: 200 };
   const sameDeviceIdTie = { ...command("command-c", 50), deviceId: "device-1", hlcWallMs: 200 };
   assert.deepEqual(
     sync.sendableTimerCommands([tied, sameDeviceIdTie, earlierSequenceLaterHlc, laterSequenceEarlierHlc], 4).map((item) => item.id),
-    ["command-a", "command-b", "command-c", "command-c"]
+    ["command-a", "command-b", "command-c", "command-d"]
   );
   assert.deepEqual(
     [tied, sameDeviceIdTie, earlierSequenceLaterHlc, laterSequenceEarlierHlc].sort(sync.compareTimerCommands).map((item) => `${item.deviceId}:${item.id}`),
-    ["device-1:command-a", "device-1:command-b", "device-1:command-c", "device-2:command-c"]
+    ["device-0:command-a", "device-1:command-b", "device-1:command-c", "device-2:command-d"]
   );
   assert.deepEqual(
     sync.sendableTimerCommands([tied, earlierSequenceLaterHlc, laterSequenceEarlierHlc], 3).map((item) => item.id),
-    ["command-a", "command-b", "command-c"]
+    ["command-a", "command-b", "command-d"]
   );
+  assert.throws(() => sync.sendableTimerCommands([sameDeviceIdTie, { ...tied, id: sameDeviceIdTie.id }], 4), /duplicate/);
+  assert.throws(() => sync.sendableTimerCommands([{ ...laterSequenceEarlierHlc, deviceId: "device-1" }, earlierSequenceLaterHlc], 4),
+    /contradicts device sequence/);
 });
 
 test("timer comparator is transitive with missing legacy device IDs", () => {
@@ -688,7 +699,8 @@ test("sync batching, task acknowledgements, and optimistic task rebase preserve 
   const batch = sync.buildSyncBatch({ commands, taskOperations: [sentTask], durationOperations: durations });
 
   assert.equal(batch.commands.length, 256);
-  assert.equal(batch.durationOperations.length, 256);
+  assert.equal(batch.durationOperations.length, 255);
+  assert.equal(Object.values(batch).flat().length, 512);
   assert.equal(Object.hasOwn(batch.durationOperations[0], "ownerId"), false);
   const response = responseFor(batch, { tasks: [{ id: "task-sent", title: "Sent" }] });
   const local = {
@@ -708,7 +720,7 @@ test("sync batching, task acknowledgements, and optimistic task rebase preserve 
     { id: "task-later", title: "Later" },
     { id: "task-sent", title: "Sent" }
   ]);
-  assert.equal(rebased.pendingDurationOperations.length, 44);
+  assert.equal(rebased.pendingDurationOperations.length, 45);
 });
 
 test("sync batching covers protocol boundaries and multiple batches for every queue", () => {
@@ -1028,22 +1040,17 @@ test("generated break waits for applied finish while later independent start rem
   };
   const independent = { ...command("independent-start", 3), timerId: "independent-timer" };
   const commands = [finish, generated, independent];
+  const timerDependencies = [{ operationId: generated.id, dependsOnOperationId: finish.id }];
 
-  const sent = sync.buildSyncBatch({ commands });
+  const sent = sync.buildSyncBatch({ commands, timerDependencies });
   assert.deepEqual(sent.commands.map((item) => item.id), [finish.id]);
   assert.equal(Object.hasOwn(sent.commands[0], "dependsOnCommandId"), false);
-  const resolution = sync.createPendingResolution({
-    userId: "user-1",
-    requestId: "request-generated-break",
-    deviceId: "device-1",
-    expectedRevision: 0,
-    strategy: "merge",
-    commands,
-    taskOperations: [],
-    durationOperations: []
-  });
-  assert.deepEqual(resolution.payload.commands.map((item) => item.id), [finish.id]);
-  assert.deepEqual(resolution.queueIds.commands, [finish.id]);
+  const before = structuredClone(commands);
+  const resolution = require("./sync-storage.js").selectWorkspaceBatch({ commands, timerDependencies }, "device-1", "commands",
+    { perDomain: 4096, total: 8192 }, "merge");
+  assert.equal(resolution.plan.status, "blocked_dependency", "an atomic history request cannot capture a partial causal group");
+  assert.deepEqual(resolution.sent.commands, []);
+  assert.deepEqual(commands, before);
   assert.equal(Object.hasOwn(sync, "generatedBreakUpdates"), false);
 });
 

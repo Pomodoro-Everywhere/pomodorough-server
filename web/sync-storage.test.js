@@ -8,7 +8,7 @@ const path = require("node:path");
 const { indexedDB } = require("fake-indexeddb");
 const sync = require("./sync-core.js");
 const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
-const storage = require("./sync-storage.js");
+const storage = { ...require("./sync-storage.js"), ...require("./test/core-planner-storage-fixture.js") };
 const { SharedCore } = require("./shared-core.js");
 const sharedCoreBytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
 let sharedCorePromise = null;
@@ -173,7 +173,7 @@ test("projection.apply.v2 matches covered native reducers across synchronized do
     nowMs: Date.parse("2026-07-22T12:02:00Z"),
     sharedCore: coreInstance
   });
-  const authoritative = coreInstance.projectSynchronizedState({
+  const authoritative = coreInstance.call("workspace.project.v1", {
     base: {
       canonicalTimer: base.canonicalTimer,
       history: base.history,
@@ -182,9 +182,10 @@ test("projection.apply.v2 matches covered native reducers across synchronized do
       autoStartBreaks: base.autoStartBreaks,
       selectedTaskId: base.selectedTaskId
     },
-    pending: queues,
+    local: queues, canonicalHead: null, neverSent: {}, timerDependencies: [],
+    displayContext: { profile: "pwaStorage", projectionPending: null },
     now: "2026-07-22T12:02:00.000Z"
-  });
+  }).workspace;
 
   assert.deepEqual(projected, authoritative);
 });
@@ -288,7 +289,7 @@ function command(id, sequence, wall = sequence, counter = 0) {
 function taskOperation(id, wall = 1, counter = 0) {
   return {
     id,
-    taskId: `task-${id}`,
+    taskId: storage.callWorkspaceCore("task.identity.v1", { title: id }).id,
     type: "upsert",
     title: id,
     occurredAt: "2026-07-22T12:00:00Z",
@@ -351,7 +352,8 @@ function runningFocusSnapshot(revision = 0, timerId = "owned-focus") {
     status: "running",
     plannedDurationMs: 1_500_000,
     elapsedAtAnchorMs: 0,
-    anchorAt: "2026-07-22T12:00:00Z"
+    anchorAt: "2026-07-22T12:00:00Z",
+    lastIntent: { type: "start", commandId: "canonical-start-origin", occurredAt: "2026-07-22T12:00:00Z" }
   };
   return value;
 }
@@ -614,7 +616,7 @@ test("legacy auto-start migration stays valid under a far-future local clock", a
     nowMs: 9_000_000_000_000
   });
   assert.deepEqual(result.operation, {
-    id: "auto-start-future-clock",
+    id: result.operation.id,
     enabled: true,
     occurredAt: "1970-01-01T00:00:00.000Z",
     hlcWallMs: 0,
@@ -651,7 +653,7 @@ test("legacy selected-task migration queues only an explicit task and strips loc
         assert.deepEqual(second, { migrated: false, operation: null });
         const persisted = await storage.readSyncState(instance.database);
         assert.deepEqual(persisted.selectedTaskOperations, testCase.migrated ? [{
-          id: `selected-task-migration-${testCase.name}`,
+          id: first.operation.id,
           taskId: "task-legacy",
           occurredAt: "1970-01-01T00:00:00.000Z",
           hlcWallMs: 0,
@@ -667,7 +669,7 @@ test("legacy selected-task migration queues only an explicit task and strips loc
   }
 });
 
-test("legacy duration normalization repairs queue but freezes unowned captured payload", async (t) => {
+test("legacy duration normalization retains queue and unowned captured payload without non-delivery proof", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   const legacy = {
@@ -686,14 +688,17 @@ test("legacy duration normalization repairs queue but freezes unowned captured p
     }
   });
 
-  const before = (await storage.readBootstrapState(instance.database)).resolution;
-  assert.deepEqual(await storage.normalizeLegacyDurationOperations(instance.database), { changed: 1, resolution: before });
-  assert.deepEqual(await storage.normalizeLegacyDurationOperations(instance.database), { changed: 0, resolution: before });
+  const capturedBefore = (await storage.readBootstrapState(instance.database)).resolution;
+  const before = await storage.readSyncState(instance.database);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(storage.normalizeLegacyDurationOperations(instance.database), /Possibly delivered legacy duration/);
+    assert.deepEqual(await storage.readSyncState(instance.database), before);
+  }
   const queues = await storage.readQueues(instance.database);
-  assert.equal(queues.durationOperations.find((item) => item.id === legacy.id).occurredAt, "1970-01-01T00:00:00.000Z");
+  assert.deepEqual(queues.durationOperations.find((item) => item.id === legacy.id), legacy);
   assert.deepEqual(queues.durationOperations.find((item) => item.id === current.id), current);
   const resolution = (await storage.readBootstrapState(instance.database)).resolution;
-  assert.deepEqual(resolution, before);
+  assert.deepEqual(resolution, capturedBefore);
   assert.equal(resolution.payload.durationOperations[0].occurredAt, "2026-07-22T12:30:00Z");
   assert.deepEqual(resolution.payload.durationOperations[1], current);
 });
@@ -708,6 +713,7 @@ test("legacy duration capture normalizes queue before freezing request payload",
     hlcCounter: 0
   };
   await seedQueues(instance.database, { durationOperations: [legacy] });
+  await seedMeta(instance.database, { deliveryProof: { ...sync.emptyNeverSent(), durationOperations: [legacy.id] } });
   await acquire(instance.database);
 
   const pending = await capture(instance.database);
@@ -746,7 +752,7 @@ test("resolution replacement requires owner and fresh request ID", async (t) => 
   assert.equal(replaced.payload.requestId, "request-fresh");
 });
 
-test("legacy captured payload rotates request ID only for current gate owner", async (t) => {
+test("proven never-sent legacy capture rotates request ID only for current gate owner", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   const legacy = {
@@ -758,13 +764,15 @@ test("legacy captured payload rotates request ID only for current gate owner", a
   const captured = {
     userId: "user-1",
     gateToken: "tab-owner",
+    deliveryState: "neverSent",
     payload: { requestId: "request-old", durationOperations: [legacy] },
     queueIds: { durationOperations: [legacy.id] }
   };
   await seedQueues(instance.database, { durationOperations: [legacy] });
   await seedMeta(instance.database, {
     bootstrapGate: { token: "tab-owner", acquiredAtMs: 1, expiresAtMs: 10_000 },
-    bootstrapResolution: captured
+    bootstrapResolution: captured,
+    deliveryProof: { ...sync.emptyNeverSent(), durationOperations: [legacy.id] }
   });
 
   await assert.rejects(storage.normalizeLegacyDurationOperations(instance.database, {
@@ -782,7 +790,7 @@ test("legacy captured payload rotates request ID only for current gate owner", a
   assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution, result.resolution);
 });
 
-test("stale gate takeover can rotate legacy captured payload before retry", async (t) => {
+test("stale gate takeover does not authorize rewriting a possibly delivered legacy capture", async (t) => {
   const instance = await fixture();
   t.after(() => instance.close());
   const legacy = {
@@ -806,19 +814,13 @@ test("stale gate takeover can rotate legacy captured payload before retry", asyn
   const takeover = await acquire(instance.database, "tab-new", 11, 1_000);
   assert.equal(takeover.acquired, true);
   assert.equal(takeover.resolution.gateToken, "tab-new");
-  const normalized = await storage.normalizeLegacyDurationOperations(instance.database, {
+  const before = await storage.readSyncState(instance.database);
+  await assert.rejects(storage.normalizeLegacyDurationOperations(instance.database, {
     gateToken: "tab-new",
     replacementRequestId: "request-new"
-  });
-  assert.equal(normalized.resolution.payload.requestId, "request-new");
-  assert.equal(normalized.resolution.payload.durationOperations[0].occurredAt, "1970-01-01T00:00:00.000Z");
-  assert.equal((await storage.validatePendingForSend(instance.database, {
-    pending: normalized.resolution,
-    currentUserId: "user-1",
-    gateToken: "tab-new",
-    nowMs: 12,
-    leaseMs: 1_000
-  })).payload.requestId, "request-new");
+  }), /Possibly delivered legacy duration/);
+  assert.deepEqual(await storage.readSyncState(instance.database), before);
+  assert.deepEqual((await storage.readBootstrapState(instance.database)).resolution.payload, captured.payload);
 });
 
 test("server clock offset persists across restart and rejects stale or invalid samples", async (t) => {
@@ -966,6 +968,7 @@ test("ambiguous legacy false omits bootstrap field and preserves canonical true"
   });
   const migration = await storage.migrateLegacyAutoStart(instance.database, {
     operationId: "auto-start-ambiguous-false",
+    expectedUserId: "user-1",
     nowMs: 100
   });
   assert.deepEqual(migration, { migrated: false, operation: null });
@@ -1077,7 +1080,7 @@ test("UUIDv7 mutation allocation persists across domains, restart, and clock rol
   });
   await seedMeta(instance.database, {
     deviceSequence: 0,
-    hlc: { wallMs: 100, counter: 0 }
+    hlc: { wallMs: 100, counter: 0 }, settings: { selectedPhase: "short_break" }
   });
   const first = await storage.allocateMutation(instance.database, {
     storeName: "pending",
@@ -1113,7 +1116,7 @@ test("UUIDv7 mutation allocation persists across domains, restart, and clock rol
     nowMs: 98,
     withDeviceSequence: false,
     withUuidV7: true,
-    build: ({ id, wallMs, counter }) => selectedTaskOperation(id, null, wallMs, counter)
+    build: ({ id, wallMs, counter }) => selectedTaskOperation(id, secondOperation.taskId, wallMs, counter)
   });
 
   const identifiers = [first.id, secondOperation.id, afterRestart.id, selectedTask.id];
@@ -1189,7 +1192,7 @@ test("projection failure rolls back every synchronized mutation domain", async (
         ...item,
         nowMs: 200,
         withUuidV7: true,
-        sharedCore: { projectSynchronizedState() { throw new Error("projection unavailable"); } }
+        sharedCore: { call() { throw new Error("projection unavailable"); } }
       }), /projection unavailable/);
 
       assert.deepEqual(await storage.readQueues(instance.database), beforeQueues);
@@ -1209,7 +1212,8 @@ test("UUIDv7 allocator reconstructs missing state without rewriting UUIDv4 queue
   const existingV7 = storage.uuid7FromParts(100, 9n);
   await seedQueues(instance.database, {
     commands: [legacy],
-    taskOperations: [taskOperation(existingV7, 100, 1)]
+    taskOperations: [{ ...taskOperation(existingV7, 100, 1),
+      taskId: (await authoritativeCore()).taskIdentity({ title: taskOperation(existingV7).title }).id }]
   });
   await seedMeta(instance.database, {
     deviceSequence: 1,
@@ -1398,7 +1402,7 @@ test("durable timer projection failure aborts before queue clock or UUID mutatio
     snapshot: runningFocusSnapshot(),
     deviceSequence: 7,
     hlc: { wallMs: 100, counter: 2 },
-    [storage.UUID7_KEY]: { timestampMs: 100, random: "0000000000000000001" }
+    [storage.UUID7_KEY]: storage.uuid7FromParts(100, 1n)
   });
   const beforeQueues = await storage.readQueues(instance.database);
   const beforeState = await storage.readCanonicalState(instance.database);
@@ -1415,16 +1419,16 @@ test("durable timer projection failure aborts before queue clock or UUID mutatio
     nowMs: 500,
     observedElapsedMs: 1_500_000,
     withUuidV7: true,
-    sharedCore: { projectSynchronizedState() { throw new Error("injected core failure"); } }
+    sharedCore: { call(operation, input) {
+      if (operation === "workspace.completionMutation.v1") throw new Error("injected core failure");
+      return storage.callWorkspaceCore(operation, input);
+    } }
   }), /injected core failure/);
 
   assert.deepEqual(await storage.readQueues(instance.database), beforeQueues);
   assert.deepEqual(await storage.readCanonicalState(instance.database), beforeState);
   assert.equal(await readMeta(instance.database, "deviceSequence"), 7);
-  assert.deepEqual(await readMeta(instance.database, storage.UUID7_KEY), {
-    timestampMs: 100,
-    random: "0000000000000000001"
-  });
+  assert.equal(await readMeta(instance.database, storage.UUID7_KEY), storage.uuid7FromParts(100, 1n));
 });
 
 test("two tabs racing Finish persist exactly one transition", async (t) => {
@@ -1513,7 +1517,7 @@ test("UUIDv7 finish and generated break reserve one atomic consecutive batch", a
     selectedPhase: "short_break"
   });
 
-  const firstBody = JSON.stringify(sync.buildSyncBatch({ commands: result.commands }));
+  const firstBody = JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database)));
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   assert.equal(
@@ -1530,10 +1534,11 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
     timerId: "generated-break",
     phase: "short_break",
     plannedDurationMs: 300_000,
-    dependsOnCommandId: "finish-source"
+    dependsOnCommandId: "finish-source", generatedBreak: true,
+    occurredAt: "2026-07-22T12:25:00Z"
   };
   await seedMeta(instance.database, {
-    snapshot: snapshot(0),
+    snapshot: runningFocusSnapshot(0, "source-focus"),
     deviceSequence: 4,
     hlc: { wallMs: 100, counter: 4 },
     timerOwner: {
@@ -1543,14 +1548,16 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
       leaseExpiresAtMs: 2_000
     }
   });
-  await seedQueues(instance.database, { commands: [start] });
+  const source = { ...command("finish-source", 3, 100, 3), type: "finish", timerId: "source-focus",
+    occurredAt: "2026-07-22T12:25:00Z" };
+  await seedQueues(instance.database, { commands: [source, start] });
 
   const result = await storage.cancelAndClearTimer(instance.database, {
     expectedUserId: "user-1",
     timerId: "generated-break",
     phase: "short_break",
     deviceId: "device-owner",
-    nowMs: 500,
+    nowMs: Date.parse("2026-07-22T12:25:10Z"),
     observedElapsedMs: 10_000,
     withUuidV7: true,
     entropy: fixedEntropy("09")
@@ -1560,7 +1567,10 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
   assert.deepEqual(result.commands.map((item) => item.type), ["cancel", "clear"]);
   assert.deepEqual(result.commands.map((item) => item.deviceSequence), [5, 6]);
   assert.deepEqual(result.commands.map((item) => item.hlcCounter), [0, 1]);
-  assert.deepEqual(result.commands.map((item) => item.dependsOnCommandId), ["finish-source", "finish-source"]);
+  assert.deepEqual((await readMeta(instance.database, "timerDependencies")).slice(-2), [
+    { operationId: result.commands[0].id, dependsOnOperationId: start.id },
+    { operationId: result.commands[1].id, dependsOnOperationId: result.commands[0].id }
+  ]);
   assert.deepEqual(
     result.commands.map((item) => storage.uuid7Parts(item.id).randomValue),
     [9n, 10n]
@@ -1572,7 +1582,7 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
   instance.database = await openDatabase(instance.name);
   const persisted = (await storage.readQueues(instance.database)).commands
     .sort((left, right) => left.deviceSequence - right.deviceSequence);
-  assert.deepEqual(persisted.map((item) => item.type), ["start", "cancel", "clear"]);
+  assert.deepEqual(persisted.map((item) => item.type), ["finish", "start", "cancel", "clear"]);
   assert.deepEqual(await storage.cancelAndClearTimer(instance.database, {
     expectedUserId: "user-1",
     timerId: "generated-break",
@@ -1582,7 +1592,7 @@ test("cancel and clear reserve one restart-safe atomic batch", async (t) => {
     observedElapsedMs: 20_000,
     cancelCommandId: "cancel-retry",
     clearCommandId: "clear-retry"
-  }), { transitioned: false, reason: "stale", commands: [] });
+  }), { transitioned: false, reason: "invalidTransition", commands: [] });
 });
 
 test("two tabs allocate unique timer sequences and monotonic timer/task HLC tuples", async (t) => {
@@ -1622,8 +1632,8 @@ test("two tabs allocate unique timer sequences and monotonic timer/task HLC tupl
   assert.equal(new Set(tuples).size, 4);
   assert.deepEqual(tuples.sort(), ["100:1", "100:2", "100:3", "100:4"]);
   const queues = await storage.readQueues(instance.database);
-  assert.deepEqual(queues.commands.map((item) => item.id).sort(), ["command-a", "command-b"]);
-  assert.deepEqual(queues.taskOperations.map((item) => item.id).sort(), ["task-a", "task-b"]);
+  assert.deepEqual(queues.commands.map((item) => item.id).sort(), commands.map((item) => item.id).sort());
+  assert.deepEqual(queues.taskOperations.map((item) => item.id).sort(), tasks.map((item) => item.id).sort());
 });
 
 test("mutation allocation rejects unsafe sequence and counter atomically", async () => {
@@ -1639,7 +1649,7 @@ test("mutation allocation rejects unsafe sequence and counter atomically", async
       nowMs: item.nowMs,
       withDeviceSequence: item.withDeviceSequence,
       build: ({ wallMs, counter, deviceSequence }) => command(item.name, deviceSequence || 1, wallMs, counter)
-    }), { name: "ClockRangeError" });
+    }), /JavaScript-safe integer|overflow/);
     const queues = await storage.readQueues(instance.database);
     assert.deepEqual(queues.commands, []);
     assert.deepEqual((await storage.readCanonicalState(instance.database)).hlc, item.hlc);
@@ -1678,11 +1688,12 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
     })
   });
   assert.equal(started.deviceSequence, 1);
+  const ownedTimerId = started.timerId;
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
     expectedUserId: "user-1",
-    timerId: "owned-focus",
+    timerId: ownedTimerId,
     deviceId: "device-owner",
     tabId: "tab-owner",
     nowMs: 900,
@@ -1693,7 +1704,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
     database,
     {
       expectedUserId: "user-1",
-      timerId: "owned-focus",
+      timerId: ownedTimerId,
       phase: "focus",
       deviceId,
       tabId,
@@ -1708,7 +1719,7 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
       breakPhase: "short_break",
       breakDurationMs: 300_000,
       breakCommandId: `break-${suffix}`,
-      breakTimerId: `break-timer-${suffix}`
+      breakTimerId: "33333333-3333-4333-8333-333333333333"
     }
   );
   const livePeer = await completion(staleTab, "device-owner", "tab-peer", 1_500, "live-peer");
@@ -1718,8 +1729,11 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
     commands: [],
     retryAtMs: 1_900
   });
-  const foreignObserver = await completion(staleTab, "device-observer", "tab-observer", 2_000, "observer");
+  const priorOwner = await readMeta(instance.database, "timerOwner");
+  await seedMeta(instance.database, { timerOwner: { ...priorOwner, deviceId: "device-observer" } });
+  const foreignObserver = await completion(staleTab, "device-owner", "tab-observer", 2_000, "observer");
   assert.deepEqual(foreignObserver, { transitioned: false, reason: "not_owner", commands: [] });
+  await seedMeta(instance.database, { timerOwner: priorOwner });
   const reclaimed = await completion(instance.database, "device-owner", "tab-reopened", 2_000, "reclaimed");
   assert.equal(reclaimed.transitioned, true);
   assert.deepEqual(reclaimed.commands.map((item) => item.type), ["finish", "start"]);
@@ -1731,11 +1745,11 @@ test("focus ownership lease blocks live peers and allows same-device restart rec
     .sort((left, right) => left.deviceSequence - right.deviceSequence);
   assert.deepEqual(persisted.map((item) => item.type), ["start", "finish", "start"]);
   assert.deepEqual(persisted.map((item) => item.deviceSequence), [1, 2, 3]);
-  assert.equal(persisted.filter((item) => item.type === "finish" && item.timerId === "owned-focus").length, 1);
+  assert.equal(persisted.filter((item) => item.type === "finish" && item.timerId === ownedTimerId).length, 1);
   assert.equal(persisted.filter((item) => item.type === "start" && item.phase === "short_break").length, 1);
 
   const retry = await completion(instance.database, "device-owner", "tab-reopened", 2_100, "retry");
-  assert.deepEqual(retry, { transitioned: false, reason: "stale", commands: [] });
+  assert.deepEqual(retry, { transitioned: false, reason: "staleTimer", commands: [] });
   assert.equal((await storage.readQueues(instance.database)).commands.length, 3);
 });
 
@@ -1827,13 +1841,13 @@ test("bootstrap install never migrates missing owner from remote canonical start
     leaseMs: 1_000,
     manual: false,
     requireOwner: true,
-    nowMs: 10_000,
+    nowMs: Date.parse("2026-07-22T12:25:00Z"), localNowMs: 10_000,
     observedElapsedMs: 1_500_000,
     finishCommandId: "finish-remote-observer",
     breakPhase: "short_break",
     breakDurationMs: 300_000,
     breakCommandId: "break-remote-observer",
-    breakTimerId: "break-timer-remote-observer"
+    breakTimerId: "33333333-3333-4333-8333-333333333334"
   });
   assert.deepEqual(outcome, { transitioned: false, reason: "not_owner", commands: [] });
   assert.deepEqual((await storage.readQueues(instance.database)).commands, []);
@@ -1937,7 +1951,7 @@ test("automatic completion atomically claims upgraded same-device timer after re
     breakPhase: "short_break",
     breakDurationMs: 300_000,
     breakCommandId: "break-restart-race",
-    breakTimerId: "break-timer-restart-race"
+    breakTimerId: "33333333-3333-4333-8333-333333333335"
   });
   assert.equal(outcome.transitioned, true);
   assert.deepEqual(outcome.commands.map((item) => item.type), ["finish", "start"]);
@@ -1968,7 +1982,7 @@ test("manual non-owner finish atomically claims focus and creates provisional br
     leaseMs: 1_000,
     manual: true,
     requireOwner: false,
-    nowMs: Date.parse("2026-07-22T12:25:00Z"),
+    nowMs: Date.parse("2026-07-22T12:10:00Z"),
     localNowMs: 500,
     observedElapsedMs: 500,
     autoStartBreaks: true,
@@ -1976,21 +1990,21 @@ test("manual non-owner finish atomically claims focus and creates provisional br
     breakPhase: "short_break",
     breakDurationMs: 300_000,
     breakCommandId: "break-manual-claim",
-    breakTimerId: "break-timer-manual-claim"
+    breakTimerId: "33333333-3333-4333-8333-333333333336"
   });
   assert.equal(result.transitioned, true);
-  assert.equal(result.commands[1].dependsOnCommandId, "finish-manual-claim");
+  assert.equal(result.commands[1].dependsOnCommandId, result.commands[0].id);
   assert.equal(result.commands[1].generatedBreak, true);
   assert.equal(await storage.renewTimerOwnership(instance.database, {
     expectedUserId: "user-1",
-    timerId: "break-timer-manual-claim",
+    timerId: "33333333-3333-4333-8333-333333333336",
     deviceId: "device-observer",
     tabId: "tab-observer",
     nowMs: 600,
     leaseMs: 1_000
   }), true);
-  assert.deepEqual(sync.buildSyncBatch({ commands: result.commands }).commands.map((item) => item.id), [
-    "finish-manual-claim"
+  assert.deepEqual(sync.buildSyncBatch(await storage.readSyncState(instance.database)).commands.map((item) => item.id), [
+    result.commands[0].id
   ]);
 });
 
@@ -2025,22 +2039,22 @@ test("generated break survives lost response and promotes only after applied fin
     breakPhase: "short_break",
     breakDurationMs: 300_000,
     breakCommandId: "break-dependent-start",
-    breakTimerId: "break-dependent-timer"
+    breakTimerId: "33333333-3333-4333-8333-333333333337"
   });
-  const firstBody = JSON.stringify(sync.buildSyncBatch({ commands: result.commands }));
+  const firstBody = JSON.stringify(sync.buildSyncBatch(await storage.readSyncState(instance.database)));
   instance.database.close();
   instance.database = await openDatabase(instance.name);
   const reloaded = await storage.readSyncState(instance.database);
   assert.equal(JSON.stringify(sync.buildSyncBatch(reloaded)), firstBody);
-  assert.deepEqual(JSON.parse(firstBody).commands.map((item) => item.id), ["finish-dependent-source"]);
+  assert.deepEqual(JSON.parse(firstBody).commands.map((item) => item.id), [result.commands[0].id]);
 
-  const acknowledgements = [{ commandId: "finish-dependent-source", outcome: "applied", reason: "" }];
+  const acknowledgements = [{ commandId: result.commands[0].id, outcome: "applied", reason: "" }];
   const canonical = snapshot(1, "user-1", "2026-07-22T12:31:00Z");
   canonical.canonicalTimer = null;
   canonical.history = [{
     id: "history-finish-dependent-source",
     timerId: "owned-focus",
-    commandId: "finish-dependent-source",
+    commandId: result.commands[0].id,
     phase: "focus",
     status: "completed",
     plannedDurationMs: 1_500_000,
@@ -2053,7 +2067,7 @@ test("generated break survives lost response and promotes only after applied fin
     snapshot: canonical,
     hlc: { wallMs: 500, counter: 1 },
     queueIds: {
-      commands: ["finish-dependent-source"],
+      commands: [result.commands[0].id],
       taskOperations: [],
       durationOperations: [],
       autoStartOperations: [],
@@ -2062,11 +2076,12 @@ test("generated break survives lost response and promotes only after applied fin
     reconciliation: { sent, response, deviceId: "device-owner" }
   });
   const promoted = (await storage.readQueues(instance.database)).commands;
-  assert.deepEqual(promoted.map((item) => item.id), ["break-dependent-start"]);
-  assert.equal(Object.hasOwn(promoted[0], "dependsOnCommandId"), false);
-  assert.equal(Object.hasOwn(promoted[0], "generatedBreak"), false);
-  assert.deepEqual(sync.buildSyncBatch({ commands: promoted }).commands.map((item) => item.id), [
-    "break-dependent-start"
+  assert.deepEqual(promoted.map((item) => item.id), [result.commands[1].id]);
+  assert.equal(promoted[0].dependsOnCommandId, result.commands[0].id);
+  assert.equal(promoted[0].generatedBreak, true);
+  assert.deepEqual((await storage.readSyncState(instance.database)).timerDependencies, []);
+  assert.deepEqual(sync.buildSyncBatch(await storage.readSyncState(instance.database)).commands.map((item) => item.id), [
+    result.commands[1].id
   ]);
 });
 
@@ -2096,23 +2111,24 @@ test("provisional chain matrix survives restart and response loss", async () => 
             const instance = await fixture();
             try {
               const source = {
-                ...command(`00-source-${caseIndex}`, 1),
+                ...command(`00-source-${caseIndex}`, 1, Date.parse("2026-07-22T12:25:00Z")),
                 timerId: `focus-${caseIndex}`,
                 type: "finish",
-                phase: "focus"
+                phase: "focus", occurredAt: "2026-07-22T12:25:00Z"
               };
               const dependents = types.map((type, index) => ({
-                ...command(`1${index}-dependent-${caseIndex}`, index + 2),
+                ...command(`1${index}-dependent-${caseIndex}`, index + 2, source.hlcWallMs, index + 1),
                 timerId: `break-${caseIndex}`,
                 type,
                 phase: "short_break",
                 plannedDurationMs: 300_000,
                 observedElapsedMs: index * 1_000,
+                occurredAt: new Date(source.hlcWallMs + index * 1000).toISOString(),
                 dependsOnCommandId: source.id,
                 ...(index === 0 ? { generatedBreak: true } : {})
               }));
               await seedMeta(instance.database, {
-                snapshot: snapshot(0),
+                snapshot: runningFocusSnapshot(0, source.timerId),
                 hlc: { wallMs: 100, counter: 0 }
               });
               await seedQueues(instance.database, { commands: [source, ...dependents] });
@@ -2123,13 +2139,15 @@ test("provisional chain matrix survives restart and response loss", async () => 
                   selectedTaskOperations: []
                 }
               });
+              await storage.migrateLegacyDependencies(instance.database, { expectedUserId: "user-1", deviceId: "device-1",
+                nowMs: source.hlcWallMs });
               if (restartBeforeHttp) {
                 instance.database.close();
                 instance.database = await openDatabase(instance.name);
               }
               let pending = (await storage.readQueues(instance.database)).commands;
               assert.deepEqual(
-                sync.buildSyncBatch({ commands: pending }).commands.map((item) => item.id),
+                sync.buildSyncBatch(await storage.readSyncState(instance.database)).commands.map((item) => item.id),
                 [source.id],
                 label
               );
@@ -2156,13 +2174,13 @@ test("provisional chain matrix survives restart and response loss", async () => 
               ];
               canonical.canonicalTimer = null;
               const acknowledgements = [{ commandId: source.id, outcome, reason: "" }];
-              const sent = sync.buildSyncBatch({ commands: pending });
+              const sent = sync.buildSyncBatch(await storage.readSyncState(instance.database));
               const response = reconciliationResponse(canonical, acknowledgements);
               if (responseLoss) {
                 instance.database.close();
                 instance.database = await openDatabase(instance.name);
                 pending = (await storage.readQueues(instance.database)).commands;
-                assert.deepEqual(sync.buildSyncBatch({ commands: pending }), sent, label);
+                assert.deepEqual(sync.buildSyncBatch(await storage.readSyncState(instance.database)), sent, label);
               }
               await storage.applySyncResponse(instance.database, {
                 expectedUserId: "user-1",
@@ -2193,8 +2211,8 @@ test("provisional chain matrix survives restart and response loss", async () => 
                 assert.ok(after.every((item) =>
                   item.phase === expectedPhase
                     && item.plannedDurationMs === canonical.durationsMs[expectedPhase]
-                    && !Object.hasOwn(item, "dependsOnCommandId")
-                    && !Object.hasOwn(item, "generatedBreak")
+                    && item.dependsOnCommandId === source.id
+                    && (item.id !== dependents[0].id || item.generatedBreak === true)
                 ), label);
               }
             } finally {
@@ -2207,159 +2225,61 @@ test("provisional chain matrix survives restart and response loss", async () => 
   }
 });
 
+function publicFinishResponse(current, original, sent, outcome) {
+  const projection = outcome === "applied" ? current.core.call("workspace.project.v1", {
+    base: require("./workspace-core.js").base(original),
+    local: { ...sync.emptyNeverSent(), commands: sent.commands.map((item) => ({ ...item, deviceId: "shared-device" })) },
+    canonicalHead: null, neverSent: {}, timerDependencies: [],
+    displayContext: { profile: "pwaStorage", projectionPending: null },
+    now: original.serverTime
+  }).workspace : original;
+  const canonical = { ...original, ...projection, revision: original.revision + 1 };
+  return { canonical, response: { ...canonical,
+    acknowledgements: sent.commands.map((item) => ({ commandId: item.id, outcome, reason: "" })),
+    taskAcknowledgements: [], durationAcknowledgements: [], autoStartAcknowledgements: [], selectedTaskAcknowledgements: [],
+    serverHlcWallMs: Date.parse(original.serverTime), serverHlcCounter: 100 } };
+}
+
 test("sync response planner rereads peer dependency chains at transaction time", async (t) => {
-  const instance = await fixture();
-  const peer = await instance.secondConnection();
-  t.after(() => {
-    peer.close();
-    return instance.close();
+  for (const outcome of ["applied", "rejected"]) await t.test(outcome, async (context) => {
+    const current = await require("./test/account-ownership-fixture.js").fixture(context, "running");
+    const client = current.stale, database = client.use.database();
+    const original = (await storage.readSyncState(database)).snapshot;
+    assert.equal(await client.use.finishTimer(false), true);
+    const source = client.state.pending.find((item) => item.type === "finish");
+    const generatedStart = client.state.pending.find((item) => item.generatedBreak);
+    const issued = client.use.captureAccountContext();
+    const { claim } = await storage.claimWorkspaceBatch(database, { ...issued, deviceId: "shared-device", localNowMs: Date.now() });
+    assert.deepEqual(claim.sent.commands.map((item) => item.id), [source.id]);
+    const peer = await current.open("account-A");
+    await peer.use.reloadPersistedState();
+    assert.equal(await peer.use.issueCommand("pause"), true);
+    assert.equal(await peer.use.issueCommand("resume"), true);
+    const all = await storage.readSyncState(database);
+    const children = all.commands.filter((item) => ["pause", "resume"].includes(item.type));
+    const observed = [];
+    const trackingCore = { reconcileSynchronizedState(input) {
+      observed.push(structuredClone(input.local.commands));
+      return current.core.reconcileSynchronizedState(input);
+    } };
+    const { canonical, response } = publicFinishResponse(current, original, claim.sent, outcome);
+    await storage.applySyncResponse(database, { ...issued, expectedUserId: issued.ownerId, capturedClaim: claim,
+      snapshot: canonical, serverHlc: { wallMs: response.serverHlcWallMs, counter: 100 },
+      hlc: { wallMs: response.serverHlcWallMs, counter: 100 },
+      queueIds: Object.fromEntries(Object.entries(claim.sent).map(([domain, items]) => [domain, items.map((item) => item.id)])),
+      timerOwnerClaim: { deviceId: "shared-device", tabId: client.use.tabId(), nowMs: Date.now(), leaseMs: 60000 },
+      reconciliation: { sent: claim.sent, response, deviceId: "shared-device", sharedCore: trackingCore } });
+    const after = await storage.readSyncState(database);
+    assert.equal(observed.length, 1);
+    assert.deepEqual(observed[0], all.commands);
+    assert.deepEqual(after.commands, outcome === "applied" ? [generatedStart, ...children] : []);
+    assert.deepEqual(after.timerDependencies, outcome === "applied" ? [
+      { operationId: children[0].id, dependsOnOperationId: generatedStart.id },
+      { operationId: children[1].id, dependsOnOperationId: children[0].id }
+    ] : []);
+    assert.deepEqual(sync.buildSyncBatch(after).commands.map((item) => item.id), outcome === "applied" ? [generatedStart.id] : []);
+    assert.equal(after.outgoing, null);
   });
-  const sourceWallMs = Date.parse("2026-07-22T12:25:00Z");
-  const source = {
-    ...command("finish-source", 1, sourceWallMs),
-    timerId: "focus-source",
-    type: "finish"
-  };
-  const rejectedSource = {
-    ...command("finish-rejected", 2, sourceWallMs, 1),
-    timerId: "focus-rejected",
-    type: "finish"
-  };
-  const generatedStart = {
-    ...command("break-start", 3, sourceWallMs, 2),
-    timerId: "break-timer",
-    phase: "short_break",
-    plannedDurationMs: 300_000,
-    dependsOnCommandId: source.id,
-    generatedBreak: true
-  };
-  const rejectedStart = {
-    ...command("break-rejected", 4, sourceWallMs, 3),
-    timerId: "break-rejected-timer",
-    phase: "short_break",
-    plannedDurationMs: 300_000,
-    dependsOnCommandId: rejectedSource.id,
-    generatedBreak: true
-  };
-  await seedMeta(instance.database, {
-    snapshot: snapshot(0),
-    hlc: { wallMs: 100, counter: 0 }
-  });
-  await seedQueues(instance.database, {
-    commands: [source, rejectedSource, generatedStart, rejectedStart]
-  });
-  await seedMeta(instance.database, {
-    deliveryProof: {
-      commands: [source.id, rejectedSource.id, generatedStart.id, rejectedStart.id],
-      taskOperations: [], durationOperations: [], autoStartOperations: [],
-      selectedTaskOperations: []
-    }
-  });
-  const captured = await storage.readSyncState(instance.database);
-  const sent = sync.buildSyncBatch(captured);
-  assert.deepEqual(sent.commands.map((item) => item.id), [source.id, rejectedSource.id]);
-
-  const survivingPeerCommands = ["pause", "resume"].map((type, index) => ({
-    ...command(`peer-${type}`, index + 5, Date.parse(`2026-07-22T12:3${index + 1}:00Z`)),
-    timerId: generatedStart.timerId,
-    type,
-    phase: "short_break",
-    plannedDurationMs: 300_000,
-    dependsOnCommandId: source.id
-  }));
-  const droppedPeerCommands = ["pause", "resume"].map((type, index) => ({
-    ...command(`peer-rejected-${type}`, index + 7, Date.parse(`2026-07-22T12:3${index + 3}:00Z`)),
-    timerId: rejectedStart.timerId,
-    type,
-    phase: "short_break",
-    plannedDurationMs: 300_000,
-    dependsOnCommandId: rejectedSource.id
-  }));
-  await seedQueues(peer, { commands: [...survivingPeerCommands, ...droppedPeerCommands] });
-  await seedMeta(instance.database, {
-    deliveryProof: {
-      commands: [source.id, rejectedSource.id, generatedStart.id, rejectedStart.id,
-        ...survivingPeerCommands.map((item) => item.id),
-        ...droppedPeerCommands.map((item) => item.id)],
-      taskOperations: [], durationOperations: [], autoStartOperations: [],
-      selectedTaskOperations: []
-    }
-  });
-
-  const canonical = snapshot(1);
-  canonical.history = [{
-    id: "history-finish-source",
-    timerId: source.timerId,
-    commandId: source.id,
-    phase: "focus",
-    status: "completed",
-    plannedDurationMs: 1_500_000,
-    completedAt: "2026-07-22T12:25:00Z"
-  }];
-  const response = {
-    ...canonical,
-    acknowledgements: [
-      { commandId: source.id, outcome: "applied", reason: "" },
-      { commandId: rejectedSource.id, outcome: "rejected", reason: "conflict" }
-    ],
-    taskAcknowledgements: [],
-    durationAcknowledgements: [],
-    autoStartAcknowledgements: [],
-    selectedTaskAcknowledgements: [],
-    serverHlcWallMs: Date.parse(canonical.serverTime),
-    serverHlcCounter: 0
-  };
-  const capturedRebase = storage.reconcileState({
-    queues: captured,
-    sent,
-    response,
-    deviceId: "device-1",
-    deliveryProof: captured.deliveryProof || null
-  });
-  const observedTransactionCommands = [];
-  const coreInstance = await authoritativeCore();
-  const trackingCore = {
-    reconcileSynchronizedState(input) {
-      observedTransactionCommands.push(input.local.commands.map((item) => item.id));
-      return coreInstance.reconcileSynchronizedState(input);
-    },
-    projectSynchronizedState: (input) => coreInstance.projectSynchronizedState(input)
-  };
-
-  await storage.applySyncResponse(instance.database, {
-    expectedUserId: "user-1",
-    snapshot: canonical,
-    hlc: { wallMs: 500, counter: 0 },
-    queueIds: {
-      commands: [source.id, rejectedSource.id],
-      taskOperations: [],
-      durationOperations: [],
-      autoStartOperations: [],
-      selectedTaskOperations: []
-    },
-    retainedQueues: capturedRebase.queues,
-    dropCommandIds: capturedRebase.droppedTimerOperationIds,
-    dropTimerIds: capturedRebase.droppedTimerIds,
-    reconciliation: { sent, response, deviceId: "device-1", sharedCore: trackingCore }
-  });
-
-  const surviving = (await storage.readQueues(instance.database)).commands
-    .sort(sync.compareTimerCommands);
-  assert.deepEqual(surviving.map((item) => item.id), [
-    generatedStart.id,
-    ...survivingPeerCommands.map((item) => item.id)
-  ]);
-  assert.ok(surviving.every((item) => !Object.hasOwn(item, "dependsOnCommandId")));
-  assert.deepEqual(sync.buildSyncBatch({ commands: surviving }).commands.map((item) => item.id), [
-    generatedStart.id,
-    ...survivingPeerCommands.map((item) => item.id)
-  ]);
-  assert.equal(observedTransactionCommands.length, 1);
-  assert.deepEqual([...observedTransactionCommands[0]].sort(), [
-    source.id, rejectedSource.id, generatedStart.id, rejectedStart.id,
-    ...survivingPeerCommands.map((item) => item.id),
-    ...droppedPeerCommands.map((item) => item.id)
-  ].sort());
 });
 
 test("normal sync survives every restart checkpoint", async (t) => {
@@ -2422,7 +2342,7 @@ test("ignored finish drops provisional break and rebases to newer canonical time
       leaseExpiresAtMs: 2_000
     }
   });
-  await storage.finishTimer(instance.database, {
+  const finished = await storage.finishTimer(instance.database, {
     expectedUserId: "user-1",
     timerId: "owned-focus",
     phase: "focus",
@@ -2439,10 +2359,10 @@ test("ignored finish drops provisional break and rebases to newer canonical time
     breakPhase: "long_break",
     breakDurationMs: 900_000,
     breakCommandId: "break-ignored-start",
-    breakTimerId: "break-ignored-timer"
+    breakTimerId: "33333333-3333-4333-8333-333333333338"
   });
   const pending = (await storage.readQueues(instance.database)).commands;
-  const acknowledgements = [{ commandId: "finish-ignored-source", outcome: "ignored", reason: "superseded" }];
+  const acknowledgements = [{ commandId: finished.commands[0].id, outcome: "ignored", reason: "superseded" }];
   const canonical = snapshot(1, "user-1", "2026-07-22T12:31:00Z");
   canonical.canonicalTimer = {
     id: "remote-newer",
@@ -2454,14 +2374,14 @@ test("ignored finish drops provisional break and rebases to newer canonical time
   };
   const sent = sync.buildSyncBatch({ commands: pending });
   const response = reconciliationResponse(canonical, acknowledgements);
-  assert.deepEqual(sent.commands.map((item) => item.id), ["finish-ignored-source"]);
+  assert.deepEqual(sent.commands.map((item) => item.id), [finished.commands[0].id]);
   assert.doesNotThrow(() => sync.validateAcknowledgements(response, sent));
   await storage.applySyncResponse(instance.database, {
     expectedUserId: "user-1",
     snapshot: canonical,
     hlc: { wallMs: 500, counter: 1 },
     queueIds: {
-      commands: ["finish-ignored-source"],
+      commands: [finished.commands[0].id],
       taskOperations: [],
       durationOperations: [],
       autoStartOperations: [],
@@ -2473,7 +2393,7 @@ test("ignored finish drops provisional break and rebases to newer canonical time
   assert.equal((await storage.readCanonicalState(instance.database)).snapshot.canonicalTimer.id, "remote-newer");
   assert.equal(await storage.renewTimerOwnership(instance.database, {
     expectedUserId: "user-1",
-    timerId: "break-ignored-timer",
+    timerId: "33333333-3333-4333-8333-333333333338",
     deviceId: "device-owner",
     tabId: "tab-owner",
     nowMs: 600,
@@ -2495,14 +2415,14 @@ test("offline cached owner can append locally before a different account discard
   assert.equal(cached.snapshot.user.id, "user-old");
   await storage.clearBootstrapGate(instance.database, "offline-tab");
 
-  await storage.allocateMutation(instance.database, {
+  const offline = await storage.allocateMutation(instance.database, {
     expectedUserId: "user-old",
     storeName: "pending",
     nowMs: 101,
     withDeviceSequence: true,
     build: ({ wallMs, counter, deviceSequence }) => command("offline", deviceSequence, wallMs, counter)
   });
-  assert.deepEqual((await storage.readQueues(instance.database)).commands.map((item) => item.id).sort(), ["cached", "offline"]);
+  assert.deepEqual((await storage.readQueues(instance.database)).commands.map((item) => item.id).sort(), ["cached", offline.id].sort());
 
   assert.deepEqual(storage.bootstrapPlan({
     localOwnerId: "user-old",
@@ -2514,7 +2434,7 @@ test("offline cached owner can append locally before a different account discard
   await acquire(instance.database, "new-account-tab", 2_001, 1_000);
   const pending = await capture(instance.database, resolutionInput("keep_remote", "user-new"), "new-account-tab");
   assert.deepEqual(pending.payload.commands, []);
-  assert.deepEqual(pending.queueIds.commands.sort(), ["cached", "offline"]);
+  assert.deepEqual(pending.queueIds.commands.sort(), ["cached", offline.id].sort());
 });
 
 test("oversized bootstrap request is not persisted and keep-remote recovery remains available", async (t) => {
@@ -2526,9 +2446,9 @@ test("oversized bootstrap request is not persisted and keep-remote recovery rema
 
   await assert.rejects(capture(instance.database, resolutionInput("merge")), {
     name: "ResolutionLimitError",
-    field: "taskOperations",
+    field: "oversized",
     count: 4097,
-    limit: 4096
+    limit: 8192
   });
   const blocked = await storage.readBootstrapState(instance.database);
   assert.equal(blocked.resolution, null);
@@ -2732,7 +2652,7 @@ test("keep-remote reconciliation excludes captured rows and preserves later mult
   assert.deepEqual(await storage.readQueues(instance.database), inMemory.queues);
 });
 
-test("resolution apply reconciles peer dependency inserted after capture", async (t) => {
+test("resolution apply reconciles a direct-parent peer dependency inserted after an atomic source capture", async (t) => {
   const instance = await fixture();
   const peer = await instance.secondConnection();
   t.after(() => {
@@ -2743,7 +2663,7 @@ test("resolution apply reconciles peer dependency inserted after capture", async
   const source = {
     ...command("bootstrap-finish", 1, sourceWallMs),
     timerId: "bootstrap-focus",
-    type: "finish"
+    type: "finish", occurredAt: "2026-07-22T12:25:00Z"
   };
   const generatedStart = {
     ...command("bootstrap-break", 2, sourceWallMs, 1),
@@ -2751,9 +2671,10 @@ test("resolution apply reconciles peer dependency inserted after capture", async
     phase: "short_break",
     plannedDurationMs: 300_000,
     dependsOnCommandId: source.id,
-    generatedBreak: true
+    generatedBreak: true, occurredAt: "2026-07-22T12:25:00Z"
   };
-  await seedQueues(instance.database, { commands: [source, generatedStart] });
+  await seedMeta(instance.database, { snapshot: runningFocusSnapshot(0, source.timerId) });
+  await seedQueues(instance.database, { commands: [source] });
   await acquire(instance.database);
   const pending = await capture(instance.database, resolutionInput("merge"));
   assert.deepEqual(pending.payload.commands.map((item) => item.id), [source.id]);
@@ -2763,9 +2684,10 @@ test("resolution apply reconciles peer dependency inserted after capture", async
     type: "pause",
     phase: "short_break",
     plannedDurationMs: 300_000,
-    dependsOnCommandId: source.id
+    dependsOnCommandId: generatedStart.id, occurredAt: "2026-07-22T12:25:00Z"
   };
-  await seedQueues(peer, { commands: [peerPause] });
+  await seedQueues(peer, { commands: [generatedStart, peerPause] });
+  await seedMeta(peer, { deliveryProof: { ...sync.emptyNeverSent(), commands: [generatedStart.id, peerPause.id] } });
   const canonical = snapshot(4);
   canonical.history = [{
     id: "bootstrap-focus-history", timerId: source.timerId, commandId: source.id,
@@ -2788,8 +2710,10 @@ test("resolution apply reconciles peer dependency inserted after capture", async
 
   const commands = (await storage.readQueues(instance.database)).commands.sort(sync.compareTimerCommands);
   assert.deepEqual(commands.map((item) => item.id), [generatedStart.id, peerPause.id]);
-  assert.ok(commands.every((item) => !Object.hasOwn(item, "dependsOnCommandId")));
-  assert.deepEqual(sync.buildSyncBatch({ commands }).commands.map((item) => item.id), [generatedStart.id, peerPause.id]);
+  const after = await storage.readSyncState(instance.database);
+  assert.deepEqual(after.timerDependencies, [{ operationId: peerPause.id, dependsOnOperationId: generatedStart.id }]);
+  assert.deepEqual(commands.find((item) => item.id === peerPause.id), peerPause);
+  assert.deepEqual(sync.buildSyncBatch(after).commands.map((item) => item.id), [generatedStart.id]);
 });
 
 test("merge resolution atomically commits combined canonical history and tasks", async (t) => {

@@ -161,6 +161,10 @@ func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, err := s.authenticate(r)
 		if err != nil {
+			if !isUnauthorized(err) {
+				s.internalAPIError(w, r, "authenticate request", err)
+				return
+			}
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -217,11 +221,14 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 	}
 	db, err := s.store.OpenExistingUser(r.Context(), userID)
 	if err != nil {
-		return principal{}, store.ErrUnauthorized
+		return principal{}, err
 	}
 	defer db.Close()
 	info, err := store.Authenticate(r.Context(), db, credential.TokenHash, expectedKind, time.Now())
-	if err != nil || !authn.EqualString(info.Profile.ID, userID) {
+	if err != nil {
+		return principal{}, err
+	}
+	if !authn.EqualString(info.Profile.ID, userID) {
 		return principal{}, store.ErrUnauthorized
 	}
 	return principal{

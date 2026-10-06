@@ -34,7 +34,10 @@ function snapshot(userId, timerStatus = null) {
     serverTime: new Date(nowMs).toISOString(), history: [], tasks: [],
     canonicalTimer: timerStatus ? {
       id: "shared-timer", phase: "focus", status: timerStatus, plannedDurationMs: 1_500_000,
-      elapsedAtAnchorMs: 0, anchorAt: new Date(nowMs).toISOString(), startedByDeviceId: "shared-device"
+      elapsedAtAnchorMs: timerStatus === "completed" ? 1_500_000 : 0,
+      anchorAt: new Date(nowMs).toISOString(), startedByDeviceId: "shared-device",
+      lastIntent: { type: timerStatus === "completed" ? "finish" : timerStatus === "paused" ? "pause" : "start",
+        commandId: "shared-origin-command", deviceId: "shared-device", occurredAt: new Date(nowMs).toISOString() }
     } : null,
     durationsMs: { focus: 1_500_000, short_break: 300_000, long_break: 900_000 },
     autoStartBreaks: true, selectedTaskId: null
@@ -140,7 +143,7 @@ async function switchOwner(peer, userId = "account-B", timerStatus = null) {
     serverHlcWallMs: nowMs, serverHlcCounter: 0
   };
   delete payload.user;
-  await peer.use.acceptBootstrapResponse(payload, pending, null);
+  await peer.use.acceptBootstrapResponse(payload, pending, null, peer.use.captureAccountContext());
   assert.equal(peer.state.localOwnerId, ownerId(userId));
   assert.equal(peer.use.controlsBlocked(), false);
 }

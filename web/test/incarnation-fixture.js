@@ -14,8 +14,9 @@ function ownerId(id, generation = 1) {
   return sync.accountOwnerId(accountUser(id, generation));
 }
 
-function captureAccountContext(state, host = {}) {
-  return stateModule.create({ state, external: { host, syncCore: sync, syncStorage: storage }, use: {} })
+function captureAccountContext(state, host = {}, database = null) {
+  return stateModule.create({ state, external: { host, syncCore: sync, syncStorage: storage },
+    use: { database: typeof database === "function" ? database : () => database } })
     .captureAccountContext();
 }
 

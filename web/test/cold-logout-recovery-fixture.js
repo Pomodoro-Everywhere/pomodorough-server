@@ -77,7 +77,8 @@ function createTab(indexedDB, localStorage, connections, core) {
   const syncStorage = { ...storage };
   let runtime;
   const root = {
-    ...host, ...modules, PomodoroughAppTest: { disableAutoStart: true },
+    ...host, ...modules, PomodoroughAccountOperation: require("../account-operation.js"),
+    PomodoroughAppTest: { disableAutoStart: true },
     PomodoroughStorage: syncStorage, PomodoroughSync: syncCore,
     PomodoroughSharedCore: { SharedCore: { load: async () => core } },
     PomodoroughAppView: headlessView(calls),

@@ -39,9 +39,10 @@ function fixture(overrides = {}) {
     normalizeLegacyDurationOperations: async () => {}, readQueues: async () => ({}),
     ...overrides.syncStorage
   };
+  const database = {};
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(current, host),
-    database: () => ({}), compareDurationOperations: () => 0,
+    database: () => database, compareDurationOperations: () => 0,
     reapplyRetargetToPending: () => {}, rebuildOptimisticState: () => {},
     stopCompletionAlert: () => {}, closeRevisionStream: () => {},
     quarantineOwnerState: () => {}, render: () => {}, renderSyncStatus: () => calls.push("status"),

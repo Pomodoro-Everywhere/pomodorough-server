@@ -1,3 +1,3 @@
 package server
 
-const readinessSharedCoreMetadataDigest = "dda37751d701286ea3af2def0baf8b0cdc4e4dd7e728d132671c727cb7c893c6"
+const readinessSharedCoreMetadataDigest = "4a2ff23d11ef532949f895ae2d91463de2f9c82828c06e8b03c38ab6bf087ca1"

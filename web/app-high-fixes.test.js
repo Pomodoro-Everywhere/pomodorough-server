@@ -167,15 +167,23 @@ function syncFixture(postMutation) {
     readSyncState: async () => ({ snapshot: { user: current.user }, commands: [{ id: "command-1" }] }),
     reconcileState: () => { throw new Error("must not reconcile a rejected batch"); },
     retireProofAndPersistOutgoing: async () => ({ proof: null }),
-    applySyncResponse: async () => { calls.push("apply"); return { applied: true }; }
+    applySyncResponse: async () => { calls.push("apply"); return { applied: true }; },
+    captureSyncClaim: incarnationFixture.storage.captureSyncClaim,
+    claimWorkspaceBatch: async () => {
+      const sent = incarnationFixture.sync.emptyNeverSent();
+      return { plan: { status: "planned" }, claim: { ownerId: incarnationFixture.sync.accountOwnerId(current.user),
+        sent, body: JSON.stringify({ deviceId: current.deviceId, lastRevision: current.revision, ...sent }),
+        retiredAt: new Date().toISOString() }, proof: {} };
+    }
   };
+  const database = {};
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(current, host),
     clone: structuredClone, normalizeTimer: (value) => value,
     emptyTimer: (phase, duration) => ({ phase, duration }), selectedDurationMs: () => 1_500_000,
     normalizeDurationsMs: (value) => value, selectedPhaseAfterCommandAcknowledgements: (phase) => phase,
     snapshotValue: (value) => value, settingsValue: (value) => value, tabId: () => "tab-1",
-    reloadPersistedState: async () => {}, database: () => ({}),
+    reloadPersistedState: async () => {}, database: () => database,
     setInFlightDurationOperationIds: () => {}, stopCompletionAlert: () => {},
     closeRevisionStream: () => {}, quarantineOwnerState: () => {},
     render: () => calls.push("render"), renderSyncStatus: () => calls.push("status"),

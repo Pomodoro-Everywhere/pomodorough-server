@@ -103,14 +103,14 @@ test("composition facade contains wiring while deep modules own side effects and
   assert.doesNotMatch(composition, /call\(application, "clearLocalData"\)/);
   assert.doesNotMatch(composition, /\.textContent\s*=|\.hidden\s*=/);
   assert.match(storage, /this\.host\.indexedDB\.open\(DB_NAME, DB_VERSION\)/);
-  assert.match(state, /this\.syncStorage\.projectState\(/);
+   assert.match(state, /this\.syncStorage\.projectWorkspace\(/);
   assert.match(sync, /this\.syncStorage\.reconcileState\(/);
-  assert.match(bootstrap, /this\.syncStorage\.bootstrapPlan\(/);
+   assert.match(bootstrap, /this\.syncStorage\.bootstrapWorkspace\(/);
   assert.match(bootstrap, /this\.syncStorage\.validatePendingForSend\(/);
   assert.match(session, /new this\.host\.EventSource\("\/api\/v1\/stream"\)/);
   assert.match(session, /"\/api\/v1\/(?:me|account|auth\/logout)"/);
-  assert.match(session, /async clearPendingLogoutData\(identity\)/);
-  assert.match(session, /async initializeSession\(\)/);
+  assert.match(session, /async clearPendingLogoutData\(identity, issuer\)/);
+  assert.match(session, /async initializeSession\(issuer = this\.use\.captureAccountContext\(\)\)/);
   assert.match(view, /document\.createElement\(/);
   assert.match(view, /renderDeviceMark\(\)/);
 });
@@ -165,14 +165,14 @@ test("revision stream reuses one bound callback and isolates streams per runtime
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     close() { this.closed = true; }
   }
-  const createActions = (emit) => browserModules[5].create({
-    state: { sessionIdentityValidated: true, authenticated: true, user: incarnationFixture.accountUser("user-1") },
-    external: {
+  const createActions = (emit) => {
+    const state = { sessionIdentityValidated: true, authenticated: true, user: incarnationFixture.accountUser("user-1") };
+    return browserModules[5].create({ state, external: {
       host: { EventSource: FakeEventSource, navigator: { onLine: true } },
       syncCore: incarnationFixture.sync, syncStorage: {}, elements: {}
-    },
-    use: { needsBootstrapResolution: () => false }, emit
-  });
+    }, use: { needsBootstrapResolution: () => false,
+      captureAccountContext: () => incarnationFixture.captureAccountContext(state) }, emit });
+  };
   const revisions = [];
   const first = createActions((name, value) => revisions.push([name, value]));
   const second = createActions(() => {});
@@ -190,13 +190,13 @@ test("HTML loads declared modules before composition and service worker caches e
   const worker = source("sw.js");
   let priorIndex = -1;
   const scriptVersions = {
-    "app.js": 39,
-    "app-state.js": 3,
-    "app-storage.js": 4,
-    "app-actions.js": 6, "app-sync.js": 3, "app-bootstrap.js": 3,
-    "app-session.js": 3, "app-view.js": 4
+    "app.js": 44,
+    "app-state.js": 8,
+    "app-storage.js": 13,
+    "app-actions.js": 10, "app-sync.js": 8, "app-bootstrap.js": 6,
+    "app-session.js": 7, "app-view.js": 10
   };
-  for (const file of ["app-runtime.js", ...moduleFiles, "app.js"]) {
+  for (const file of ["app-runtime.js", "account-operation.js", ...moduleFiles, "app.js"]) {
     const version = scriptVersions[file] || 1;
     const asset = `/${file}?v=${version}`;
     const index = html.indexOf(asset);

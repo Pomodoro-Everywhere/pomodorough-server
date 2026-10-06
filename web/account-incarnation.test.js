@@ -71,7 +71,7 @@ const metadataMutations = [
   ["normalization", (current, fence) => storage.normalizeLegacyDurationOperations(current.use.database(), fence)],
   ["legacy auto start", (current, fence) => storage.migrateLegacyAutoStart(current.use.database(), { ...fence, nowMs })],
   ["legacy selection", (current, fence) => storage.migrateLegacySelectedTask(current.use.database(), { ...fence, nowMs })],
-  ["local cleanup", (current) => current.use.clearLocalData(current.use.cleanupIdentity())]
+  ["local cleanup", (current) => current.use.clearLocalData(current.use.cleanupIdentity(), current.use.captureDatabaseContext())]
 ];
 
 for (const [name, mutate] of metadataMutations) {
@@ -89,6 +89,9 @@ for (const [name, mutate] of metadataMutations) {
 test("P2.21 same-incarnation lower revision cannot remove any acknowledged queue", async (context) => {
   const { stale, core } = await lifecycle(context);
   await fillQueues(stale, core);
+  const { claim } = await storage.claimWorkspaceBatch(stale.use.database(), {
+    ...stale.use.captureAccountContext(), deviceId: stale.state.deviceId, localNowMs: Date.now()
+  });
   const sent = stale.use.currentSyncBatch();
   const response = canonical(1, 1);
   const acknowledgements = ["acknowledgements", "taskAcknowledgements", "durationAcknowledgements", "autoStartAcknowledgements", "selectedTaskAcknowledgements"];
@@ -98,7 +101,7 @@ test("P2.21 same-incarnation lower revision cannot remove any acknowledged queue
     }));
   });
   const before = await storage.readQueues(stale.use.database());
-  await stale.use.acceptSyncResponse(response, sent, ownerId(publicId), null);
+  await stale.use.acceptSyncResponse(response, sent, ownerId(publicId), null, stale.use.captureAccountContext(), claim);
   assert.deepEqual(await storage.readQueues(stale.use.database()), before);
   assert.equal(stale.state.revision, 20);
 });
@@ -109,12 +112,15 @@ test("P2.21 fresh revision-one acknowledgements remove applied and duplicate wor
   await confirmRecreation(peer);
   for (const delivery of ["first delivery", "duplicate replay"]) {
     await peer.use.issueTaskOperation("upsert", core.taskIdentity({ title: delivery }));
+    const { claim } = await storage.claimWorkspaceBatch(peer.use.database(), {
+      ...peer.use.captureAccountContext(), deviceId: peer.state.deviceId, localNowMs: Date.now()
+    });
     const sent = structuredClone(peer.use.currentSyncBatch());
     const response = canonical(2, 1);
     response.taskAcknowledgements = sent.taskOperations.map((operation) => ({ operationId: operation.id, outcome: "applied", reason: "" }));
     await peer.use.issueTaskOperation("upsert", core.taskIdentity({ title: `Concurrent ${delivery}` }));
     const concurrent = peer.state.pendingTaskOperations.at(-1).id;
-    await peer.use.acceptSyncResponse(response, sent, ownerId(publicId, 2), null);
+    await peer.use.acceptSyncResponse(response, sent, ownerId(publicId, 2), null, peer.use.captureAccountContext(), claim);
     assert.equal(peer.state.revision, 1);
     assert.deepEqual(peer.state.pendingTaskOperations.map((operation) => operation.id), [concurrent]);
   }
@@ -137,6 +143,9 @@ test("P2.21 fresh lower revision removes acknowledgements from all five queues o
   await discoverRecreation(peer);
   await confirmRecreation(peer);
   await fillQueues(peer, core);
+  const { claim } = await storage.claimWorkspaceBatch(peer.use.database(), {
+    ...peer.use.captureAccountContext(), deviceId: peer.state.deviceId, localNowMs: Date.now()
+  });
   const sent = peer.use.currentSyncBatch();
   const response = canonical(2, 1);
   const fields = ["acknowledgements", "taskAcknowledgements", "durationAcknowledgements", "autoStartAcknowledgements", "selectedTaskAcknowledgements"];
@@ -145,7 +154,7 @@ test("P2.21 fresh lower revision removes acknowledgements from all five queues o
       [index === 0 ? "commandId" : "operationId"]: operation.id, outcome: "applied", reason: ""
     }));
   });
-  await peer.use.acceptSyncResponse(response, sent, ownerId(publicId, 2), null);
+  await peer.use.acceptSyncResponse(response, sent, ownerId(publicId, 2), null, peer.use.captureAccountContext(), claim);
   assert.equal(peer.state.revision, 1);
   for (const name of queueNames) assert.deepEqual((await storage.readQueues(peer.use.database()))[name], [], name);
 });
@@ -190,7 +199,8 @@ test("P2.21 late bootstrap and sync payloads cannot cross incarnation boundary",
   const before = await dump(peer.use.database());
   delayed.resolve(canonical(1, 21));
   await assert.rejects(preview, storage.AccountOwnershipError);
-  await assert.rejects(peer.use.acceptSyncResponse(canonical(1, 21), peer.use.currentSyncBatch(), ownerId(publicId, 2), null), /incarnation/);
+  await assert.rejects(peer.use.acceptSyncResponse(canonical(1, 21), peer.use.currentSyncBatch(), ownerId(publicId, 2), null,
+    peer.use.captureAccountContext()), /incarnation/);
   assert.deepEqual(await dump(peer.use.database()), before);
 });
 

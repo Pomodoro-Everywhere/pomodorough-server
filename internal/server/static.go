@@ -177,7 +177,12 @@ func (s *Server) authenticateWeb(r *http.Request) (principal, error) {
 	if r.Header.Get("Authorization") != "" {
 		return principal{}, errors.New("web session required")
 	}
-	return s.authenticate(r)
+	identity, err := s.authenticate(r)
+	if err != nil && !isUnauthorized(err) {
+		s.logger.Error("authenticate web request", "error", err)
+		reportInternalErrorToErrorMonitoring(err, r, "authenticate web request")
+	}
+	return identity, err
 }
 
 func (s *Server) openWebFile(relative string) (*os.File, os.FileInfo, error) {

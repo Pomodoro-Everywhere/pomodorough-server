@@ -57,7 +57,7 @@ test("P2.21 stale cleanup and sign-out cannot erase unconfirmed replacement work
   assert.deepEqual(await dump(peer.use.database()), before);
   stale.use.markPendingLogout();
   const marker = [...memory];
-  await assert.rejects(stale.use.clearLocalData(stale.use.cleanupIdentity()), storage.AccountOwnershipError);
+  await assert.rejects(stale.use.clearLocalData(stale.use.cleanupIdentity(), stale.use.captureDatabaseContext()), storage.AccountOwnershipError);
   assert.deepEqual(await dump(peer.use.database()), before);
   assert.deepEqual([...memory], marker);
 });
@@ -109,7 +109,8 @@ test("P2.21 mutation CSRF retry discovers recreation without resending old work"
     syncRequests += 1;
     return { ok: false, status: 403, clone: () => ({ json: async () => ({ error: "invalid CSRF token" }) }) };
   };
-  await assert.rejects(stale.use.postMutation("/api/v1/sync", JSON.stringify(queues), ownerId(publicId)), /account changed/i);
+  await assert.rejects(stale.use.postMutation("/api/v1/sync", JSON.stringify(queues), ownerId(publicId),
+    stale.use.captureAccountContext()), /account changed/i);
   assert.equal(syncRequests, 1);
   assert.equal(stale.state.user.accountIncarnation, accountUser(publicId, 2).accountIncarnation);
   assert.deepEqual(await storage.readQueues(stale.use.database()), queues);
@@ -145,6 +146,9 @@ test("P2.21 old revision stream events and errors cannot affect replacement stre
 test("P2.21 late old-incarnation canonical acknowledgements cannot clear any replacement queue", async (context) => {
   const { stale, peer, core } = await lifecycle(context);
   await fillQueues(stale, core);
+  const { claim } = await storage.claimWorkspaceBatch(stale.use.database(), {
+    ...stale.use.captureAccountContext(), deviceId: stale.state.deviceId, localNowMs: Date.now()
+  });
   const sent = stale.use.currentSyncBatch();
   const response = canonical(1, 21);
   const fields = ["acknowledgements", "taskAcknowledgements", "durationAcknowledgements", "autoStartAcknowledgements", "selectedTaskAcknowledgements"];
@@ -157,7 +161,8 @@ test("P2.21 late old-incarnation canonical acknowledgements cannot clear any rep
   await confirmRecreation(peer);
   await fillQueues(peer, core);
   const before = await dump(peer.use.database());
-  await assert.rejects(stale.use.acceptSyncResponse(response, sent, ownerId(publicId), null), storage.AccountOwnershipError);
+  await assert.rejects(stale.use.acceptSyncResponse(response, sent, ownerId(publicId), null,
+    stale.use.captureAccountContext(), claim), storage.AccountOwnershipError);
   assert.deepEqual(await dump(peer.use.database()), before);
 });
 
@@ -168,7 +173,7 @@ test("P2.21 delayed task identity cannot bind an old title to a recreated accoun
   const adding = stale.use.addTask("Old confidential title");
   await discoverRecreation(peer);
   await confirmRecreation(peer);
-  stale.use.applySessionPayload({ user: accountUser(publicId, 2), csrfToken: "new" });
+  stale.use.applySessionPayload({ user: accountUser(publicId, 2), csrfToken: "new" }, stale.use.captureAccountContext());
   await stale.use.reloadPersistedState();
   const before = await dump(peer.use.database());
   identity.resolve(core.taskIdentity({ title: "Old confidential title" }));

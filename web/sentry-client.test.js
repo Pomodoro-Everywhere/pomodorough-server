@@ -389,12 +389,11 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
     ["app-actions.js", "actions.timer.save-failed"],
     ["app-actions.js", "actions.timer.clear-failed"],
     ["app-actions.js", "actions.timer.finish-failed"],
-    ["app-actions.js", "actions.retarget.save-failed"],
-    ["app-view.js", "view.phase.save-failed"],
+    ["app-actions.js", "view.phase.save-failed"],
     ["app-bootstrap.js", "bootstrap.retry.deferred"],
     ["app-bootstrap.js", "bootstrap.choice.deferred"]
   ];
-  assert.equal(wiredSites.length, 11);
+  assert.equal(wiredSites.length, 10);
   for (const [file, operation] of wiredSites) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     const call = `reportFrontendError(error, "${operation}")`;
@@ -403,6 +402,7 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
       `${operation} must stay a static PII-free operation tag`);
   }
   const actions = fs.readFileSync(path.join(__dirname, "app-actions.js"), "utf8");
+  assert.doesNotMatch(actions, /async issueRetargetOperation|actions\.retarget\.save-failed/);
   assert.match(actions, /function reportFrontendError\(error, operation\)/,
     "app-actions.js must route reports through the frontend error wrapper");
   assert.ok(actions.includes('"notice.durationSaveFailed"'),
@@ -453,18 +453,19 @@ function finishTimerFixture(overrides = {}) {
   };
   const syncStorage = {
     AccountOwnershipError: incarnation.storage.AccountOwnershipError,
-    finishTimer: async () => { throw new Error("finish offline"); }, ...overrides.syncStorage
+    planWorkspaceMutation: async () => { throw new Error("finish offline"); }, ...overrides.syncStorage
   };
   const use = {
     captureAccountContext: () => incarnation.captureAccountContext(state, host),
     controlsBlocked: () => false, clone: structuredClone, trustedNow: () => 5,
-    elapsedFor: () => 1000, tabId: () => "tab-1", settingsValue: () => ({}),
+    elapsedFor: () => 1000, tabId: () => "tab-1", settingsValue: () => ({}), monotonicNow: () => null,
     database: () => ({}), assertExpectedAccount: () => {},
     quarantineAccountMismatch: () => calls.push("quarantine"),
     tr: (_key, _values, fallback) => fallback, showNotice: (message) => calls.push(["notice", message]),
     rebuildOptimisticState: () => {}, render: () => {}, scheduleSync: () => {},
     phaseConfig: () => ({ focus: {}, short_break: {}, long_break: {} }), phaseLabel: (phase) => phase
   };
+  Object.assign(use, require("./app-storage.js").create({ state, external: { host, syncCore: incarnation.sync, syncStorage }, use }));
   const actions = actionsModule.create({
     state, external: { host, syncCore: incarnation.sync, syncStorage }, use
   });
@@ -489,7 +490,7 @@ test("S40 rejected timer finish warns, notices, and reports with static operatio
   fixture.calls.length = 0;
   reports.length = 0;
   const owned = new fixture.incarnation.storage.AccountOwnershipError("stale owner");
-  fixture.syncStorage.finishTimer = async () => { throw owned; };
+  fixture.syncStorage.planWorkspaceMutation = async () => { throw owned; };
   assert.equal(await fixture.actions.finishTimer(false), false);
   assert.ok(fixture.calls.includes("quarantine"));
   assert.equal(reports.length, 0);

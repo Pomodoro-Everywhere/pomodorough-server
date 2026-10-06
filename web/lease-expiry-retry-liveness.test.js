@@ -6,7 +6,7 @@ const { storage, dump, ownerId, publicId, queueNames, canonical,
   serve, environment, pauseSource, assertConfirmation } = require("./test/lease-expiry-retry-fixture.js");
 
 async function retryThreeTimes(target) {
-  for (let attempt = 0; attempt < 3; attempt += 1) await target.use.restoreSessionAndSync();
+  for (let attempt = 0; attempt < 3; attempt += 1) await target.use.restoreSessionAndSync(target.use.captureAccountContext());
 }
 
 test("P2.21 lease retry: same-incarnation lower revision cannot clear five acknowledged queues", async (context) => {
@@ -15,6 +15,9 @@ test("P2.21 lease retry: same-incarnation lower revision cannot clear five ackno
   const sampledAtWallMs = Date.now();
   await storage.saveClockOffset(setup.database, { offsetMs: 0, uncertaintyMs: 1,
     sampledAtWallMs, receivedAtWallMs: sampledAtWallMs, requestSequence: 1 });
+  const { claim } = await storage.claimWorkspaceBatch(target.use.database(), {
+    ...target.use.captureAccountContext(), deviceId: target.state.deviceId, localNowMs: Date.now()
+  });
   const sent = target.use.currentSyncBatch();
   const response = canonical(1, 1);
   const ackNames = ["acknowledgements", "taskAcknowledgements", "durationAcknowledgements",
@@ -25,7 +28,7 @@ test("P2.21 lease retry: same-incarnation lower revision cannot clear five ackno
     }));
   });
   const before = await dump(setup.database);
-  await target.use.acceptSyncResponse(response, sent, ownerId(publicId), null);
+  await target.use.acceptSyncResponse(response, sent, ownerId(publicId), null, target.use.captureAccountContext(), claim);
   assert.deepEqual(await dump(setup.database), before);
   assert.equal(target.state.revision, 20);
 });
@@ -103,7 +106,7 @@ test("P2.21 lease retry: stale proof cannot reclaim third incarnation and requir
   const replacement = await storage.readBootstrapState(setup.database);
   context.mock.timers.setTime(replacement.gate.expiresAtMs + 1);
   const before = await dump(setup.database);
-  await target.use.restoreSessionAndSync();
+  await target.use.restoreSessionAndSync(target.use.captureAccountContext());
   assert.equal(target.state.sessionIdentityValidated, false);
   assert.equal(target.state.bootstrapGateOwned, false);
   assert.equal(target.state.bootstrapPlan, null);

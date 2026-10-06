@@ -6,16 +6,17 @@ const {
   storage, nowMs, user, fixture, seedMeta, dump, meta,
   startFocus, completionInput, project, assertBatch
 } = require("./test/p222-completion-fixture.js");
+const coreFixture = fixture;
 
 const refusals = [
   {
-    name: "stale timer identity", reason: "stale",
-    prepare: async (client, input) => { input.timerId = "p222-stale-timer"; }
+    name: "stale timer identity", reason: "staleTimer",
+    prepare: async (client, input) => { input.timerId = "p222-stale-timer"; input.requestedTimer.id = input.timerId; }
   },
   {
     name: "live foreign owner", reason: "not_owner",
     prepare: async (client, input) => {
-      Object.assign(input, { manual: false, requireOwner: true, observedElapsedMs: 1_500_000 });
+      Object.assign(input, { manual: false, requireOwner: true, observedElapsedMs: 1_500_000, nowMs: nowMs + 1_500_000 });
       await seedMeta(client.use.database(), { timerOwner: {
         timerId: input.timerId, deviceId: "p222-foreign-device", tabId: "p222-foreign-tab",
         leaseExpiresAtMs: nowMs + 30_000
@@ -23,11 +24,11 @@ const refusals = [
     }
   },
   {
-    name: "early automatic completion", reason: "stale",
+    name: "early automatic completion", reason: "notExpired",
     prepare: async (client, input) => { Object.assign(input, { manual: false, requireOwner: true }); }
   },
   {
-    name: "peer paused automatic completion", reason: "stale",
+    name: "peer paused automatic completion", reason: "staleTimer",
     prepare: async (client, input) => {
       assert.equal(await client.use.issueCommand("pause"), true);
       Object.assign(input, { manual: false, requireOwner: true, nowMs: nowMs + 1_500_000 });
@@ -74,7 +75,7 @@ function interceptCompletionWrites(context, database, mode, written) {
 
 async function assertStaleCompletion(database, input, expected) {
   assert.deepEqual(await storage.finishTimer(database, input), {
-    transitioned: false, reason: "stale", commands: []
+    transitioned: false, reason: "staleTimer", commands: []
   });
   assert.deepEqual(await dump(database), expected);
 }
@@ -87,13 +88,21 @@ async function persistNaturalExpiry(database, core, atMs) {
   const transaction = database.transaction(["meta", "pending"], "readwrite");
   transaction.objectStore("meta").put({ key: "snapshot", value: {
     ...meta(before, "snapshot"), canonicalTimer: expired.canonicalTimer,
-    history: expired.history.filter((entry) => entry.timerId !== expired.canonicalTimer.id)
+    history: expired.history
+  } });
+  const queues = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [], selectedTaskOperations: [] };
+  transaction.objectStore("meta").put({ key: "projectionPending", value: queues });
+  transaction.objectStore("meta").put({ key: "deliveryProof", value: queues });
+  transaction.objectStore("meta").put({ key: "timerDependencies", value: [] });
+  transaction.objectStore("meta").put({ key: "workspaceObservation", value: {
+    canonicalAnchorAt: expired.canonicalTimer.anchorAt, commandTimes: {}
   } });
   transaction.objectStore("pending").clear();
   await storage.transactionDone(transaction);
 }
 
 for (const withUuidV7 of [false, true]) {
+  const fixture = (context, overrides = {}) => coreFixture(context, { ...overrides, retainedLegacyUuid: !withUuidV7 });
   for (const refusal of refusals) {
     test(`P222 ${refusal.name} refuses completion without writes, UUIDv7=${withUuidV7}`, async (context) => {
       const { client } = await fixture(context, { autoStartBreaks: true });
@@ -138,7 +147,7 @@ for (const withUuidV7 of [false, true]) {
     const before = await dump(client.use.database());
     await assert.rejects(storage.finishTimer(client.use.database(), completionInput(client, withUuidV7, {
       breakTimerId: ""
-    })), { name: "Error", message: "invalid shared-core input: invalid timer command" });
+    })), { name: "Error", message: "invalid shared-core input: invalid allocated UUID" });
     assert.deepEqual(await dump(client.use.database()), before);
   });
 
@@ -147,18 +156,20 @@ for (const withUuidV7 of [false, true]) {
     await startFocus(client);
     const before = await dump(client.use.database());
     let projections = 0;
-    const failingCore = {
-      tickHlc: core.tickHlc.bind(core), planTimerCompletion: core.planTimerCompletion.bind(core),
-      projectSynchronizedState(input) {
+    const failingCore = { call(operation, input) {
+      const result = core.call(operation, input);
+      if (operation === "workspace.completionMutation.v1") {
         projections += 1;
-        if (projections === 3) throw new Error("P222 late Core failure");
-        return core.projectSynchronizedState(input);
+        assert.equal(result.outcome, "planned");
+        assert.equal(result.commands.length, 2);
+        throw new Error("P222 late Core failure");
       }
-    };
+      return result;
+    } };
     await assert.rejects(storage.finishTimer(client.use.database(), completionInput(client, withUuidV7, {
       sharedCore: failingCore
     })), /P222 late Core failure/);
-    assert.equal(projections, 3);
+    assert.equal(projections, 1);
     assert.deepEqual(await dump(client.use.database()), before);
   });
 
@@ -173,9 +184,10 @@ for (const withUuidV7 of [false, true]) {
     const second = await storage.finishTimer(client.use.database(), input);
     assert.equal(second.transitioned, true);
     assert.equal(second.commands.length, 1);
-    assert.equal(second.commands[0].dependsOnCommandId, first.commands[0].id);
+    assert.equal(second.commands[0].dependsOnCommandId, first.commands[1].id);
     const after = await dump(client.use.database());
-    assertBatch(before, after, { ...input, requestedTimer: client.state.timer }, second);
+    assertBatch(before, after, { ...input, requestedTimer: { ...client.state.timer,
+      dependsOnCommandId: first.commands[0].id } }, second);
     assert.equal(project(core, after).canonicalTimer.status, "completed");
   });
 
@@ -221,7 +233,7 @@ for (const withUuidV7 of [false, true]) {
     ]);
     assert.equal(outcomes.filter((outcome) => outcome.transitioned).length, 1);
     assert.deepEqual(outcomes.find((outcome) => !outcome.transitioned), {
-      transitioned: false, reason: "stale", commands: []
+      transitioned: false, reason: "staleTimer", commands: []
     });
     const winnerIndex = outcomes.findIndex((outcome) => outcome.transitioned);
     const winner = outcomes[winnerIndex];
@@ -252,11 +264,14 @@ for (const withUuidV7 of [false, true]) {
       await persistNaturalExpiry(client.use.database(), core, input.nowMs);
       const before = await dump(client.use.database());
       const natural = project(core, before, input.nowMs);
+      input.requestedTimer = natural.canonicalTimer;
       assert.equal(natural.canonicalTimer.status, "completed");
       assert.equal(natural.canonicalTimer.lastIntent.type, "start");
       assert.equal(natural.history.find((entry) => entry.timerId === input.timerId).commandId,
-        natural.canonicalTimer.lastIntent.commandId);
+        undefined, "natural expiry does not fabricate a Finish command identity");
       const outcome = await storage.finishTimer(client.use.database(), input);
+      if (!outcome.transitioned) assert.deepEqual(await dump(client.use.database()), before,
+        "the blocked Core transition is write-free and retains every original record");
       assert.equal(outcome.transitioned, true);
       assert.equal(outcome.commands.length, 1);
       const after = await dump(client.use.database());

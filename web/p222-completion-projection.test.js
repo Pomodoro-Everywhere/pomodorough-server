@@ -6,6 +6,7 @@ const {
   storage, sync, nowMs, fixture, seedMeta, seedQueues, dump, meta,
   startFocus, completionInput, completedFocusHistory, project, assertBatch
 } = require("./test/p222-completion-fixture.js");
+const coreFixture = fixture;
 
 for (const phase of ["short_break", "long_break"]) {
   test(`P222 actual offline actions preserve queued ${phase} duration through reopen`, async (context) => {
@@ -69,6 +70,7 @@ async function assertReopened(open, client, after, core, input, outcome, identit
 }
 
 for (const withUuidV7 of [false, true]) {
+  const fixture = (context, overrides = {}) => coreFixture(context, { ...overrides, retainedLegacyUuid: !withUuidV7 });
   for (const phase of ["short_break", "long_break"]) {
     for (const automatic of [false, true]) {
       for (const enabled of [false, true]) {
@@ -84,6 +86,8 @@ for (const withUuidV7 of [false, true]) {
           });
           const peer = await open();
           const identity = await peerPreferences(peer, core, phase, enabled);
+          await client.use.reloadPersistedState();
+          input.requestedTimer = structuredClone(client.state.timer);
           const before = await dump(client.use.database());
           const outcome = await storage.finishTimer(client.use.database(), input);
           assert.equal(outcome.transitioned, true);
@@ -100,31 +104,30 @@ for (const withUuidV7 of [false, true]) {
 }
 
 for (const withUuidV7 of [false, true]) {
+  const fixture = (context, overrides = {}) => coreFixture(context, { ...overrides, retainedLegacyUuid: !withUuidV7 });
   test(`P222 every completion projection receives complete transaction queues, UUIDv7=${withUuidV7}`, async (context) => {
     const { client, core, open } = await fixture(context);
     await startFocus(client);
     const peer = await open();
     await peerPreferences(peer, core, "short_break", true);
+    await client.use.reloadPersistedState();
     const before = await storage.readQueues(client.use.database());
     const projections = [];
-    const observedCore = {
-      tickHlc: core.tickHlc.bind(core), planTimerCompletion: core.planTimerCompletion.bind(core)
-    };
-    observedCore.projectSynchronizedState = (input) => {
-      projections.push(structuredClone(input.pending));
-      return core.projectSynchronizedState(input);
-    };
+    const observedCore = { call(operation, input) {
+      if (operation === "workspace.completionMutation.v1") projections.push(structuredClone(input.workspace.local));
+      return core.call(operation, input);
+    } };
     const input = completionInput(client, withUuidV7, { sharedCore: observedCore });
-    delete input.requestedTimer;
     const outcome = await storage.finishTimer(client.use.database(), input);
     assert.equal(outcome.commands[1].plannedDurationMs, 1_200_000);
-    assert.equal(projections.length, 4);
+    assert.equal(projections.length, 1);
     for (const pending of projections) {
       for (const name of ["taskOperations", "durationOperations", "autoStartOperations", "selectedTaskOperations"]) {
         assert.deepEqual(pending[name], before[name]);
       }
     }
-    assert.deepEqual(projections.at(-1).commands, before.commands.concat(outcome.commands));
+    assert.deepEqual(projections[0].commands, before.commands);
+    assert.deepEqual((await storage.readQueues(client.use.database())).commands, before.commands.concat(outcome.commands));
   });
 
   test(`P222 repeated and concurrent finish deliveries commit once, UUIDv7=${withUuidV7}`, async (context) => {

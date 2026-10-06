@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
 
@@ -66,7 +69,7 @@
     name: "session",
     externals: ["host", "syncCore", "syncStorage", "elements"],
     requires: [
-      "captureAccountContext",
+      "captureAccountContext", "captureDatabaseContext",
       "database", "clearLocalData", "tr", "render", "renderProfile", "renderSyncStatus",
       "showNotice", "quarantineOwnerState", "restoreOwnerState", "restartBootstrapForCurrentAccount",
       "needsBootstrapResolution", "prepareBootstrap", "syncNow", "scheduleSync", "scheduleRetry",
@@ -93,6 +96,7 @@
     constructor(state, host, use, emit, syncCore) {
       Object.assign(this, { state, host, use, emit, syncCore });
       this.eventSource = null;
+      this.streamContext = null;
       this.receiveRevision = this.receiveRevision.bind(this);
     }
 
@@ -114,19 +118,21 @@
       this.emit("revision-hint", { revision: Number.isFinite(revision) ? revision : null });
     }
 
-    openRevisionStream() {
+    openRevisionStream(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return;
+      if (this.eventSource && !accountOperation.isCurrent(this.streamContext)) this.closeRevisionStream();
       if (!this.state.sessionIdentityValidated || !this.state.authenticated
         || this.use.needsBootstrapResolution() || !this.host.navigator.onLine || this.eventSource) return;
       this.eventSource = new this.host.EventSource("/api/v1/stream");
       const stream = this.eventSource;
-      const ownerId = this.syncCore.accountOwnerId(this.state.user);
+      this.streamContext = context;
       const receive = (event) => {
-        if (stream === this.eventSource && ownerId === this.syncCore.accountOwnerId(this.state.user)) this.receiveRevision(event);
+        if (stream === this.eventSource && accountOperation.isCurrent(context)) this.receiveRevision(event);
       };
       this.eventSource.onmessage = receive;
       this.eventSource.addEventListener("revision", receive);
       this.eventSource.onerror = (event) => {
-        if (stream !== this.eventSource || ownerId !== this.syncCore.accountOwnerId(this.state.user)) return;
+        if (stream !== this.eventSource || !accountOperation.isCurrent(context)) return;
         const failure = event instanceof Error ? event : new Error("revision stream error");
         reportFrontendError(failure, "session.stream.error");
         if (!this.host.navigator.onLine) this.closeRevisionStream();
@@ -140,6 +146,7 @@
     closeRevisionStream() {
       this.eventSource?.close();
       this.eventSource = null;
+      this.streamContext = null;
     }
 
     pollRemoteState(runSync = this.use.syncNow) {
@@ -151,6 +158,7 @@
 
     setRevisionStreamForTest(value) {
       this.eventSource = value;
+      this.streamContext = value ? this.use.captureAccountContext() : null;
     }
 
     hasRevisionStreamForTest() {
@@ -163,6 +171,9 @@
       Object.assign(this, { state, use, stream }, external);
       this.redirecting = false;
       this.sessionRequestSequence = 0;
+      this.logoutFailureContexts = new WeakMap();
+      this.authenticatedContexts = new WeakMap();
+      this.sessionCompletionContexts = new WeakMap();
     }
 
     actions() {
@@ -177,7 +188,8 @@
       ]);
     }
 
-    async activateCachedOwnerOffline() {
+    async activateCachedOwnerOffline(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return false;
       if (this.pendingLocalLogout()) return false;
       const local = this.state.quarantinedLocal;
       if (!this.syncCore.validAccountIncarnation(local?.user?.accountIncarnation)) return false;
@@ -187,13 +199,12 @@
         pending: this.state.bootstrapPending
       })) return false;
       try {
-        const context = this.use.captureAccountContext();
         await this.syncStorage.clearBootstrapGate(this.use.database(), this.use.tabId(), context);
         context.assertCurrent();
       } catch {
         return false;
       }
-      this.use.restoreOwnerState(local);
+      context.publishIdentity(() => this.use.restoreOwnerState(local));
       Object.assign(this.state, {
         quarantinedLocal: null, authenticated: false, csrfToken: null, offlineOwnerMode: true,
         bootstrapBlocked: false, bootstrapGatePersisted: false, bootstrapGateOwned: false
@@ -201,22 +212,30 @@
       return true;
     }
 
-    async fetchSessionPayload() {
-      const context = this.use.captureAccountContext();
+    async fetchSessionPayload(context) {
+      accountOperation.requireBound(context);
       const sequence = ++this.sessionRequestSequence;
       const identity = this.pendingLocalLogout() ? this.use.cleanupIdentity() : null;
-      const binding = await this.syncStorage.readAccountBinding(this.use.database());
+      const binding = await this.readSessionBinding(context);
       context.assertCurrent();
       const response = await this.host.fetch("/api/v1/me", {
         credentials: "same-origin", cache: "no-store"
       });
+      context.assertCurrent();
       await this.validateSessionBinding(binding, context, sequence);
+      context.assertCurrent();
       if (response.status === 401) {
+        let completed = context;
         if (identity) {
-          if (!await this.clearPendingLogoutData(identity)) return null;
+          const cleanup = await this.clearPendingLogoutData(identity, context);
+          if (!cleanup.cleared) return null;
+          accountOperation.requireBound(cleanup.context);
+          completed = cleanup.context;
           this.use.assertCleanupIdentity(identity);
-          this.clearPendingLogout();
+          completed.publishIdentity(() => this.clearPendingLogout());
+          this.sessionCompletionContexts.set(context, completed);
         }
+        accountOperation.requireBound(completed);
         this.redirectToLogin();
         return null;
       }
@@ -224,7 +243,9 @@
         "session.checkFailed", { status: response.status }, `Session check failed (${response.status}).`
       ));
       const payload = await response.json();
+      context.assertCurrent();
       await this.validateSessionBinding(binding, context, sequence);
+      context.assertCurrent();
       Object.defineProperty(payload, "accountBinding", { value: {
         ...binding, ownerId: this.syncCore.authenticatedOwnerId(payload.user)
       } });
@@ -232,46 +253,67 @@
     }
 
     async validateSessionBinding(binding, context, sequence) {
-      const current = await this.syncStorage.readAccountBinding(this.use.database());
+      accountOperation.requireBound(context);
+      const current = await this.readSessionBinding(context);
       context.assertCurrent();
       if (sequence !== this.sessionRequestSequence || JSON.stringify(current) !== JSON.stringify(binding)) {
         throw new this.syncStorage.AccountOwnershipError();
       }
     }
 
-    applySessionPayload(payload) {
-      this.stream.closeRevisionStreamForIdentityChange(this.syncCore.authenticatedOwnerId(payload.user));
-      this.state.authenticatedAccountBinding = payload.accountBinding || null;
-      this.state.user = payload.user || null;
-      this.state.csrfToken = payload.csrfToken || null;
-      this.state.authenticated = true;
-      this.state.sessionIdentityValidated = true;
-      this.state.offlineOwnerMode = false;
-      this.use.renderProfile();
+    readSessionBinding(context) {
+      accountOperation.requireBound(context);
+      // Pending sign-out recovery can authenticate before storage opens.
+      return context.database ? this.syncStorage.readAccountBinding(context.database)
+        : Promise.resolve({ sourceOwnerId: null, gateOwnerId: null });
     }
 
-    async loadSession() {
+    applySessionPayload(payload, context) {
+      accountOperation.requireBound(context);
+      const authenticatedContext = context.publishIdentity(() => {
+        this.stream.closeRevisionStreamForIdentityChange(this.syncCore.authenticatedOwnerId(payload.user));
+        this.state.authenticatedAccountBinding = payload.accountBinding || null;
+        this.state.user = payload.user || null;
+        this.state.csrfToken = payload.csrfToken || null;
+        this.state.authenticated = true;
+        this.state.sessionIdentityValidated = true;
+        this.state.offlineOwnerMode = false;
+      });
+      authenticatedContext.assertCurrent();
+      this.use.renderProfile();
+      return authenticatedContext;
+    }
+
+    async loadSession(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       const identity = this.pendingLocalLogout() ? this.use.cleanupIdentity() : null;
-      const payload = await this.fetchSessionPayload();
+      const payload = await this.fetchSessionPayload(context);
+      const completed = this.sessionCompletionContexts.get(context) || context;
+      completed.assertCurrent();
       if (!payload) return false;
-      if (identity || this.pendingLocalLogout()) return this.finishPendingLogout(payload, identity);
+      if (identity || this.pendingLocalLogout()) return this.finishPendingLogout(payload, identity, context);
       const previousOwnerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId;
       if (previousOwnerId && this.syncCore.accountOwnerId(payload.user) !== previousOwnerId) {
         const sourceOwnerId = this.state.localOwnerId || previousOwnerId;
         this.stream.closeRevisionStreamForIdentityChange(this.syncCore.accountOwnerId(payload.user));
-        this.use.quarantineOwnerState();
-        this.state.localOwnerId = sourceOwnerId;
+        context.publishIdentity(() => {
+          this.use.quarantineOwnerState();
+          this.state.localOwnerId = sourceOwnerId;
+        });
         this.state.bootstrapBlocked = true;
-        this.applySessionPayload(payload);
-        await this.use.restartBootstrapForCurrentAccount();
+        const authenticatedContext = this.applySessionPayload(payload, context);
+        this.authenticatedContexts.set(context, authenticatedContext);
+        await this.use.restartBootstrapForCurrentAccount(authenticatedContext);
+        authenticatedContext.assertCurrent();
         this.use.render();
         return true;
       }
-      this.applySessionPayload(payload);
+      const authenticatedContext = this.applySessionPayload(payload, context);
+      this.authenticatedContexts.set(context, authenticatedContext);
       return true;
     }
 
-    async finishPendingLogout(payload, identity) {
+    async finishPendingLogout(payload, identity, issuer) {
       const userId = this.syncCore.accountOwnerId(payload.user);
       if (!identity || typeof userId !== "string" || !userId
         || identity.expectedUserId && identity.expectedUserId !== userId) {
@@ -280,54 +322,81 @@
       const authorized = { ...identity, expectedUserId: userId, authenticatedUserId: userId };
       this.use.assertCleanupIdentity(authorized);
       this.stream.closeRevisionStream();
-      await this.use.clearLocalData(authorized);
-      this.state.logoutRecoveryRequired = false;
-      if (!await this.requestSessionRevocation(payload.csrfToken || null, userId)) throw new Error(this.use.tr(
-        "account.logout.revocationPending", {}, "Pending sign-out could not be revoked yet."
-      ));
+      const context = await this.use.clearLocalData(authorized, issuer);
+      accountOperation.requireBound(context);
       this.use.assertCleanupIdentity(authorized);
-      this.clearPendingLogout();
+      if (this.use.database() !== null) throw new this.syncStorage.AccountOwnershipError();
+      try {
+        if (!await this.requestSessionRevocation(payload.csrfToken || null, userId, context)) throw new Error(this.use.tr(
+          "account.logout.revocationPending", {}, "Pending sign-out could not be revoked yet."
+        ));
+      } catch (error) {
+        if (accountOperation.isCurrent(context)) {
+          this.use.assertCleanupIdentity(authorized);
+          this.state.logoutRecoveryRequired = true;
+          this.logoutFailureContexts.set(error, context);
+        }
+        throw error;
+      }
+      this.use.assertCleanupIdentity(authorized);
+      context.publishIdentity(() => {
+        this.state.logoutRecoveryRequired = false;
+        this.clearPendingLogout();
+      });
+      this.sessionCompletionContexts.set(issuer, context);
       this.redirectToLogin();
       return false;
     }
 
-    async refreshMutationCsrf(expectedUserId) {
-      const payload = await this.fetchSessionPayload();
+    async refreshMutationCsrf(expectedUserId, context) {
+      accountOperation.requireBound(context);
+      if (context.ownerId !== expectedUserId) throw new this.syncStorage.AccountOwnershipError();
+      const payload = await this.fetchSessionPayload(context);
+      context.assertCurrent();
       if (!payload) throw new Error(this.use.tr(
         "session.refreshRequiresSignIn", {}, "Session refresh requires sign-in."
       ));
       if (!this.syncCore.accountOwnerId(payload.user) || this.syncCore.accountOwnerId(payload.user) !== expectedUserId) {
         const sourceOwnerId = this.state.localOwnerId || expectedUserId;
         this.stream.closeRevisionStreamForIdentityChange(this.syncCore.accountOwnerId(payload.user));
-        this.use.quarantineOwnerState();
-        this.state.localOwnerId = sourceOwnerId;
+        context.publishIdentity(() => {
+          this.use.quarantineOwnerState();
+          this.state.localOwnerId = sourceOwnerId;
+        });
         this.state.bootstrapBlocked = true;
-        this.applySessionPayload(payload);
-        await this.use.restartBootstrapForCurrentAccount();
+        const authenticatedContext = this.applySessionPayload(payload, context);
+        await this.use.restartBootstrapForCurrentAccount(authenticatedContext);
+        authenticatedContext.assertCurrent();
         this.use.render();
         throw new Error(this.use.tr(
           "session.accountChanged", {}, "Signed-in account changed during mutation retry."
         ));
       }
-      this.applySessionPayload(payload);
+      this.applySessionPayload(payload, context);
+      context.assertCurrent();
       return this.state.csrfToken;
     }
 
-    async postMutation(url, body, expectedUserId) {
-      const context = this.use.captureAccountContext();
+    async postMutation(url, body, expectedUserId, context) {
+      accountOperation.requireBound(context);
       if (context.ownerId !== expectedUserId) throw new this.syncStorage.AccountOwnershipError();
       const headers = this.syncCore.accountHeaders(expectedUserId);
       let timing = null;
       const response = await this.syncCore.postJSONWithCsrfRetry({
         fetcher: async (...args) => {
+          context.assertCurrent();
           await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, {
             ...context, allowBootstrap: url === "/api/v1/bootstrap/resolve"
           });
           context.assertCurrent();
           return this.host.fetch(...args);
         }, url, body, headers, csrfToken: this.state.csrfToken,
-        refreshCsrf: () => this.refreshMutationCsrf(expectedUserId),
-        nextRequestSequence: () => this.syncStorage.allocateClockRequestSequence(this.use.database(), context),
+        assertCurrent: context.assertCurrent,
+        refreshCsrf: () => this.refreshMutationCsrf(expectedUserId, context),
+        nextRequestSequence: () => {
+          context.assertCurrent();
+          return this.syncStorage.allocateClockRequestSequence(this.use.database(), context);
+        },
         onTiming: (value) => { timing = value; }
       });
       context.assertCurrent();
@@ -345,7 +414,8 @@
       this.host.location.assign(loginStartUrl(this.host.location));
     }
 
-    queueSessionRevalidation() {
+    queueSessionRevalidation(context = this.use.captureAccountContext()) {
+      if (!accountOperation.isCurrent(context)) return;
       Object.assign(this.state, {
         bootstrapSubmitting: false, bootstrapPending: null, bootstrapStrategy: null,
         bootstrapConflict: false, bootstrapError: null, bootstrapLimitError: null,
@@ -354,27 +424,34 @@
       this.stream.closeRevisionStream();
       this.use.render();
       if (this.pendingLocalLogout()) return;
-      this.host.setTimeout(() => this.restoreSessionAndSync(), timingMs("defer", 0));
+      this.host.setTimeout(() => {
+        if (accountOperation.isCurrent(context)) return this.restoreSessionAndSync(context);
+      }, timingMs("defer", 0));
     }
 
-    async restoreSessionAndSync() {
-      if (this.state.logoutRecoveryRequired) return this.retryPendingLogout();
+    async restoreSessionAndSync(context) {
+      if (!accountOperation.isCurrent(context)) return;
+      if (this.state.ready === false || this.state.logoutRecoveryRequired) return this.resumePendingStartup(context);
       try {
         if (!this.state.sessionIdentityValidated || !this.state.authenticated || !this.state.csrfToken) {
-          await this.loadSession();
+          await this.loadSession(context);
+          context.assertCurrent();
         }
         if (this.state.authenticated) {
-          if (this.use.needsBootstrapResolution()) await this.use.prepareBootstrap();
+          if (this.use.needsBootstrapResolution()) await this.use.prepareBootstrap(context);
           else {
-            this.stream.openRevisionStream();
-            await this.use.syncNow(true);
+            this.stream.openRevisionStream(context);
+            await this.use.syncNow(true, context);
           }
+          context.assertCurrent();
         }
       } catch (error) {
-        await this.activateCachedOwnerOffline();
+        if (!accountOperation.isCurrent(context)) return;
+        await this.activateCachedOwnerOffline(context);
+        if (!accountOperation.isCurrent(context)) return;
         this.state.retrying = true;
         this.use.render();
-        this.use.scheduleRetry();
+        this.use.scheduleRetry(context);
         this.host.console.warn("Pomodorough remains offline:", error);
         reportFrontendError(error, "session.restore.offline");
       }
@@ -384,7 +461,9 @@
       this.state.retrying = false;
       this.use.resetSyncRetry();
       this.use.render();
-      this.restoreSessionAndSync();
+      const context = this.state.ready === false || this.state.logoutRecoveryRequired
+        ? this.use.captureDatabaseContext() : this.use.captureAccountContext();
+      return this.restoreSessionAndSync(context);
     }
 
     handleOffline() {
@@ -422,13 +501,17 @@
       }
     }
 
-    async clearPendingLogoutData(identity) {
-      if (!this.pendingLocalLogout()) return true;
+    async clearPendingLogoutData(identity, issuer) {
+      accountOperation.requireBound(issuer);
+      if (!this.pendingLocalLogout()) return { cleared: true, context: issuer };
       try {
-        await this.use.clearLocalData(identity);
+        const completed = await this.use.clearLocalData(identity, issuer);
+        accountOperation.requireBound(completed);
         this.state.logoutRecoveryRequired = false;
-        return true;
+        return { cleared: true, context: completed };
       } catch (error) {
+        const context = error.cleanupContext || issuer;
+        if (!accountOperation.isCurrent(context)) return { cleared: false, context };
         this.state.logoutRecoveryRequired = true;
         this.use.showNotice(this.use.tr(
           "account.logout.cleanupFailed", { error: error.message },
@@ -437,47 +520,70 @@
         this.host.console.warn("Pomodorough pending logout cleanup failed:", error);
         reportFrontendError(error, "session.logout-recovery.cleanup-failed");
         this.use.render();
-        return false;
+        return { cleared: false, context };
       }
     }
 
     async retryPendingLogout() {
+      return this.resumePendingStartup(this.use.captureDatabaseContext());
+    }
+
+    async resumePendingStartup(context) {
+      if (!accountOperation.isCurrent(context)) return false;
       if (this.state.logoutRecoveryBusy) return false;
       this.state.logoutRecoveryBusy = true;
       this.use.render();
+      let completed = context;
       try {
-        return await this.use.resumeStartup();
+        const outcome = await this.use.resumeStartup(context);
+        completed = outcome?.context || context;
+        return outcome?.result ?? outcome;
       } finally {
         this.state.logoutRecoveryBusy = false;
-        this.use.render();
+        if (accountOperation.isCurrent(completed)) this.use.render();
       }
     }
 
-    async initializeSession() {
+    async initializeSession(issuer = this.use.captureAccountContext()) {
+      let context = issuer;
+      accountOperation.requireBound(context);
       try {
-        if (await this.loadSession()) await this.use.prepareBootstrap();
+        const loaded = await this.loadSession(context);
+        context = this.authenticatedContexts.get(context) || this.sessionCompletionContexts.get(context) || context;
+        if (loaded) {
+          context.assertCurrent();
+          await this.use.prepareBootstrap(context);
+        }
+        accountOperation.requireBound(context);
+        return context;
       } catch (error) {
+        context = this.logoutFailureContexts.get(error) || context;
+        if (!accountOperation.isCurrent(context)) return null;
         if (this.pendingLocalLogout()) this.state.logoutRecoveryRequired = true;
         if (!this.state.sessionIdentityValidated) {
           this.state.authenticated = false;
           this.state.csrfToken = null;
-          await this.activateCachedOwnerOffline();
+          await this.activateCachedOwnerOffline(context);
+          if (!accountOperation.isCurrent(context)) return null;
         }
         if (this.host.navigator.onLine) this.state.retrying = true;
         this.use.render();
-        this.use.scheduleRetry();
+        this.use.scheduleRetry(context);
         this.use.showNotice(error.message);
         this.host.console.warn("Pomodorough session deferred:", error);
         reportFrontendError(error, "session.initialize.deferred");
+        return context;
       }
     }
 
-    async requestSessionRevocation(csrfToken, ownerId = this.syncCore.accountOwnerId(this.state.user)) {
+    async requestSessionRevocation(csrfToken, ownerId, context) {
+      accountOperation.requireBound(context);
       if (!csrfToken) return false;
       const response = await this.host.fetch("/api/v1/auth/logout", {
         method: "POST", credentials: "same-origin",
         headers: { "X-CSRF-Token": csrfToken, ...this.syncCore.accountHeaders(ownerId) }
       });
+      context.assertCurrent();
       if (!response.ok && response.status !== 401) throw new Error(this.use.tr(
         "account.logout.failed", { status: response.status }, `Sign out failed (${response.status}).`
       ));
@@ -569,26 +675,41 @@
       }
       this.elements.deleteAccountButton.disabled = true;
       const context = this.use.captureAccountContext();
-      if (!await this.requestAccountDeletion(value)) return false;
+      if (!await this.requestAccountDeletion(value, context)) return false;
       context.assertCurrent();
       this.markPendingLogout();
+      const cleanupContext = this.use.captureAccountContext();
       const identity = this.use.cleanupIdentity();
       this.stream.closeRevisionStreamForIdentityChange();
+      return this.completeAccountCleanup(identity, cleanupContext, {
+        clearMarker: true, reportFailure: (error) => {
+          this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
+          reportFrontendError(error, "session.delete-account.cleanup-retry");
+        }
+      });
+    }
+
+    async completeAccountCleanup(identity, context, completion) {
+      if (!accountOperation.isCurrent(context)) return false;
+      let effectsContext = context;
       try {
-        await this.use.clearLocalData(identity);
+        const completed = await this.use.clearLocalData(identity, context);
+        if (!accountOperation.isCurrent(completed)) return false;
+        effectsContext = completed;
         this.use.assertCleanupIdentity(identity);
-        this.clearPendingLogout();
+        if (completion.clearMarker) completed.publishIdentity(() => this.clearPendingLogout());
       } catch (error) {
-        this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
-        reportFrontendError(error, "session.delete-account.cleanup-retry");
+        if (!accountOperation.isCurrent(context)) return false;
+        completion.reportFailure(error);
       }
+      if (!accountOperation.isCurrent(effectsContext)) return false;
       this.redirectToLogin();
       return true;
     }
 
-    async requestAccountDeletion(confirmation) {
+    async requestAccountDeletion(confirmation, context) {
+      accountOperation.requireBound(context);
       try {
-        const context = this.use.captureAccountContext();
         await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
         context.assertCurrent();
         const response = await this.host.fetch("/api/v1/account", {
@@ -604,6 +725,7 @@
         ));
         return true;
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) return false;
         this.elements.deleteAccountButton.disabled = false;
         this.use.showNotice(error.message || this.use.tr(
           "account.delete.failed", {}, "Account deletion failed. Your local data was kept."
@@ -623,9 +745,11 @@
     async logout() {
       const context = this.use.captureAccountContext();
       try {
-        await this.use.refreshAllPendingOperations();
+        await this.use.refreshAllPendingOperations(context);
+        context.assertCurrent();
         await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
       } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
         this.host.console.warn("Pomodorough pending queues unavailable before logout:", error);
         reportFrontendError(error, "session.logout.pending-queues");
         return;
@@ -639,31 +763,28 @@
         ));
         if (!confirmed) return;
       }
+      context.assertCurrent();
       this.elements.logoutButton.disabled = true;
       this.markPendingLogout();
+      const cleanupContext = this.use.captureAccountContext();
       const identity = this.use.cleanupIdentity();
       let serverRevoked = false;
       try {
-        serverRevoked = await this.requestSessionRevocation(this.state.csrfToken, context.ownerId);
+        serverRevoked = await this.requestSessionRevocation(this.state.csrfToken, context.ownerId, cleanupContext);
       } catch (error) {
+        if (!accountOperation.isCurrent(cleanupContext)) return;
         this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
         reportFrontendError(error, "session.logout.revocation-deferred");
       }
+      if (!accountOperation.isCurrent(cleanupContext)) return;
       this.use.assertCleanupIdentity(identity);
       this.stream.closeRevisionStream();
-      let localDataCleared = false;
-      try {
-        await this.use.clearLocalData(identity);
-        localDataCleared = true;
-      } catch (error) {
-        this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
-        reportFrontendError(error, "session.logout.cleanup-incomplete");
-      }
-      if (serverRevoked && localDataCleared) {
-        this.use.assertCleanupIdentity(identity);
-        this.clearPendingLogout();
-      }
-      this.redirectToLogin();
+      await this.completeAccountCleanup(identity, cleanupContext, {
+        clearMarker: serverRevoked, reportFailure: (error) => {
+          this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
+          reportFrontendError(error, "session.logout.cleanup-incomplete");
+        }
+      });
     }
 
     setFetchForTest(value) {

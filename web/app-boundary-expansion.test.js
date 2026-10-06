@@ -6,6 +6,8 @@ const assert = require("node:assert/strict");
 const actionModule = require("./app-actions.js");
 const bootstrapModule = require("./app-bootstrap.js");
 const viewModule = require("./app-view.js");
+const official = require("./test/official-core-fixture.js");
+const workspaceFixture = require("./test/p222-completion-fixture.js");
 
 function baseState(overrides = {}) {
   return {
@@ -48,6 +50,10 @@ function actionFixture(overrides = {}) {
   };
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    captureDatabaseContext: () => incarnationFixture.captureAccountContext(state, host),
+    getWorkspaceReadModel: () => (state.readModel = official.renderModel(state)),
+    issuePhaseSelection: (phase) => { if (phase !== "unknown") state.selectedPhase = phase; calls.push(["phase", phase]); },
+    persistWorkspaceIntent: async (intent) => { throw new Error(`${intent.kind} write failed`); },
     controlsBlocked: () => false, clone: structuredClone, database: () => ({}),
     assertExpectedAccount: (expectedUserId) => assert.equal(incarnationFixture.sync.accountOwnerId(state.user), expectedUserId),
     elapsedFor: () => 1000, phaseConfig: () => ({ focus: {}, short_break: {}, long_break: {} }),
@@ -76,27 +82,23 @@ test("mutation failures restore the action lock and never enqueue undurable work
   assert.equal(await fixture.actions.cancelAndClearTimer(), false);
   assert.equal(fixture.state.actionLocked, false);
   assert.deepEqual(fixture.state.pending, []);
-  assert.equal(fixture.calls.filter((entry) => Array.isArray(entry) && entry[0] === "notice").length, 4);
+  assert.equal(fixture.calls.filter((entry) => Array.isArray(entry) && entry[0] === "notice").length, 5);
 });
 
 test("timer policy rolls rejected finishes back without changing unrelated selections", () => {
-  const fixture = actionFixture();
   const day = new Date("2026-08-26T12:00:00Z");
   const history = [
-    { timerId: "a", phase: "focus", status: "completed", completedAt: "2026-08-26T08:00:00Z" },
-    { timerId: "b", phase: "focus", status: "cancelled", completedAt: "2026-08-26T09:00:00Z" },
-    { timerId: "c", phase: "short_break", completedAt: "2026-08-26T10:00:00Z" }
+    { id: "history-a", timerId: "a", phase: "focus", status: "completed", plannedDurationMs: 60000, completedAt: "2026-08-26T08:00:00Z" },
+    { id: "history-b", timerId: "b", phase: "focus", status: "cancelled", plannedDurationMs: 60000, endedAt: "2026-08-26T09:00:00Z" },
+    { id: "history-c", timerId: "c", phase: "short_break", status: "completed", plannedDurationMs: 60000, completedAt: "2026-08-26T10:00:00Z" }
   ];
-  assert.equal(fixture.actions.completedFocusCountForDay(history, day), 1);
-  assert.equal(fixture.actions.historyDateMs({ endedAt: "bad" }), 0);
-  assert.equal(fixture.actions.nextPhaseAfterCompletion({ phase: "short_break" }, history, day), "focus");
-  assert.equal(fixture.actions.longBreakProgress(0), 0);
   const commands = [{ id: "finish-1", type: "finish", timerId: "z", phase: "focus", deviceSequence: 9,
     occurredAt: "2026-08-26T11:00:00Z" }];
-  assert.equal(fixture.actions.selectedPhaseAfterCommandAcknowledgements(
-    "short_break", commands, [{ commandId: "finish-1", outcome: "rejected" }], history
-  ), "focus");
-  assert.equal(fixture.actions.selectedPhaseAfterRejectedFinish("long_break", { type: "pause" }, history), "long_break");
+  const result = (selectedPhase, outcome) => official.storage.completionSelection({ selectedPhase, commands, history,
+    referenceTime: day.toISOString(), acknowledgements: [{ commandId: "finish-1", outcome }] }).selection.phase;
+  assert.equal(result("short_break", "rejected"), "focus");
+  assert.equal(result("long_break", "rejected"), "long_break");
+  assert.equal(result("short_break", "applied"), "short_break");
 });
 
 test("completion alerts recover from unavailable browser audio and notification APIs", async () => {
@@ -146,7 +148,8 @@ function bootstrapFixture(overrides = {}) {
     readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("other-user") } }),
     reconcileResolutionState: ({ queues }) => ({ revision: 4, baseTimer: null, baseHistory: [], baseTasks: [],
       baseDurationsMs: state.durationsMs, baseAutoStartBreaks: false, baseSelectedTaskId: null, queues }),
-    saveClockOffset: async (_db, offset) => offset, validatePendingForSend: async () => {}, ...overrides.syncStorage
+    saveClockOffset: async (_db, offset) => offset, validatePendingForSend: async (_database, input) => input.pending,
+    sampleClock: () => null, ...overrides.syncStorage
   };
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
@@ -156,6 +159,7 @@ function bootstrapFixture(overrides = {}) {
     normalizeTimer: (value) => value, openRevisionStream: () => calls.push("stream"), postMutation: async () => ({
       response: { ok: true, status: 200, json: async () => ({ revision: 4 }) }, timing: {}
     }), queueSessionRevalidation: () => calls.push("revalidate"), redirectToLogin: () => calls.push("login"),
+    validatePersistedDisplayContext: async () => {},
     refreshAllPendingOperations: async () => {}, refreshMigratedPreferences: async () => calls.push("refreshPreferences"),
     reloadPersistedState: async () => calls.push("reload"), render: () => calls.push("render"),
     renderBootstrapDialog: () => calls.push("dialog"), resetSyncRetry: () => calls.push("resetRetry"),
@@ -192,11 +196,11 @@ test("bootstrap restart invalidates foreign capture before migrating legacy pref
 
 test("invalid persisted bootstrap requests revalidate identity or resume exact owner capture", async () => {
   const foreign = bootstrapFixture({ syncStorage: { readBootstrapState: async () => ({ resolution: { userId: "other" } }) } });
-  await foreign.actions.recoverInvalidBootstrapSubmission();
+  await foreign.actions.recoverInvalidBootstrapSubmission(foreign.use.captureAccountContext());
   assert.ok(foreign.calls.includes("revalidate"));
 
   const own = bootstrapFixture({ syncStorage: { readBootstrapState: async () => ({ resolution: { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } } }) } });
-  await own.actions.recoverInvalidBootstrapSubmission();
+  await own.actions.recoverInvalidBootstrapSubmission(own.use.captureAccountContext());
   assert.equal(own.state.bootstrapGateOwned, false);
   own.timers[0].callback();
   await Promise.resolve();
@@ -207,25 +211,25 @@ test("bootstrap transport handles authentication, both conflict classes, and ser
   const fixture = bootstrapFixture();
   const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
   fixture.use.postMutation = async () => ({ response: { status: 401 }, timing: {} });
-  await fixture.actions.sendBootstrapResolution(pending);
+  await fixture.actions.sendBootstrapResolution(pending, fixture.use.captureAccountContext());
   assert.ok(fixture.calls.includes("login"));
 
   fixture.use.postMutation = async () => ({ response: { status: 409, json: async () => ({ error: "changed" }) }, timing: {} });
-  await fixture.actions.sendBootstrapResolution(pending);
+  await fixture.actions.sendBootstrapResolution(pending, fixture.use.captureAccountContext());
   assert.match(fixture.state.bootstrapError, /Remote history changed/);
   fixture.use.postMutation = async () => ({ response: { status: 503, ok: false }, timing: {} });
-  await assert.rejects(() => fixture.actions.sendBootstrapResolution(pending), /503/);
+  await assert.rejects(() => fixture.actions.sendBootstrapResolution(pending, fixture.use.captureAccountContext()), /503/);
 });
 
 test("bootstrap preparation resumes matching persisted state and defers a live foreign gate", async () => {
   const matching = bootstrapFixture({ syncStorage: { readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("user-1") } }) } });
-  assert.equal(await matching.actions.acquireBootstrapPreparationGate(), true);
+  assert.equal(await matching.actions.acquireBootstrapPreparationGate(matching.use.captureAccountContext()), true);
   assert.equal(matching.state.bootstrapBlocked, false);
   assert.ok(matching.calls.includes("clearGate"));
   assert.ok(matching.calls.includes("syncNow"));
 
   const waiting = bootstrapFixture({ use: { acquireBootstrapGate: async () => ({ acquired: false }) } });
-  assert.equal(await waiting.actions.acquireBootstrapPreparationGate(), true);
+  assert.equal(await waiting.actions.acquireBootstrapPreparationGate(waiting.use.captureAccountContext()), true);
   assert.equal(waiting.state.retrying, true);
   assert.ok(waiting.calls.includes("retry"));
 });
@@ -233,23 +237,23 @@ test("bootstrap preparation resumes matching persisted state and defers a live f
 test("bootstrap account reconciliation fails closed until session identity is validated", async () => {
   const pending = { userId: "other", payload: { strategy: "keep_remote" } };
   const blocked = bootstrapFixture({ state: { bootstrapPending: pending, sessionIdentityValidated: false } });
-  assert.equal(await blocked.actions.reconcileBootstrapAccount(), true);
+  assert.equal(await blocked.actions.reconcileBootstrapAccount(blocked.use.captureAccountContext()), true);
   assert.ok(blocked.calls.includes("revalidate"));
 
   const validated = bootstrapFixture({ state: { bootstrapPending: pending, sessionIdentityValidated: true } });
-  assert.equal(await validated.actions.reconcileBootstrapAccount(), false);
+  assert.equal(await validated.actions.reconcileBootstrapAccount(validated.use.captureAccountContext()), false);
   assert.equal(validated.state.bootstrapGateOwned, true);
 });
 
 test("automatic bootstrap strategy rejects unknown plans and submits valid persisted choices", async () => {
   const invalid = bootstrapFixture({ state: { bootstrapPlan: { mode: "automatic", strategy: "unknown" } } });
-  await invalid.actions.persistAutomaticBootstrapResolution();
+  await invalid.actions.persistAutomaticBootstrapResolution(invalid.use.captureAccountContext());
   assert.ok(invalid.calls.includes("revalidate"));
 
   const valid = bootstrapFixture({ state: { bootstrapPlan: { mode: "automatic", strategy: "keep_remote" } } });
   let submitted = false;
   valid.use.postMutation = async () => { submitted = true; return { response: { status: 401 }, timing: {} }; };
-  await valid.actions.persistAutomaticBootstrapResolution();
+  await valid.actions.persistAutomaticBootstrapResolution(valid.use.captureAccountContext());
   assert.equal(submitted, true);
 });
 
@@ -306,9 +310,12 @@ function viewFixture(overrides = {}) {
   };
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    captureDatabaseContext: () => incarnationFixture.captureAccountContext(state, host),
+    getWorkspaceReadModel: () => (state.readModel = official.renderModel(state)),
+    issuePhaseSelection: (phase) => { if (phase !== "unknown") state.selectedPhase = phase; calls.push(["phase", phase]); },
     activeCompletionAlertTimerId: () => null, addTask: async () => true, cancelAndClearTimer: () => calls.push("cancel"),
     chooseBootstrapStrategy: (...args) => calls.push(["choose", ...args]), clampNumber: (value, min, max) => Math.max(min, Math.min(max, Number(value))),
-    clearLocalData: async () => calls.push("clear"), closeRevisionStreamForIdentityChange: () => calls.push("close"),
+    clearLocalData: async () => { calls.push("clear"); return use.captureDatabaseContext(); }, closeRevisionStreamForIdentityChange: () => calls.push("close"),
     completedFocusCountForDay: () => 0, controlsBlocked: () => false, database: () => ({}), deleteAccount: () => calls.push("deleteAccount"),
     deleteTask: () => {}, elapsedFor: () => 0, emptyTimer: (phase, duration) => ({ phase, plannedDurationMs: duration }),
     finishTimer: () => calls.push("finish"), handleOffline: () => calls.push("offline"), handleOnline: () => calls.push("online"),
@@ -323,6 +330,7 @@ function viewFixture(overrides = {}) {
     tabId: () => "tab-1", timerStatusLabel: (status) => status, tr: (_key, _args, fallback) => fallback,
     updateTimerCompletion: () => {}, ...overrides.use
   };
+  use.showNotice = (message) => calls.push(["notice", message]);
   const view = viewModule.create({ state, external: { host, syncCore, syncStorage: {
     releaseTimerOwnership: async (_db, input) => calls.push(["release", input])
   }, elements }, use });
@@ -455,10 +463,10 @@ test("bootstrap retries and preparation distinguish stale identity, live gates, 
   const foreignGate = bootstrapFixture({ syncStorage: {
     readBootstrapState: async () => ({ gate: { owner: "peer" }, resolution: null })
   } });
-  assert.equal(await foreignGate.actions.reconcilePersistedBootstrapState(), true);
+  assert.equal(await foreignGate.actions.reconcilePersistedBootstrapState(foreignGate.use.captureAccountContext()), true);
   assert.equal(foreignGate.state.retrying, true);
   const hiddenOwner = bootstrapFixture({ syncCore: { canExposeOwnerState: () => false } });
-  assert.equal(await hiddenOwner.actions.reconcilePersistedBootstrapState(), false);
+  assert.equal(await hiddenOwner.actions.reconcilePersistedBootstrapState(hiddenOwner.use.captureAccountContext()), false);
 });
 
 test("view branch matrix renders queue states, rich activity, dialogs, and guarded events", async () => {
@@ -535,6 +543,9 @@ test("view event failures and timer states fail safely while the full renderer s
 
   for (const [status, command] of [["running", "pause"], ["paused", "resume"], ["idle", "start"],
     ["completed", "start"], ["cancelled", "start"], ["superseded", "start"]]) {
+    fixture.state.timer.id = status === "idle" ? null : "render-timer";
+    fixture.state.timer.phase = "focus";
+    fixture.state.timer.plannedDurationMs = 60000;
     fixture.state.timer.status = status;
     fixture.elements.timerToggle.listeners.get("click")();
     assert.ok(fixture.calls.some((entry) => Array.isArray(entry) && entry[0] === "command" && entry[1] === command));
@@ -565,8 +576,10 @@ test("view event failures and timer states fail safely while the full renderer s
 test("phase choice save failure warns, notices, and reports with static operation", async (t) => {
   const phase = Object.assign(element(), { dataset: { phase: "short_break" } });
   const fixture = viewFixture({ phaseButtons: [phase], use: {
-    persistSettings: async () => { throw new Error("phase offline"); }
+    persistWorkspaceIntent: async () => { throw new Error("phase offline"); }
   } });
+  Object.assign(fixture.use, actionModule.create({ state: fixture.state,
+    external: { host: fixture.host, syncCore: incarnationFixture.sync, syncStorage: official.storage }, use: fixture.use }));
   const reports = [];
   const previous = globalThis.PomodoroughSentryClient;
   globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
@@ -577,10 +590,8 @@ test("phase choice save failure warns, notices, and reports with static operatio
   fixture.view.setupPreferenceEvents();
   phase.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(fixture.state.selectedPhase, "short_break");
-  assert.match(fixture.elements.notice.textContent, /Phase choice could not be saved/);
-  assert.ok(fixture.calls.some((entry) => Array.isArray(entry) && entry[0] === "warn"
-    && entry.some((value) => /Pomodorough phase choice save failed:/.test(String(value)))));
+  assert.equal(fixture.state.selectedPhase, "focus");
+  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /phase offline/.test(entry[1])));
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "view.phase.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);

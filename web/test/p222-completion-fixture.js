@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { IDBFactory } = require("fake-indexeddb");
-const storage = require("../sync-storage.js");
+const storage = { ...require("../sync-storage.js"), ...require("./core-planner-storage-fixture.js") };
 const sync = require("../sync-core.js");
 const stateModule = require("../app-state.js");
 const storageModule = require("../app-storage.js");
@@ -81,6 +81,7 @@ async function app(indexedDB, tabId) {
 }
 
 async function fixture(context, overrides = {}) {
+  const { retainedLegacyUuid = false, ...canonicalOverrides } = overrides;
   context.mock.timers.enable({ apis: ["Date"], now: nowMs });
   globalThis.crypto ||= crypto.webcrypto;
   corePromise ||= SharedCore.fromBytes(fs.readFileSync(path.join(__dirname, "../pomodorough_core.wasm")));
@@ -95,11 +96,16 @@ async function fixture(context, overrides = {}) {
   };
   const client = await open();
   await seedMeta(client.use.database(), {
-    snapshot: snapshot(overrides), deviceId: client.state.deviceId, deviceSequence: 7,
+    snapshot: snapshot(canonicalOverrides), deviceId: client.state.deviceId, deviceSequence: 7,
     hlc: { wallMs: nowMs, counter: 2 }, [storage.UUID7_KEY]: storage.uuid7FromParts(nowMs, 20n),
     settings: { selectedPhase: "focus", durationSyncBootstrapped: true,
       autoStartSyncBootstrapped: true, selectedTaskSyncBootstrapped: true }
   });
+  if (retainedLegacyUuid) await seedQueues(client.use.database(), { durationOperations: [{
+    id: "550e8400-e29b-41d4-a716-446655440000", deviceId: client.state.deviceId,
+    ownerId: "legacy-retained", phase: "focus", durationMs: 1500000,
+    occurredAt: new Date(0).toISOString(), hlcWallMs: 0, hlcCounter: 0
+  }] });
   await client.use.reloadPersistedState();
   context.after(() => { for (const current of apps) current.use.database()?.close(); });
   return { client, core, open };
@@ -117,7 +123,7 @@ function completionInput(client, withUuidV7, overrides = {}) {
     tabId: client.use.tabId(), leaseMs: 30_000, manual: true, requireOwner: false,
     nowMs, localNowMs: nowMs, observedElapsedMs: 0, withUuidV7,
     autoStartBreaks: client.state.autoStartBreaks, settings: client.use.settingsValue(),
-    finishCommandId: "p222-finish", breakCommandId: "p222-break", breakTimerId: "p222-break-timer",
+    finishCommandId: "p222-finish", breakCommandId: "p222-break", breakTimerId: "22222222-2222-4222-8222-222222222222",
     ...overrides
   };
 }
@@ -134,11 +140,14 @@ function completedFocusHistory() {
 function project(core, records, atMs = nowMs) {
   const base = meta(records, "snapshot");
   const { user: ignoredUser, revision, serverTime, ...projectionBase } = base;
-  return core.projectSynchronizedState({
+  return core.call("workspace.project.v1", {
     base: projectionBase,
-    pending: Object.fromEntries(Object.entries(queueStores).map(([name, store]) => [name, records[store]])),
+    local: Object.fromEntries(Object.entries(queueStores).map(([name, store]) => [name, records[store]])),
+    canonicalHead: meta(records, "canonicalHead") ?? null,
+    neverSent: meta(records, "deliveryProof") ?? {}, timerDependencies: meta(records, "timerDependencies") ?? [],
+    displayContext: { profile: "pwaStorage", projectionPending: meta(records, "projectionPending") ?? null },
     now: new Date(atMs).toISOString()
-  });
+  }).workspace;
 }
 
 function assertBatch(before, after, input, outcome) {
@@ -153,7 +162,10 @@ function assertBatch(before, after, input, outcome) {
     plannedDurationMs: input.requestedTimer.plannedDurationMs, occurredAt: new Date(wallMs).toISOString(),
     hlcWallMs: wallMs, hlcCounter: firstCounter, observedElapsedMs: input.observedElapsedMs
   };
-  if (input.requestedTimer.dependsOnCommandId) finishBody.dependsOnCommandId = input.requestedTimer.dependsOnCommandId;
+  const dependency = meta(before, "timerDependencies")?.find((edge) =>
+    before.pending.some((command) => command.id === edge.operationId && command.type === "start"
+      && command.timerId === input.timerId));
+  if (dependency) finishBody.dependsOnCommandId = dependency.operationId;
   assert.deepEqual(finish, finishBody);
   if (generated) assert.deepEqual(generated, {
     id: generated.id, deviceId: input.deviceId, deviceSequence: highestSequence + 2,
@@ -166,15 +178,10 @@ function assertBatch(before, after, input, outcome) {
   assert.deepEqual(meta(after, "hlc"), { wallMs, counter: firstCounter + outcome.commands.length - 1 });
   assert.deepEqual(after.pending, before.pending.concat(outcome.commands).sort((left, right) => left.id.localeCompare(right.id)));
   for (const store of stores.slice(2)) assert.deepEqual(after[store], before[store]);
-  if (input.withUuidV7) {
-    assert.equal(meta(after, storage.UUID7_KEY), outcome.commands.at(-1).id);
-    const finishParts = storage.uuid7Parts(finish.id);
-    assert.equal(finishParts.timestampMs, wallMs);
-    if (generated) assert.equal(storage.uuid7Parts(generated.id).randomValue, finishParts.randomValue + 1n);
-  } else {
-    assert.deepEqual(outcome.commands.map((command) => command.id), [input.finishCommandId, input.breakCommandId].slice(0, outcome.commands.length));
-    assert.equal(meta(after, storage.UUID7_KEY), meta(before, storage.UUID7_KEY));
-  }
+  assert.equal(meta(after, storage.UUID7_KEY), outcome.commands.at(-1).id);
+  const finishParts = storage.uuid7Parts(finish.id);
+  assert.equal(finishParts.timestampMs, wallMs);
+  if (generated) assert.equal(storage.uuid7Parts(generated.id).randomValue, finishParts.randomValue + 1n);
 }
 
 module.exports = {

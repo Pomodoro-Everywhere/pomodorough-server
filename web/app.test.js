@@ -13,6 +13,8 @@ const legacyDecisionCompat = require("./test/legacy-sync-decision-compat.js");
 // VM fixtures stay synchronous; removed decision helpers live only in test compatibility code.
 const sync = Object.freeze({ ...productionSync, ...legacyDecisionCompat });
 const createTimerReducer = require("./test/app-timer-reducer.js");
+const official = require("./test/official-core-fixture.js");
+const currentWorkspace = require("./test/p222-completion-fixture.js");
 
 function completionPlanFixture(input) {
   if (input.phase !== "focus") return { selectedPhase: "focus" };
@@ -29,7 +31,7 @@ function completionPlanFixture(input) {
 test("production bootstrap and reconciliation use shared-core storage adapters", () => {
   const source = ["app-state.js", "app-storage.js", "app-sync.js", "app-bootstrap.js"]
     .map((file) => fs.readFileSync(path.join(__dirname, file), "utf8")).join("\n");
-  assert.match(source, /syncStorage\.bootstrapPlan\(/);
+  assert.match(source, /syncStorage\.bootstrapWorkspace\(/);
   assert.match(source, /syncStorage\.reconcileState\(/);
   assert.match(source, /syncStorage\.reconcileResolutionState\(/);
   assert.match(source, /\.taskIdentity\(/);
@@ -51,6 +53,8 @@ function loadTaskProjection() {
   const warnings = [];
   let toneStarts = 0;
   let allocatedMutationInput = null;
+  let wallMs = Date.now();
+  let monotonicMs = null;
   let queues = {
     commands: [],
     taskOperations: [],
@@ -118,9 +122,26 @@ function loadTaskProjection() {
     createElement: () => ({ value: "", textContent: "", disabled: false })
   };
   const context = {
+    Date: class extends Date {
+      constructor(...values) { super(...(values.length ? values : [wallMs])); }
+      static now() { return wallMs; }
+    },
+    performance: { now: () => monotonicMs },
     PomodoroughSync: sync,
     PomodoroughAppTest: { disableAutoStart: true },
     PomodoroughStorage: {
+      callWorkspaceCore: official.storage.callWorkspaceCore,
+      observeClock: official.storage.observeClock,
+      sampleClock: official.storage.sampleClock,
+      projectWorkspace: official.storage.projectWorkspace,
+      observeWorkspace: official.storage.observeWorkspace,
+      readWorkspace: official.storage.readWorkspace,
+      completionSelection: official.storage.completionSelection,
+      bootstrapWorkspace: official.storage.bootstrapWorkspace,
+      selectWorkspaceBatch: official.storage.selectWorkspaceBatch,
+      recordsEqual: official.storage.recordsEqual,
+      migrateLegacyPreferences: official.storage.migrateLegacyPreferences,
+      migrateLegacyDependencies: official.storage.migrateLegacyDependencies,
       AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
       assertAccountOwnership: incarnationFixture.storage.assertAccountOwnership,
       BootstrapGateError: class BootstrapGateError extends Error {},
@@ -300,7 +321,7 @@ function loadTaskProjection() {
   };
   context.globalThis = context;
   for (const file of [
-    "app-runtime.js", "app-state.js", "app-storage.js", "app-actions.js",
+    "app-runtime.js", "account-operation.js", "app-state.js", "app-storage.js", "app-actions.js",
     "app-sync.js", "app-bootstrap.js", "app-session.js", "app-view.js", "app.js"
   ]) {
     const scriptPath = path.join(__dirname, file);
@@ -318,6 +339,7 @@ function loadTaskProjection() {
   context.PomodoroughAppTest.state.deviceId = "test-device";
   return {
     ...context.PomodoroughAppTest,
+    setClockReadings(wall, monotonic = null) { wallMs = wall; monotonicMs = monotonic; },
     scheduledTimeoutDelay() {
       return scheduledTimeout?.delay ?? null;
     },
@@ -410,7 +432,7 @@ function timer(status, id = "timer-state") {
     phase: "focus",
     status,
     plannedDurationMs: 60_000,
-    elapsedAtAnchorMs: status === "paused" ? 1_000 : 0,
+    elapsedAtAnchorMs: status === "completed" ? 60_000 : status === "paused" ? 1_000 : 0,
     anchorAt: new Date(baseTime).toISOString(),
     lastIntent: null,
     taskId: "task-source",
@@ -521,14 +543,16 @@ test("screen tabs move focus and activation with arrows, Home, and End", () => {
 
 test("task projection clears unavailable selection and restores it when task reappears", () => {
   const app = loadTaskProjection();
+  const selected = official.core().taskIdentity({ title: "Selected" });
   const { state, rebuildOptimisticState, selectedTaskIdForNextFocus } = app;
-  state.baseTasks = [{ id: "selected-task", title: "Selected" }];
+  state.baseTasks = [selected];
   state.pendingTaskOperations = [];
-  state.baseSelectedTaskId = "selected-task";
+  state.baseSelectedTaskId = selected.id;
   state.pendingSelectedTaskOperations = [];
   rebuildOptimisticState();
 
-  state.baseTasks = [];
+  state.pendingTaskOperations = [{ id: "first-delete", deviceId: "test-device", taskId: selected.id, type: "delete",
+    occurredAt: new Date(baseTime - 1).toISOString(), hlcWallMs: baseTime - 1, hlcCounter: 0 }];
   rebuildOptimisticState();
   assert.equal(state.tasks.length, 0);
   assert.equal(state.selectedTaskId, null);
@@ -538,24 +562,24 @@ test("task projection clears unavailable selection and restores it when task rea
     { value: "", textContent: "No task", disabled: false }
   ]);
 
-  state.pendingTaskOperations = [{
+  state.pendingTaskOperations.push({
     id: "task-operation-upsert",
-    taskId: "selected-task",
+    taskId: selected.id,
     type: "upsert",
     title: "Selected",
-    hlcWallMs: 1,
+    occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime,
     hlcCounter: 0
-  }];
+  });
   rebuildOptimisticState();
-  assert.deepEqual(Array.from(state.tasks, (task) => task.id), ["selected-task"]);
-  assert.equal(state.selectedTaskId, "selected-task");
-  assert.equal(selectedTaskIdForNextFocus(), "selected-task");
+  assert.deepEqual(Array.from(state.tasks, (task) => task.id), [selected.id]);
+  assert.equal(state.selectedTaskId, selected.id);
+  assert.equal(selectedTaskIdForNextFocus(), selected.id);
 
   state.pendingTaskOperations.push({
     id: "task-operation-delete",
-    taskId: "selected-task",
+    taskId: selected.id,
     type: "delete",
-    hlcWallMs: 2,
+    occurredAt: new Date(baseTime + 1).toISOString(), hlcWallMs: baseTime + 1,
     hlcCounter: 0
   });
   rebuildOptimisticState();
@@ -563,53 +587,28 @@ test("task projection clears unavailable selection and restores it when task rea
   assert.equal(state.selectedTaskId, null);
 });
 
-test("focus task selection creates a separate immutable retarget without rewriting the start", async () => {
-  const app = loadTaskProjection();
-  app.setDatabaseForTest({});
-  app.state.ready = true;
-  app.state.bootstrapBlocked = false;
-  app.state.selectedPhase = "focus";
-  app.state.tasks = [{ id: "active-task", title: "Active task" }, { id: "next-task", title: "Next task" }];
-  app.state.baseTasks = structuredClone(app.state.tasks);
-  app.state.selectedTaskId = "active-task";
-  app.state.baseSelectedTaskId = "active-task";
-  app.state.timer = {
-    id: "active-timer",
-    status: "paused",
-    phase: "focus",
-    taskId: "active-task",
-    plannedDurationMs: 1_500_000,
-    elapsedAtAnchorMs: 60_000
-  };
-  app.state.baseTimer = structuredClone(app.state.timer);
-  app.state.pending = [{
-    id: "start-active", deviceId: "test-device", deviceSequence: 1, timerId: "active-timer",
-    type: "start", phase: "focus", plannedDurationMs: 1_500_000,
-    occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 0,
-    observedElapsedMs: 0, taskId: "active-task"
-  }];
-
-  app.renderTaskSelector();
-  assert.equal(app.taskSelectorDisabled(), false);
-
-  assert.equal(await app.issueSelectedTaskOperation("next-task"), true);
-  assert.equal(app.state.selectedTaskId, "next-task");
-  assert.equal(app.state.timer.taskId, "next-task");
-  assert.equal(app.state.pending.find((command) => command.id === "start-active").taskId, "active-task");
-  const retarget = app.state.pending.find((command) => command.type === "retarget");
-  assert.equal(retarget.timerId, "active-timer");
-  assert.equal(retarget.taskId, "next-task");
+test("focus task selection creates a separate immutable retarget without rewriting the start", async (t) => {
+  const { client, core, open } = await currentWorkspace.fixture(t);
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  await currentWorkspace.seedMeta(client.use.database(), { canonicalHead: { wallMs: currentWorkspace.nowMs, counter: 2 } });
+  assert.equal(await client.use.addTask("Active task"), true);
+  await currentWorkspace.startFocus(client);
+  const start = structuredClone(client.state.pending[0]);
+  assert.equal(await client.use.issueCommand("pause"), true);
+  const next = core.taskIdentity({ title: "Next task" });
+  await client.use.persistTaskOperation("upsert", next);
+  assert.equal(await client.use.issueSelectedTaskOperation(next.id), true);
+  assert.equal(client.state.selectedTaskId, next.id);
+  assert.equal(client.state.timer.taskId, next.id);
+  assert.deepEqual(client.state.pending.find((command) => command.id === start.id), start);
+  const retarget = client.state.pending.find((command) => command.type === "retarget");
+  assert.equal(retarget.timerId, start.timerId);
+  assert.equal(retarget.taskId, next.id);
   assert.equal(retarget.phase, "focus");
-  assert.equal(retarget.id, "retarget-operation");
-  assert.equal(app.displayTimer().taskId, "next-task");
-  assert.equal(
-    app.historyTaskContext({ timerId: "active-timer", taskId: "active-task" }, app.state.tasks),
-    "Active task"
-  );
-
-  app.state.selectedPhase = "short_break";
-  app.renderTaskSelector();
-  assert.equal(app.taskSelectorDisabled(), false);
+  const reopened = await open();
+  await reopened.use.reloadPersistedState();
+  assert.equal(reopened.state.timer.taskId, next.id);
+  assert.deepEqual(reopened.state.pending.find((command) => command.id === start.id), start);
 });
 
 test("start replaces a finished timer while retaining it in history", () => {
@@ -668,45 +667,36 @@ test("start after terminal without a history entry still retains the displaced t
   }
 });
 
-test("No task selection persists nullable operation and a null retarget", async () => {
-  const app = loadTaskProjection();
-  app.setDatabaseForTest({});
-  app.state.ready = true;
-  app.state.bootstrapBlocked = false;
-  app.state.baseSelectedTaskId = "task-current";
-  app.state.selectedTaskId = "task-current";
-  app.state.pendingSelectedTaskOperations = [];
-  app.state.timer = timer("running", "canonical-active");
-  app.state.baseTimer = structuredClone(app.state.timer);
-
-  assert.equal(await app.issueSelectedTaskOperation(null), true);
-
-  assert.equal(app.allocatedMutationInput().storeName, "pending");
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [{
-    id: "selected-operation",
-    deviceId: "test-device",
-    taskId: null,
-    occurredAt: new Date(baseTime).toISOString(),
-    hlcWallMs: baseTime,
-    hlcCounter: 0
-  }]);
-  const retarget = app.state.pending.find((command) => command.type === "retarget");
+test("No task selection persists nullable operation and a null retarget", async (t) => {
+  const { client, core, open } = await currentWorkspace.fixture(t);
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  await currentWorkspace.seedMeta(client.use.database(), { canonicalHead: { wallMs: currentWorkspace.nowMs, counter: 2 } });
+  assert.equal(await client.use.addTask("Current task"), true);
+  await currentWorkspace.startFocus(client);
+  const start = structuredClone(client.state.pending[0]);
+  assert.equal(await client.use.issueSelectedTaskOperation(null), true);
+  const selection = client.state.pendingSelectedTaskOperations.at(-1);
+  assert.equal(selection.taskId, null);
+  assert.equal(Object.hasOwn(selection, "taskId"), true);
+  const retarget = client.state.pending.find((command) => command.type === "retarget");
   assert.equal(retarget.taskId, null);
   assert.equal(Object.hasOwn(retarget, "taskId"), true);
-  assert.equal(app.state.selectedTaskId, null);
-  assert.equal(app.state.timer.taskId, null);
-  assert.equal(app.displayTimer().taskId, null);
-  assert.equal(app.scheduledTimeoutDelay(), 0);
+  assert.equal(client.state.selectedTaskId, null);
+  assert.equal(client.state.timer.taskId, undefined);
+  assert.deepEqual(client.state.pending.find((command) => command.id === start.id), start);
+  const reopened = await open();
+  await reopened.use.reloadPersistedState();
+  assert.equal(reopened.state.selectedTaskId, null);
+  assert.equal(reopened.state.timer.taskId, undefined);
 });
 
 test("queue refresh rebuilds selected-task projection from peer operations", async () => {
   const app = loadTaskProjection();
   app.setDatabaseForTest({});
-  app.state.baseTasks = [
-    { id: "task-first", title: "First" },
-    { id: "task-second", title: "Second" }
-  ];
-  app.state.baseSelectedTaskId = "task-first";
+  const first = official.core().taskIdentity({ title: "First" });
+  const second = official.core().taskIdentity({ title: "Second" });
+  app.state.baseTasks = [first, second];
+  app.state.baseSelectedTaskId = first.id;
   app.state.pendingSelectedTaskOperations = [];
   app.rebuildOptimisticState();
   app.setQueuesForTest({
@@ -716,7 +706,7 @@ test("queue refresh rebuilds selected-task projection from peer operations", asy
     autoStartOperations: [],
     selectedTaskOperations: [{
       id: "peer-selected-operation",
-      taskId: "task-second",
+      taskId: second.id,
       occurredAt: new Date(baseTime).toISOString(),
       hlcWallMs: baseTime,
       hlcCounter: 0
@@ -725,8 +715,8 @@ test("queue refresh rebuilds selected-task projection from peer operations", asy
 
   await app.refreshAllPendingOperations();
 
-  assert.equal(app.state.selectedTaskId, "task-second");
-  assert.equal(app.selectedTaskIdForNextFocus(), "task-second");
+  assert.equal(app.state.selectedTaskId, second.id);
+  assert.equal(app.selectedTaskIdForNextFocus(), second.id);
 });
 
 test("queue refresh preserves exact pending starts without rewriting task attribution", async () => {
@@ -758,11 +748,8 @@ test("peer selected-task sync never creates a timer retarget command", async () 
   app.setDatabaseForTest({});
   app.state.ready = true;
   app.state.bootstrapBlocked = false;
-  app.state.baseTasks = [
-    { id: "task-first", title: "First" },
-    { id: "task-second", title: "Second" }
-  ];
-  app.state.baseSelectedTaskId = "task-first";
+  app.state.baseTasks = [official.core().taskIdentity({ title: "First" }), official.core().taskIdentity({ title: "Second" })];
+  app.state.baseSelectedTaskId = app.state.baseTasks[0].id;
   app.state.pendingSelectedTaskOperations = [];
   app.state.baseTimer = {
     id: "timer-local", phase: "focus", status: "running", plannedDurationMs: 1_500_000,
@@ -776,7 +763,7 @@ test("peer selected-task sync never creates a timer retarget command", async () 
     autoStartOperations: [],
     selectedTaskOperations: [{
       id: "peer-selected-operation",
-      taskId: "task-second",
+      taskId: app.state.baseTasks[1].id,
       occurredAt: new Date(baseTime).toISOString(),
       hlcWallMs: baseTime,
       hlcCounter: 0
@@ -785,7 +772,7 @@ test("peer selected-task sync never creates a timer retarget command", async () 
 
   await app.refreshAllPendingOperations();
 
-  assert.equal(app.state.selectedTaskId, "task-second");
+  assert.equal(app.state.selectedTaskId, app.state.baseTasks[1].id);
   assert.equal(app.state.pending.some((command) => command.type === "retarget"), false);
   assert.equal(app.state.timer.taskId, "task-old");
 });
@@ -1023,7 +1010,7 @@ test("auto-start projection follows canonical state and pending local intent", (
   app.state.pendingAutoStartOperations = [{
     id: "auto-start-local",
     enabled: false,
-    hlcWallMs: 2,
+    occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime,
     hlcCounter: 0
   }];
 
@@ -1035,30 +1022,34 @@ test("auto-start projection follows canonical state and pending local intent", (
 test("local completed focuses choose three short breaks then a long break", () => {
   const app = loadTaskProjection();
   const reference = new Date("2026-07-22T12:00:00Z");
-  app.state.history = [{
+  app.setClockReadings(reference.getTime());
+  app.state.baseHistory = [{
     id: "yesterday",
     timerId: "yesterday",
     phase: "focus",
     status: "completed",
-    completedAt: "2026-07-21T12:00:00Z"
+    completedAt: "2026-07-21T12:00:00Z", plannedDurationMs: 1_500_000
   }];
 
   for (let count = 1; count <= 4; count += 1) {
-    app.state.history.push({
+    app.state.baseHistory.push({
       id: `focus-${count}`,
       timerId: `focus-${count}`,
       phase: "focus",
       status: "completed",
-      completedAt: `2026-07-22T0${count}:00:00Z`
+      completedAt: `2026-07-22T0${count}:00:00Z`, plannedDurationMs: 1_500_000
     });
-    assert.equal(app.completedFocusCountForDay(app.state.history, reference), count);
+    const model = app.getWorkspaceReadModel();
+    assert.equal(model.cadence.completedFocusToday, count);
     assert.equal(
-      app.nextBreakPhase(app.state.history, reference),
+      model.cadence.nextCompletedFocusBreakPhase,
       count === 4 ? "long_break" : "short_break"
     );
   }
-  assert.equal(app.longBreakProgress(4), 4);
-  assert.equal(app.longBreakProgress(5), 1);
+  assert.equal(app.getWorkspaceReadModel().cadence.longBreakProgress, 4);
+  app.state.baseHistory.push({ id: "focus-5", timerId: "focus-5", phase: "focus", status: "completed",
+    completedAt: "2026-07-22T05:00:00Z", plannedDurationMs: 1_500_000 });
+  assert.equal(app.getWorkspaceReadModel().cadence.longBreakProgress, 1);
 });
 
 test("completed timers display the selected next phase at its full duration", () => {
@@ -1066,21 +1057,24 @@ test("completed timers display the selected next phase at its full duration", ()
   app.state.timer = timer("completed", "completed-focus");
   app.state.selectedPhase = "short_break";
   app.state.durationsMs.short_break = 5 * 60_000;
+  app.state.baseTimer = app.state.timer;
+  app.state.ready = true;
 
   let displayed = app.displayTimer();
   assert.equal(app.nextPhaseAfterCompletion(app.state.timer), "short_break");
   assert.equal(displayed.phase, "short_break");
-  assert.equal(displayed.status, "idle");
+  assert.equal(displayed.status, "completed");
   assert.equal(displayed.plannedDurationMs, 5 * 60_000);
 
   app.state.timer = { ...timer("completed", "completed-break"), phase: "short_break" };
   app.state.selectedPhase = "focus";
   app.state.durationsMs.focus = 25 * 60_000;
+  app.state.baseTimer = app.state.timer;
 
   displayed = app.displayTimer();
   assert.equal(app.nextPhaseAfterCompletion(app.state.timer), "focus");
   assert.equal(displayed.phase, "focus");
-  assert.equal(displayed.status, "idle");
+  assert.equal(displayed.status, "completed");
   assert.equal(displayed.plannedDurationMs, 25 * 60_000);
 });
 
@@ -1091,22 +1085,23 @@ test("rejected Finish rolls back only its own automatic phase selection", () => 
     timerId: "focus-1",
     type: "finish",
     phase: "focus",
-    occurredAt: "2026-07-22T04:00:00Z"
+    occurredAt: "2026-07-22T04:00:00Z", deviceSequence: 1
   };
   assert.equal(app.selectedPhaseAfterRejectedFinish("short_break", focusFinish, []), "focus");
   assert.equal(app.selectedPhaseAfterRejectedFinish("long_break", focusFinish, []), "long_break");
   const fourthFocusHistory = Array.from({ length: 4 }, (_, index) => ({
-    timerId: index === 3 ? "focus-1" : `earlier-${index}`,
+    id: `history-${index}`, timerId: index === 3 ? "focus-1" : `earlier-${index}`,
     phase: "focus",
     status: "completed",
-    completedAt: `2026-07-22T0${index + 1}:00:00Z`
+    completedAt: `2026-07-22T0${index + 1}:00:00Z`, plannedDurationMs: 1_500_000
   }));
   assert.equal(
     app.selectedPhaseAfterRejectedFinish("long_break", focusFinish, fourthFocusHistory),
     "focus"
   );
 
-  const breakFinish = { id: "finish-break", timerId: "break-1", type: "finish", phase: "short_break" };
+  const breakFinish = { id: "finish-break", timerId: "break-1", type: "finish", phase: "short_break",
+    deviceSequence: 2, occurredAt: "2026-07-22T04:00:00Z" };
   assert.equal(app.selectedPhaseAfterRejectedFinish("focus", breakFinish, []), "short_break");
   assert.equal(
     app.selectedPhaseAfterCommandAcknowledgements("short_break", [focusFinish], [
@@ -1116,7 +1111,7 @@ test("rejected Finish rolls back only its own automatic phase selection", () => 
   );
   assert.equal(
     app.selectedPhaseAfterCommandAcknowledgements("short_break", [focusFinish], [
-      { commandId: focusFinish.id, outcome: "accepted" }
+      { commandId: focusFinish.id, outcome: "applied" }
     ], []),
     "short_break"
   );
@@ -1316,8 +1311,8 @@ test("optimistic replay follows HLC and command ID despite crossed device sequen
   app.state.baseTimer = app.emptyTimer("focus", 60_000);
   app.state.baseHistory = [];
   app.state.pending = [
-    { ...matrixCommand("start", "foreign"), id: "command-b", timerId: "timer-b", deviceSequence: 1, hlcWallMs: 200, hlcCounter: 0 },
-    { ...matrixCommand("start", "foreign"), id: "command-a", timerId: "timer-a", deviceSequence: 99, hlcWallMs: 100, hlcCounter: 0 }
+    { ...matrixCommand("start", "foreign"), id: "command-b", timerId: "timer-b", deviceId: "device-b", deviceSequence: 1, hlcWallMs: baseTime + 1, hlcCounter: 0 },
+    { ...matrixCommand("start", "foreign"), id: "command-a", timerId: "timer-a", deviceId: "device-a", deviceSequence: 99, hlcWallMs: baseTime, hlcCounter: 0 }
   ];
 
   app.rebuildOptimisticState();
@@ -1325,6 +1320,9 @@ test("optimistic replay follows HLC and command ID despite crossed device sequen
   assert.equal(app.state.timer.id, "timer-b");
   assert.equal(app.state.history[0].timerId, "timer-a");
   assert.equal(app.state.history[0].status, "superseded");
+  const original = [...app.state.pending];
+  app.state.pending = original.map((command) => ({ ...command, deviceId: "same-device" }));
+  assert.throws(() => app.rebuildOptimisticState(), /clocks do not preserve device sequence/);
 });
 
 test("elapsed timer uses persisted server offset and monotonic elapsed across wall jumps", () => {
@@ -1338,9 +1336,11 @@ test("elapsed timer uses persisted server offset and monotonic elapsed across wa
   };
   const running = timer("running");
   running.anchorAt = new Date(baseTime).toISOString();
-
-  assert.equal(app.elapsedFor(running, app.trustedNow(baseTime - 3_600_000 + 5_000, 100), 100), 5_000);
-  assert.equal(app.elapsedFor(running, app.trustedNow(baseTime - 3_600_000 - 55_000, 1_100), 1_100), 6_000);
+  app.state.baseTimer = running;
+  app.setClockReadings(baseTime - 3_600_000 + 5_000, 100);
+  assert.equal(app.elapsedFor(), 5_000);
+  app.setClockReadings(baseTime - 3_600_000 - 55_000, 1_100);
+  assert.equal(app.elapsedFor(), 6_000);
 });
 
 test("cacheable bootstrap response retains preview clock sample", () => {
@@ -1396,6 +1396,12 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
       app.state.baseTimer = app.emptyTimer("focus", 1_500_000);
       app.state.baseHistory = [];
       app.state.pending = arrivalOrder;
+      const invalid = [...commands].sort(sync.compareTimerCommands).some((command, index, ordered) =>
+        ordered.slice(0, index).some((previous) => previous.deviceId === command.deviceId && previous.deviceSequence >= command.deviceSequence));
+      if (invalid) {
+        assert.throws(() => app.rebuildOptimisticState(), /clocks do not preserve device sequence/);
+        continue;
+      }
       app.rebuildOptimisticState();
       assert.deepEqual(
         JSON.parse(JSON.stringify(normalizeFixtureProjection(app.state.timer, app.state.history, epochMs))),
@@ -1786,8 +1792,12 @@ test("immutable retarget applies only to the live running focus timer", () => {
     { id: "timer-live", phase: "focus", status: "cancelled", taskId: "task-old" },
     { id: "timer-live", phase: "focus", status: "superseded", taskId: "task-old" }
   ]) {
-    app.state.timer = { ...timer, plannedDurationMs: 1_500_000 };
-    app.state.baseTimer = structuredClone(app.state.timer);
+    app.state.timer = { ...timer, plannedDurationMs: 1_500_000, elapsedAtAnchorMs: timer.status === "completed" ? 1500000 : 0,
+      anchorAt: new Date(baseTime).toISOString(), lastIntent: {
+        type: timer.status === "completed" ? "finish" : timer.status === "cancelled" ? "cancel" : "start",
+        commandId: `source-${timer.status}`, occurredAt: new Date(baseTime).toISOString()
+      } };
+    app.state.baseTimer = timer.status === "idle" ? null : structuredClone(app.state.timer);
     app.state.pending = [{
       id: "retarget-inert", deviceId: "test-device", deviceSequence: 2, timerId: "timer-live",
       type: "retarget", phase: "focus", plannedDurationMs: 1_500_000,
@@ -1795,11 +1805,11 @@ test("immutable retarget applies only to the live running focus timer", () => {
       observedElapsedMs: 0, taskId: "task-new"
     }];
     app.rebuildOptimisticState();
-    assert.equal(app.state.timer.taskId, "task-old", `${timer.phase}/${timer.status}`);
+    assert.equal(app.state.timer.taskId, timer.status === "idle" ? null : "task-old", `${timer.phase}/${timer.status}`);
   }
 });
 
-test("legacy duration migrations atomically normalize queues and retire local settings", async () => {
+test("legacy duration migrations atomically transfer raw queues and retire local settings without inventing delivery proof", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
   const database = await app.openDatabase();
@@ -1825,7 +1835,7 @@ test("legacy duration migrations atomically normalize queues and retire local se
   await indexedDBTransaction(transaction);
   assert.equal(Object.hasOwn(settings.value, "pendingDurationOperations"), false);
   assert.equal(durations.length, 2);
-  assert.equal(durations.find((item) => item.id === "legacy-duration").occurredAt, new Date(0).toISOString());
+  assert.equal(Object.hasOwn(durations.find((item) => item.id === "legacy-duration"), "occurredAt"), false);
   assert.equal(durations.find((item) => item.id === "modern-duration").occurredAt, "2024-01-01T00:00:00.000Z");
 
   transaction = database.transaction(["meta", "pendingDurations"], "readwrite");
@@ -1843,15 +1853,17 @@ test("legacy duration migrations atomically normalize queues and retire local se
   await indexedDBTransaction(transaction);
   assert.equal(settings.value.durationSyncBootstrapped, true);
   assert.equal(Object.hasOwn(settings.value, "durations"), false);
-  assert.deepEqual(JSON.parse(JSON.stringify(durations)), [{
-    id: "test-tab-id",
-    ownerId: "bootstrap",
-    phase: "focus",
-    durationMs: 1_800_000,
-    occurredAt: new Date(0).toISOString(),
-    hlcWallMs: 0,
-    hlcCounter: 0
-  }]);
+  assert.equal(durations.length, 1);
+  assert.equal(durations[0].phase, "focus");
+  assert.equal(durations[0].durationMs, 1_800_000);
+  assert.equal(durations[0].ownerId, "bootstrap");
+  assert.match(durations[0].id, /^[0-9a-f-]{14}4[0-9a-f-]{21}$/);
+  assert.equal(durations[0].hlcWallMs, 0);
+  assert.equal(durations[0].hlcCounter, 0);
+  assert.equal(durations[0].occurredAt, new Date(durations[0].hlcWallMs).toISOString());
+  const migrated = await incarnationFixture.storage.readSyncState(database);
+  assert.deepEqual(migrated.deliveryProof.durationOperations, [durations[0].id]);
+  assert.deepEqual(migrated.projectionPending.durationOperations, durations);
 
   database.close();
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
@@ -1941,6 +1953,7 @@ test("account deletion keeps local state when confirmation, connectivity, or ser
 test("confirmed account deletion clears local state only after server success", async () => {
   await indexedDBRequest(indexedDB.deleteDatabase("pomodorough"));
   const app = loadTaskProjection();
+  app.setDatabaseForTest(await app.openDatabase());
   app.state.user = incarnationFixture.accountUser("account-1");
   app.setStorageMethodForTest("guardedMutation", async () => {});
   const requests = [];
@@ -1990,8 +2003,8 @@ test("offline logout marker is durable and explicitly cleared after revocation",
 test("session revocation defers without CSRF and accepts a successful server revoke", async () => {
   const app = loadTaskProjection();
   app.state.user = incarnationFixture.accountUser("account-1");
-  assert.equal(await app.requestSessionRevocation(null), false);
-  assert.equal(await app.requestSessionRevocation("csrf"), true);
+  assert.equal(await app.requestSessionRevocation(null, incarnationFixture.ownerId("account-1"), app.captureAccountContext()), false);
+  assert.equal(await app.requestSessionRevocation("csrf", incarnationFixture.ownerId("account-1"), app.captureAccountContext()), true);
 });
 
 test("local account teardown keeps the database open when its clear transaction aborts", async () => {
@@ -2013,7 +2026,7 @@ test("local account teardown keeps the database open when its clear transaction 
     close() { closeCount += 1; }
   });
 
-  await assert.rejects(app.clearLocalData(), failure);
+  await assert.rejects(app.clearLocalData(undefined, app.captureAccountContext()), failure);
   assert.equal(clearCount, 6);
   assert.equal(closeCount, 0);
 });
@@ -2023,7 +2036,7 @@ test("local account teardown clears every synchronized store and permits a clean
   const database = await app.openDatabase();
   app.setDatabaseForTest(database);
 
-  await app.clearLocalData();
+  await app.clearLocalData(undefined, app.captureAccountContext());
 
   const reopened = await app.openDatabase();
   app.setDatabaseForTest(reopened);
@@ -2034,14 +2047,14 @@ test("local account teardown clears every synchronized store and permits a clean
   assert.deepEqual(records.pendingDurationOperations, []);
   assert.deepEqual(records.pendingAutoStartOperations, []);
   assert.deepEqual(records.pendingSelectedTaskOperations, []);
-  await app.clearLocalData();
+  await app.clearLocalData(undefined, app.captureAccountContext());
 });
 
 test("unauthorized session check retires a pending local logout marker", async () => {
   const app = loadTaskProjection();
   app.markPendingLogout();
   app.setFetchForTest(async () => ({ status: 401, ok: false }));
-  assert.equal(await app.fetchSessionPayload(), null);
+  assert.equal(await app.fetchSessionPayload(app.captureAccountContext()), null);
   assert.equal(app.pendingLocalLogout(), false);
 });
 
@@ -2081,7 +2094,7 @@ test("session refresh uses an uncached same-origin request and rotates CSRF only
     };
   });
 
-  assert.equal(await app.refreshMutationCsrf(incarnationFixture.ownerId("account-1")), "fresh-token");
+  assert.equal(await app.refreshMutationCsrf(incarnationFixture.ownerId("account-1"), app.captureAccountContext()), "fresh-token");
   assert.equal(app.state.csrfToken, "fresh-token");
   assert.equal(app.state.sessionIdentityValidated, true);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
@@ -2103,14 +2116,17 @@ test("sync preflight reloads durable queues and skips an empty non-forced reques
   app.state.bootstrapGatePersisted = false;
   app.setQueuesForTest({
     commands: [],
-    taskOperations: [{ id: "durable-task" }],
+    taskOperations: [{ id: "durable-task", type: "upsert", title: "Durable task",
+      taskId: official.core().taskIdentity({ title: "Durable task" }).id, occurredAt: new Date(baseTime).toISOString(),
+      hlcWallMs: baseTime, hlcCounter: 0 }],
     durationOperations: [],
     autoStartOperations: [],
     selectedTaskOperations: []
   });
 
   assert.equal(await app.syncPreflight(false), true);
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingTaskOperations)), [{ id: "durable-task" }]);
+  assert.equal(app.state.pendingTaskOperations[0].id, "durable-task");
+  assert.equal(app.state.tasks[0].title, "Durable task");
   app.setQueuesForTest({
     commands: [], taskOperations: [], durationOperations: [],
     autoStartOperations: [], selectedTaskOperations: []
@@ -2181,8 +2197,10 @@ test("account bootstrap restart invalidates foreign ownership before migrating l
   });
   app.setStorageMethodForTest("readQueues", async () => ({
     commands: [], taskOperations: [], durationOperations: [],
-    autoStartOperations: [{ id: "migrated-auto-start", enabled: true }],
-    selectedTaskOperations: [{ id: "migrated-selection", taskId: null }]
+    autoStartOperations: [{ id: "migrated-auto-start", enabled: true,
+      occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 0 }],
+    selectedTaskOperations: [{ id: "migrated-selection", taskId: null,
+      occurredAt: new Date(baseTime).toISOString(), hlcWallMs: baseTime, hlcCounter: 1 }]
   }));
 
   await app.restartBootstrapForCurrentAccount();
@@ -2194,12 +2212,10 @@ test("account bootstrap restart invalidates foreign ownership before migrating l
   assert.equal(app.state.bootstrapGateOwned, true);
   assert.equal(app.state.bootstrapGatePersisted, true);
   assert.equal(app.state.bootstrapBlocked, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingAutoStartOperations)), [
-    { id: "migrated-auto-start", enabled: true }
-  ]);
-  assert.deepEqual(JSON.parse(JSON.stringify(app.state.pendingSelectedTaskOperations)), [
-    { id: "migrated-selection", taskId: null }
-  ]);
+  assert.equal(app.state.pendingAutoStartOperations[0].id, "migrated-auto-start");
+  assert.equal(app.state.pendingAutoStartOperations[0].enabled, true);
+  assert.equal(app.state.pendingSelectedTaskOperations[0].id, "migrated-selection");
+  assert.equal(app.state.pendingSelectedTaskOperations[0].taskId, null);
 });
 
 test("bootstrap preview uses an uncached request and persists its bounded clock sample", async () => {
@@ -2264,9 +2280,10 @@ test("bootstrap send validation rotates legacy capture only for the active gate 
   });
   app.setStorageMethodForTest("validatePendingForSend", async (_database, input) => {
     validations.push(input);
+    return input.pending;
   });
 
-  assert.equal(await app.validateBootstrapSubmission(original), rotated);
+  assert.equal(await app.validateBootstrapSubmission(original, app.captureAccountContext()), rotated);
   assert.equal(app.state.bootstrapPending, rotated);
   assert.equal(normalizeCalls, 1);
   assert.equal(validations[0].pending, rotated);
@@ -2274,7 +2291,7 @@ test("bootstrap send validation rotates legacy capture only for the active gate 
   assert.equal(validations[0].gateToken, "test-tab-id");
 
   app.state.bootstrapGateOwned = false;
-  assert.equal(await app.validateBootstrapSubmission(original), original);
+  assert.equal(await app.validateBootstrapSubmission(original, app.captureAccountContext()), original);
   assert.equal(normalizeCalls, 1);
   assert.equal(validations[1].pending, original);
 });
@@ -2340,7 +2357,7 @@ test("session lookup rejects server failures without replacing the current crede
   app.state.csrfToken = "current-token";
   app.setFetchForTest(async () => ({ status: 503, ok: false }));
 
-  await assert.rejects(app.fetchSessionPayload(), /Session check failed \(503\)/);
+  await assert.rejects(app.fetchSessionPayload(app.captureAccountContext()), /Session check failed \(503\)/);
   assert.equal(app.state.user.id, "account-1");
   assert.equal(app.state.csrfToken, "current-token");
 });

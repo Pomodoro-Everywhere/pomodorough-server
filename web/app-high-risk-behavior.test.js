@@ -1,6 +1,8 @@
 "use strict";
 
 const test = require("node:test");
+const official = require("./test/official-core-fixture.js");
+const workspaceFixture = require("./test/p222-completion-fixture.js");
 const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const { indexedDB, IDBKeyRange } = require("fake-indexeddb");
@@ -60,6 +62,8 @@ function storageFixture(overrides = {}) {
     validClockSample: (value) => Number.isFinite(value), compareTimerCommands: (a, b) => a.id.localeCompare(b.id)
   };
   const syncStorage = {
+    migrateLegacyPreferences: official.storage.migrateLegacyPreferences,
+    migrateLegacyDependencies: official.storage.migrateLegacyDependencies,
     AccountOwnershipError: incarnationFixture.storage.AccountOwnershipError,
     acquireBootstrapGateWithLegacyAutoStart: async () => ({ acquired: true }),
     readBootstrapState: async () => ({ gate: null, resolution: null }),
@@ -112,37 +116,29 @@ test("storage first launch persists identity and restores canonical records afte
   await second.actions.loadLocalState();
   assert.equal(second.current.deviceId, deviceId);
   assert.equal(second.current.deviceSequence, 0);
-  await second.actions.clearLocalData();
+  await second.actions.clearLocalData(undefined, second.actions.captureDatabaseContext());
   assert.equal(second.actions.database(), null);
 });
 
-test("storage mutation builders preserve timer ownership, task identity, and in-flight duration writes", async () => {
-  const captured = [];
-  const fixture = storageFixture({ syncStorage: {
-    allocateMutation: async (_db, options) => {
-      captured.push(options);
-      return options.build({ id: `id-${captured.length}`, deviceSequence: 9, wallMs: 1000, counter: 2 });
-    },
-    readQueues: async () => ({ durationOperations: [{ id: "new", phase: "focus" }] })
-  } });
-  fixture.actions.setDatabaseForTest({});
-  fixture.current.selectedTaskId = "task-1";
-  const command = await fixture.actions.persistCommand("start", { phase: "focus" });
-  assert.equal(command.taskId, "task-1");
+test("storage mutation builders preserve timer ownership, task identity, and in-flight duration writes", async (t) => {
+  const { client, core } = await workspaceFixture.fixture(t);
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  assert.equal(await client.use.addTask("Deep work"), true);
+  const taskId = client.state.selectedTaskId;
+  const command = await client.use.persistCommand("start");
+  assert.equal(command.taskId, taskId);
   assert.equal(command.observedElapsedMs, 0);
-  assert.deepEqual(captured[0].timerOwner, {
-    deviceId: "device-1", tabId: "tab-1", nowMs: captured[0].timerOwner.nowMs, leaseMs: 60_000
-  });
-
-  const task = await fixture.actions.persistTaskOperation("upsert", { id: "task-1", title: "Deep work" });
-  assert.equal(task.title, "Deep work");
-  const selected = await fixture.actions.persistSelectedTaskOperation(null);
+  const owner = workspaceFixture.meta(await workspaceFixture.dump(client.use.database()), "timerOwner");
+  assert.equal(owner.timerId, command.timerId);
+  assert.equal(owner.deviceId, client.state.deviceId);
+  assert.equal(owner.tabId, client.use.tabId());
+  const selected = await client.use.persistSelectedTaskOperation(null);
   assert.equal(selected.taskId, null);
-  fixture.actions.setInFlightDurationOperationIds(["sent"]);
-  const duration = await fixture.actions.persistDurationOperation("focus", 2_000_000);
-  assert.equal(duration.pendingDurationOperations[0].id, "new");
-  assert.equal(captured.at(-1).supersede({ id: "sent", phase: "focus", ownerId: "tab-1" }), false);
-  assert.equal(captured.at(-1).supersede({ id: "old", phase: "focus", ownerId: "tab-1" }), true);
+  const first = (await client.use.persistDurationOperation("focus", 1800000)).operation;
+  client.use.setInFlightDurationOperationIds([first.id]);
+  const second = (await client.use.persistDurationOperation("focus", 2100000)).operation;
+  assert.deepEqual(client.state.pendingDurationOperations, [first, second]);
 });
 
 function actionFixture(overrides = {}) {
@@ -194,45 +190,54 @@ function actionFixture(overrides = {}) {
   return { actions: actionModule.create({ state: current, external: { host, syncStorage, syncCore: incarnationFixture.sync }, use }), calls, current, host, timers };
 }
 
-test("automatic timer completion retries only after foreign ownership expires", async () => {
-  const fixture = actionFixture({ syncStorage: {
-    finishTimer: async () => ({ transitioned: false, reason: "not_owner", retryAtMs: Date.now() + 500 })
-  } });
-  assert.equal(await fixture.actions.finishTimer(true), true);
-  assert.equal(fixture.current.selectedPhase, "focus");
-  assert.ok(fixture.timers[0].delay >= 250);
-  fixture.timers[0].callback();
-  assert.equal(fixture.actions.completionQueuedForTest(), null);
-  assert.ok(fixture.calls.includes("timer"));
+test("automatic timer completion retries only after foreign ownership expires", async (t) => {
+  const { client, open } = await workspaceFixture.fixture(t);
+  await workspaceFixture.startFocus(client);
+  const peer = await open();
+  await peer.use.reloadPersistedState();
+  peer.use.trustedNow = () => workspaceFixture.nowMs + 1500000;
+  const timers = [];
+  peer.external.host.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return 1; };
+  const before = await workspaceFixture.dump(peer.use.database());
+  assert.equal(await peer.use.finishTimer(true), true);
+  assert.equal(peer.state.selectedPhase, "focus");
+  assert.ok(timers[0].delay >= 250);
+  assert.deepEqual(await workspaceFixture.dump(peer.use.database()), before);
+  timers[0].callback();
+  assert.equal(peer.use.completionQueuedForTest(), null);
 });
 
-test("timer completion persists phase transition, alerts once, and renews active ownership", async () => {
-  const fixture = actionFixture();
-  assert.equal(await fixture.actions.finishTimer(false), true);
-  assert.equal(fixture.current.selectedPhase, "short_break");
-  assert.equal(fixture.current.deviceSequence, 4);
-  assert.equal(fixture.actions.completionAlertTimerIDTest(), "timer-1");
-  assert.equal(fixture.actions.startCompletionAlert(fixture.current.timer), false);
-  fixture.actions.heartbeatTimerOwnership();
-  await Promise.resolve();
-  assert.equal(fixture.calls.find((call) => Array.isArray(call) && call[0] === "renew")[1].timerId, "timer-1");
-  fixture.actions.stopCompletionAlert();
-  assert.equal(fixture.actions.completionAlertDismissedTimerIDTest(), "timer-1");
+test("timer completion persists phase transition, alerts once, and renews active ownership", async (t) => {
+  const { client } = await workspaceFixture.fixture(t);
+  await workspaceFixture.startFocus(client);
+  const timer = structuredClone(client.state.timer);
+  assert.equal(await client.use.finishTimer(false), true);
+  assert.equal(client.state.selectedPhase, "short_break");
+  assert.equal(client.state.deviceSequence, 9);
+  assert.equal(client.use.completionAlertTimerIDTest(), timer.id);
+  assert.equal(client.use.startCompletionAlert(timer), false);
+  client.use.stopCompletionAlert();
+  assert.equal(client.use.completionAlertDismissedTimerIDTest(), timer.id);
+  assert.equal(workspaceFixture.meta(await workspaceFixture.dump(client.use.database()), "timerOwner"), undefined);
 });
 
-test("preference, task, command, and cancellation mutations update only after durable writes", async () => {
-  const fixture = actionFixture();
-  assert.equal(await fixture.actions.issueAutoStartOperation(true), true);
-  assert.equal(fixture.current.pendingAutoStartOperations[0].id, "auto-true");
-  assert.equal(await fixture.actions.issueSelectedTaskOperation("task-1"), true);
-  assert.equal(fixture.current.pendingSelectedTaskOperations[0].taskId, "task-1");
-  assert.equal(await fixture.actions.issueTaskOperation("upsert", { id: "task-1", title: "Deep work" }), true);
-  assert.equal(fixture.current.pendingTaskOperations[0].type, "upsert");
-  assert.equal(await fixture.actions.issueCommand("pause"), true);
-  assert.equal(fixture.current.pending.at(-1).type, "pause");
-  assert.equal(await fixture.actions.cancelAndClearTimer(), true);
-  assert.equal(fixture.current.deviceSequence, 7);
-  assert.ok(fixture.calls.filter((call) => Array.isArray(call) && call[0] === "sync").length >= 5);
+test("preference, task, command, and cancellation mutations update only after durable writes", async (t) => {
+  const { client, core } = await workspaceFixture.fixture(t);
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  const snapshots = [];
+  client.use.scheduleSync = () => snapshots.push(client.state.deviceSequence);
+  assert.equal(await client.use.issueAutoStartOperation(true), true);
+  assert.equal(await client.use.addTask("Deep work"), true);
+  const taskId = client.state.selectedTaskId;
+  await workspaceFixture.startFocus(client);
+  assert.equal(await client.use.issueCommand("pause"), true);
+  assert.equal(await client.use.cancelAndClearTimer(), true);
+  const after = await workspaceFixture.dump(client.use.database());
+  assert.equal(after.pendingTasks[0].type, "upsert");
+  assert.equal(after.pendingSelectedTasks[0].taskId, taskId);
+  assert.deepEqual(after.pending.slice(-2).map((command) => command.type), ["cancel", "clear"]);
+  assert.ok(snapshots.length >= 5);
 });
 
 function syncFixture(overrides = {}) {
@@ -264,7 +269,15 @@ function syncFixture(overrides = {}) {
       droppedTimerOperationIds: [], droppedTimerIds: [], projectionPending: null, neverSent: {} }),
     retireProofAndPersistOutgoing: async () => ({ proof: { commands: [], taskOperations: [],
       durationOperations: [], autoStartOperations: [], selectedTaskOperations: [] } }),
-    applySyncResponse: async (_db, input) => { calls.push(["apply", input]); return { applied: true }; }, ...overrides.syncStorage
+    applySyncResponse: async (_db, input) => { calls.push(["apply", input]); return { applied: true }; },
+    captureSyncClaim: incarnationFixture.storage.captureSyncClaim,
+    observeClock: () => ({ trustedNowMs: 100 }), sampleClock: () => 20,
+    callWorkspaceCore: () => ({ wallMs: 100, counter: 0 }),
+    claimWorkspaceBatch: async () => {
+      const sent = { commands: [], taskOperations: [], durationOperations: [], autoStartOperations: [], selectedTaskOperations: [] };
+      return { plan: { status: "planned" }, claim: { ownerId: incarnationFixture.sync.accountOwnerId(current.user), sent,
+        body: JSON.stringify({ deviceId: current.deviceId, lastRevision: current.revision, ...sent }), retiredAt: new Date().toISOString() }, proof: {} };
+    }, ...overrides.syncStorage
   };
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(current, host),
@@ -336,7 +349,8 @@ function bootstrapFixture(overrides = {}) {
     readBootstrapState: async () => ({ gate: null, resolution: null }),
     readSyncState: async () => ({ snapshot: { user: incarnationFixture.accountUser("other-user") } }),
     allocateClockRequestSequence: async () => 1, saveClockOffset: async (_db, offset) => offset,
-    normalizeLegacyDurationOperations: async () => ({ resolution: null }), validatePendingForSend: async () => {},
+    normalizeLegacyDurationOperations: async () => ({ resolution: null }), validatePendingForSend: async (_database, input) => input.pending,
+    sampleClock: () => null,
     reconcileResolutionState: ({ queues }) => ({
       revision: 5, baseTimer: null, baseHistory: [], baseTasks: [], baseDurationsMs: current.durationsMs,
       baseAutoStartBreaks: false, baseSelectedTaskId: null, queues
@@ -358,7 +372,7 @@ function bootstrapFixture(overrides = {}) {
     scheduleSync: () => {}, syncNow: async () => calls.push("sync"), scheduleRetry: () => calls.push("retry"),
     postMutation: async () => ({ response: { ok: true, status: 200, json: async () => ({}) }, timing: {} }),
     redirectToLogin: () => calls.push("login"), queueSessionRevalidation: () => calls.push("revalidate"),
-    refreshAllPendingOperations: async () => {}, ...overrides.use
+    refreshAllPendingOperations: async () => {}, validatePersistedDisplayContext: async () => {}, ...overrides.use
   };
   const host = {
     navigator: { onLine: true }, crypto: { randomUUID: () => "request-1" },
@@ -374,12 +388,18 @@ function bootstrapFixture(overrides = {}) {
 }
 
 test("bootstrap preparation exposes a choice without leaking quarantined local state", async () => {
+  const canonical = require("./workspace-core.js").base(null);
+  const history = [{ id: "source", timerId: "source", phase: "focus", status: "completed",
+    plannedDurationMs: 60000, completedAt: new Date().toISOString() }];
   const fixture = bootstrapFixture({ state: {
-    bootstrapPreview: { revision: 4, history: [{ status: "completed" }] },
+    localOwnerId: null, bootstrapPreview: { ...canonical, revision: 4, history },
     quarantinedLocal: { history: [{ status: "completed" }], timer: {}, tasks: [], durationsMs: {}, autoStartBreaks: false,
       selectedTaskId: null, pending: [], pendingTaskOperations: [], pendingDurationOperations: [],
       pendingAutoStartOperations: [], pendingSelectedTaskOperations: [] }
-  }, use: { acquireBootstrapGate: async () => ({ acquired: true, resolution: null }) } });
+  }, syncStorage: { bootstrapWorkspace: official.storage.bootstrapWorkspace,
+    readSyncState: async () => ({ snapshot: { ...canonical, user: null, history } }) },
+    use: { acquireBootstrapGate: async () => ({ acquired: true, resolution: null }),
+      defaultDurationsMs: () => canonical.durationsMs } });
   await fixture.actions.prepareBootstrap();
   assert.equal(fixture.current.bootstrapPlan.mode, "choose");
   assert.equal(fixture.current.bootstrapStrategy, null);
@@ -420,7 +440,7 @@ test("bootstrap acceptance atomically applies the canonical snapshot before resu
   };
   await fixture.actions.acceptBootstrapResponse({
     revision: 5, serverTime: "now", serverHlcWallMs: 10, serverHlcCounter: 2, accountIncarnation: fixture.current.user.accountIncarnation
-  }, pending, { requestAtMs: 1, receivedAtMs: 2, requestSequence: 3 });
+  }, pending, { requestAtMs: 1, receivedAtMs: 2, requestSequence: 3 }, fixture.use.captureAccountContext());
   assert.ok(fixture.calls.some((call) => Array.isArray(call) && call[0] === "applyResolution"));
   assert.equal(fixture.current.bootstrapBlocked, false);
   assert.equal(fixture.current.conflict, "timer already finished");
@@ -471,7 +491,8 @@ function viewFixture(overrides = {}) {
     clampNumber: (value, min, max) => Math.max(min, Math.min(max, Number(value))), completedFocusCountForDay: () => 0,
     longBreakProgress: () => 0, historyDateMs: (item) => Date.parse(item.completedAt) || 0,
     activeCompletionAlertTimerId: () => null, updateTimerCompletion: () => {}, startCompletionAlert: () => {},
-    localBootstrapState: () => ({ history: [] }), ...overrides.use
+    localBootstrapState: () => ({ history: [] }),
+    getWorkspaceReadModel: () => (current.readModel = official.renderModel(current)), ...overrides.use
   };
   const view = viewModule.create({ state: current, external: { host, syncCore, syncStorage: {}, elements }, use });
   return { current, document, elements, host, use, view };

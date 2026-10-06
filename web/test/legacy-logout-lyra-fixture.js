@@ -130,8 +130,9 @@ async function tab(environment) {
   const context = vm.createContext({ ...browserState.host, TextEncoder, TextDecoder,
     URL, structuredClone, Uint8Array, ArrayBuffer, WebAssembly,
     PomodoroughAppTest: { disableAutoStart: true } });
-  const ordered = ["shared-core-metadata.js", "shared-core.js", "sync-core.js", "sync-authority.js", "sync-storage-uuid.js", "sync-storage.js",
-    "app-runtime.js", "app-state.js", "app-storage.js", "app-actions.js", "app-sync.js",
+  const ordered = ["shared-core-metadata.js", "shared-core.js", "sync-core.js", "sync-authority.js", "sync-storage-uuid.js",
+    "workspace-core.js", "workspace-transaction.js", "sync-storage.js",
+    "app-runtime.js", "account-operation.js", "app-state.js", "app-storage.js", "app-actions.js", "app-sync.js",
     "app-bootstrap.js", "app-session.js", "app-view.js"];
   for (const name of ordered) vm.runInContext(source(name), context, { filename: root + "/web/" + name });
   const bytes = fs.readFileSync(root + "/web/pomodorough_core.wasm");
@@ -231,12 +232,10 @@ async function interruptedLogout(context, owner = "account-A") {
   const { current, database, localStorage, openTab } = environment;
   await done(seedTransaction(database, owner, false));
   const task = current.core.taskIdentity({ title: "Legitimate retained legacy task" });
-  await current.storage.allocateMutation(database, {
-    expectedUserId: ownerId(owner), storeName: "pendingTasks", nowMs: 10000,
-    withUuidV7: true, requireProjection: true,
-    build: ({ id, wallMs, counter }) => ({ id, deviceId: "checker-device",
-      occurredAt: new Date(wallMs).toISOString(), hlcWallMs: wallMs, hlcCounter: counter,
-      type: "upsert", taskId: task.id, title: task.title })
+  await current.storage.planWorkspaceMutation(database, {
+    expectedUserId: ownerId(owner), deviceId: "checker-device", tabId: "checker-tab", nowMs: 10000,
+    localNowMs: 10000, leaseMs: 60000, preference: true,
+    intent: { kind: "upsertTask", title: task.title }
   });
   localStorage.setItem(marker, "1");
   assert.equal(localStorage.getItem(companion), null);

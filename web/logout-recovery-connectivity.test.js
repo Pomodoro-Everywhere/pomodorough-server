@@ -181,8 +181,9 @@ test("connectivity: online event still finishes authorized cleanup during busy r
     assert.equal(localStorage.getItem(companion), null);
     assert.ok(Object.values(await dump(database)).every((rows) => rows.length === 0));
   } });
-  current.events.get("online")();
+  const retry = current.events.get("online")();
   assertActions(current, true);
+  await retry;
   await waitForRetry(current);
   await assertRecovered(environment);
   const cold = await environment.openTab();

@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   const DB_NAME = "pomodorough";
   const DB_VERSION = 5;
   const META_STORE = "meta";
@@ -65,18 +68,18 @@
       "captureAccountContext",
       "clone", "emptyTimer", "normalizeTimer", "normalizeDurationsMs", "selectedDurationMs",
       "selectedTaskIdForNextFocus", "compareDurationOperations", "compareTimerCommands",
-      "clampNumber", "trustedNow", "elapsedFor", "rebuildOptimisticState",
+      "clampNumber", "trustedNow", "monotonicNow", "clockContinuityId", "elapsedFor", "rebuildOptimisticState",
       "quarantineOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "projectOwnerState", "tr", "phaseConfig",
-      "defaultDurationsMs", "tabId"
+      "defaultDurationsMs", "tabId", "showNotice"
     ],
     provides: [
-      "openDatabase", "requestResult", "transactionDone", "settingsValue", "snapshotValue",
+      "openDatabase", "requestResult", "transactionDone", "settingsValue", "snapshotValue", "captureDatabaseContext",
       "migrateDurationQueueFromSettings", "bootstrapLegacyDurations", "readPendingDurationOperations",
       "refreshPendingDurationOperations", "readLocalRecords", "restoreLocalRecords",
-      "persistNewLocalIdentity", "loadLocalState", "acquireBootstrapGate",
+      "persistNewLocalIdentity", "loadLocalState", "acquireBootstrapGate", "validatePersistedDisplayContext",
       "refreshMigratedPreferences",       "persistSettings", "persistCommand", "persistTaskOperation",
       "persistAutoStartOperation", "persistSelectedTaskOperation", "persistDurationOperation",
-      "persistRetargetOperation",
+      "persistRetargetOperation", "persistWorkspaceIntent", "persistWorkspaceCompletion",
       "reloadPersistedState", "clearLocalData", "database", "setDatabaseForTest",
       "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity"
     ],
@@ -88,12 +91,13 @@
     constructor(state, external, use) {
       Object.assign(this, { state, use }, external);
       this.db = null;
+      this.connectionGeneration = 0;
     }
 
     actions() {
       return bindActions(this, [
         "openDatabase", "requestResult", "transactionDone", "clearLocalData",
-        "database", "setDatabaseForTest", "cleanupIdentity", "assertCleanupIdentity"
+        "database", "setDatabaseForTest", "cleanupIdentity", "assertCleanupIdentity", "captureDatabaseContext"
       ]);
     }
 
@@ -181,9 +185,14 @@
       }
     }
 
-    confirmCleanupAlreadyComplete(identity) {
+    assertAuthorizedCleanup(identity, context) {
+      accountOperation.requireBound(context);
+      this.assertCleanupIdentity(identity);
+    }
+
+    confirmCleanupAlreadyComplete(identity, context) {
       return this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction, _outcome, abort) => {
-        this.assertCleanupIdentity(identity);
+        this.assertAuthorizedCleanup(identity, context);
         const meta = transaction.objectStore(META_STORE);
         const requests = [
           meta.get("snapshot"), meta.get("bootstrapResolution"),
@@ -195,38 +204,82 @@
           };
         }
       }, { expectedUserId: null, currentUserId: identity.expectedUserId, allowBootstrap: true,
-        assertCurrent: () => this.assertCleanupIdentity(identity) });
+        assertCurrent: () => this.assertAuthorizedCleanup(identity, context) });
     }
 
-    async clearAuthorizedLocalData(identity) {
-      if (!this.db) this.db = await this.openDatabase();
-      await this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction) => {
-        this.assertCleanupIdentity(identity);
+    async clearAuthorizedLocalData(identity, context) {
+      this.assertAuthorizedCleanup(identity, context);
+      if (!this.db) context = await this.openCleanupDatabase(identity, context);
+      this.assertAuthorizedCleanup(identity, context);
+      const database = this.db;
+      await this.syncStorage.guardedMutation(database, ALL_STORES, (transaction) => {
+        this.assertAuthorizedCleanup(identity, context);
         for (const storeName of ALL_STORES) transaction.objectStore(storeName).clear();
       }, { expectedUserId: identity.expectedUserId, currentUserId: identity.expectedUserId,
-        assertCurrent: () => this.assertCleanupIdentity(identity), allowBootstrap: true }).catch((error) => {
+        assertCurrent: () => this.assertAuthorizedCleanup(identity, context), allowBootstrap: true }).catch((error) => {
         if (error.name !== "AccountOwnershipError" || !(identity.recovery || identity.authenticatedUserId)) throw error;
-        return this.confirmCleanupAlreadyComplete(identity);
-      }).catch((error) => storageFailure(error, this.use));
-      this.db.close();
-      this.db = null;
+        this.assertAuthorizedCleanup(identity, context);
+        return this.confirmCleanupAlreadyComplete(identity, context);
+      }).catch((error) => {
+        if (!accountOperation.isCurrent(context)) throw error;
+        if (this.db === database) {
+          this.assertCleanupIdentity(identity);
+          error.cleanupContext = this.captureDatabaseContext();
+        }
+        storageFailure(error, this.use);
+      });
+      this.assertAuthorizedCleanup(identity, context);
+      if (this.db !== database) throw new this.syncStorage.AccountOwnershipError();
+      database.close();
+      this.setDatabaseForTest(null);
+      // Capture completion at our own close, before an awaiting caller can resume
+      // against a different connection with identical account and logout markers.
+      return this.captureDatabaseContext();
     }
 
-    async clearLocalData(identity = this.cleanupIdentity()) {
+    async openCleanupDatabase(identity, context) {
+      accountOperation.requireBound(context);
+      const generation = this.connectionGeneration;
+      const database = await this.openDatabase();
+      try {
+        accountOperation.requireBound(context);
+        this.assertCleanupIdentity(identity);
+        if (this.connectionGeneration !== generation) throw new this.syncStorage.AccountOwnershipError();
+      } catch (error) { database.close(); throw error; }
+      this.setDatabaseForTest(database);
+      return this.captureDatabaseContext();
+    }
+
+    captureDatabaseContext() {
+      const generation = this.connectionGeneration;
+      const captureIdentity = () => {
+        const identity = this.use.captureAccountContext();
+        return { ...identity, assertCurrent: () => {
+          identity.assertCurrent();
+          if (this.connectionGeneration !== generation) throw new this.syncStorage.AccountOwnershipError();
+        } };
+      };
+      return accountOperation.bind(captureIdentity(), () => this.db, this.syncStorage.AccountOwnershipError, captureIdentity);
+    }
+
+    async clearLocalData(identity = this.cleanupIdentity(), context) {
+      this.assertAuthorizedCleanup(identity, context);
       if (!this.cleanup) {
-        this.cleanup = this.clearAuthorizedLocalData(identity).finally(() => {
+        this.cleanup = this.clearAuthorizedLocalData(identity, context).finally(() => {
           this.cleanup = null;
         });
-      } else {
-        await this.cleanup;
-        return this.clearLocalData(identity);
       }
-      await this.cleanup;
+      const completed = await this.cleanup;
       this.assertCleanupIdentity(identity);
+      accountOperation.requireBound(completed);
+      return completed;
     }
 
     database() { return this.db; }
-    setDatabaseForTest(value) { this.db = value; }
+    setDatabaseForTest(value) {
+      if (this.db !== value) this.connectionGeneration += 1;
+      this.db = value;
+    }
   }
 
   class LocalStateRepository {
@@ -240,7 +293,7 @@
         "bootstrapLegacyDurations", "readPendingDurationOperations", "refreshPendingDurationOperations",
         "readLocalRecords", "restoreLocalRecords",
         "persistNewLocalIdentity", "loadLocalState",
-        "acquireBootstrapGate", "refreshMigratedPreferences", "persistSettings", "reloadPersistedState"
+        "acquireBootstrapGate", "refreshMigratedPreferences", "persistSettings", "reloadPersistedState", "validatePersistedDisplayContext"
       ]);
     }
 
@@ -256,57 +309,54 @@
 
     snapshotValue(overrides = {}) {
       return {
-        revision: this.state.revision, canonicalTimer: this.use.clone(this.state.baseTimer),
+        revision: this.state.revision, canonicalTimer: this.state.baseTimer?.id ? this.use.clone(this.state.baseTimer) : null,
         history: this.use.clone(this.state.baseHistory), tasks: this.use.clone(this.state.baseTasks),
         durationsMs: this.use.clone(this.state.baseDurationsMs), autoStartBreaks: this.state.baseAutoStartBreaks,
         selectedTaskId: this.state.baseSelectedTaskId, user: this.use.clone(this.state.user), ...overrides
       };
     }
 
-    async migrateDurationQueueFromSettings() {
-      const context = this.use.captureAccountContext();
-      await this.syncStorage.guardedMutation(this.connection.database(), [DURATION_PENDING_STORE], (transaction) => {
+    async migrateDurationQueueFromSettings(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
+      await this.syncStorage.guardedMutation(this.connection.database(), [DURATION_PENDING_STORE], (transaction, _outcome, abort) => {
         const metaStore = transaction.objectStore(META_STORE);
         const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
         const request = metaStore.get("settings");
-        request.onsuccess = () => {
-          const record = request.result;
-          const pending = record?.value?.pendingDurationOperations;
-          if (!Array.isArray(pending)) return;
-          for (const operation of pending) {
-            durationStore.put(Number(operation?.hlcWallMs) === 0 && Number(operation?.hlcCounter) === 0
-              ? { ...operation, occurredAt: new Date(0).toISOString() } : operation);
-          }
-          const { pendingDurationOperations, ...settings } = record.value;
-          metaStore.put({ key: "settings", value: settings });
+        const existingRequest = durationStore.getAll();
+        let existing;
+        let settingsRecord;
+        const transfer = () => {
+          if (existing === undefined || settingsRecord === undefined) return;
+          try {
+            context.assertCurrent();
+            const pending = settingsRecord?.value?.pendingDurationOperations;
+            if (!Array.isArray(pending)) return;
+            const retained = new Map(existing.map((operation) => [operation.id, operation]));
+            for (const operation of pending) {
+              const previous = retained.get(operation.id);
+              if (previous && !this.syncStorage.recordsEqual(previous, operation)) {
+                throw new Error("Legacy duration identity already has a different retained payload.");
+              }
+              if (!previous) durationStore.add(operation);
+            }
+            const { pendingDurationOperations, ...settings } = settingsRecord.value;
+            metaStore.put({ key: "settings", value: settings });
+          } catch (error) { abort(error); }
         };
+        request.onsuccess = () => {
+          settingsRecord = request.result || null;
+          transfer();
+        };
+        existingRequest.onsuccess = () => { existing = existingRequest.result; transfer(); };
       }, { ...context, allowBootstrap: true });
     }
 
-    async bootstrapLegacyDurations() {
-      const context = this.use.captureAccountContext();
-      await this.syncStorage.guardedMutation(this.connection.database(), [DURATION_PENDING_STORE], (transaction) => {
-        const metaStore = transaction.objectStore(META_STORE);
-        const durationStore = transaction.objectStore(DURATION_PENDING_STORE);
-        const request = metaStore.get("settings");
-        request.onsuccess = () => {
-          const settings = request.result?.value || {};
-          if (settings.durationSyncBootstrapped === true) return;
-          for (const phase of Object.keys(this.use.phaseConfig())) {
-            if (settings.durations?.[phase] == null) continue;
-            const durationMs = Math.round(this.use.clampNumber(settings.durations[phase], 1, 180)) * 60_000;
-            if (durationMs === this.use.defaultDurationsMs()[phase]) continue;
-            durationStore.put({
-              id: this.host.crypto.randomUUID(), ownerId: "bootstrap", phase, durationMs,
-              occurredAt: new Date(0).toISOString(), hlcWallMs: 0, hlcCounter: 0
-            });
-          }
-          const { durations, ...localSettings } = settings;
-          metaStore.put({
-            key: "settings", value: { ...localSettings, durationSyncBootstrapped: true }
-          });
-        };
-      }, { ...context, allowBootstrap: true });
+    async bootstrapLegacyDurations(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
+      await this.syncStorage.migrateLegacyPreferences(this.connection.database(), {
+        ...context, deviceId: this.state.deviceId, tabId: this.use.tabId(), leaseMs: TIMER_OWNER_LEASE_MS,
+        nowMs: this.use.trustedNow(), localNowMs: Date.now()
+      });
     }
 
     async readPendingDurationOperations() {
@@ -338,13 +388,16 @@
         this.connection.requestResult(metaStore.get("deliveryProof")),
         this.connection.requestResult(metaStore.get("canonicalHead")),
         this.connection.requestResult(metaStore.get("projectionPending")),
-        this.connection.requestResult(metaStore.get("outgoingSync"))
+        this.connection.requestResult(metaStore.get("outgoingSync")),
+        this.connection.requestResult(metaStore.get("timerDependencies")),
+        this.connection.requestResult(metaStore.get("workspaceObservation")),
+        this.connection.requestResult(metaStore.get("completionState"))
       ]);
       const names = [
         "deviceId", "deviceSequence", "hlc", "clockOffset", "settings", "snapshot",
         "bootstrapResolution", "pending", "pendingTaskOperations", "pendingDurationOperations",
         "pendingAutoStartOperations", "pendingSelectedTaskOperations",
-        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync"
+        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync", "timerDependencies", "workspaceObservation", "completionState"
       ];
       return Object.fromEntries(names.map((name, index) => [name, values[index]]));
     }
@@ -355,10 +408,10 @@
         return;
       }
       this.state.revision = snapshot.revision ?? 0;
-      this.state.baseTimer = this.use.normalizeTimer(snapshot.canonicalTimer);
+      this.state.baseTimer = snapshot.canonicalTimer || this.use.emptyTimer(this.state.selectedPhase, this.use.selectedDurationMs());
       this.state.baseHistory = Array.isArray(snapshot.history) ? snapshot.history : [];
       this.state.baseTasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-      this.state.baseDurationsMs = this.use.normalizeDurationsMs(snapshot.durationsMs);
+      this.state.baseDurationsMs = this.use.clone(snapshot.durationsMs);
       this.state.baseAutoStartBreaks = snapshot.autoStartBreaks === true;
       this.state.baseSelectedTaskId = snapshot.selectedTaskId ?? null;
       this.state.user = snapshot.user || null;
@@ -371,7 +424,7 @@
       this.state.deviceSequence = Number(deviceSequence?.value) || 0;
       this.state.hlcWallMs = Number(hlc?.value?.wallMs) || 0;
       this.state.hlcCounter = Number(hlc?.value?.counter) || 0;
-      this.state.clockOffset = this.syncCore.validClockSample(clockOffset?.value) ? clockOffset.value : null;
+      this.state.clockOffset = clockOffset?.value ?? null;
       this.state.pending = (records.pending || []).sort(this.use.compareTimerCommands);
       this.state.pendingTaskOperations = records.pendingTaskOperations || [];
       this.state.pendingDurationOperations = (records.pendingDurationOperations || []).sort(this.use.compareDurationOperations);
@@ -379,10 +432,11 @@
       this.state.pendingSelectedTaskOperations = records.pendingSelectedTaskOperations || [];
       this.state.deliveryProof = this.syncStorage.sanitizeDeliveryProof(records.deliveryProof?.value);
       this.state.canonicalHead = this.syncStorage.sanitizeCanonicalHead(records.canonicalHead?.value);
-      this.state.projectionPending = this.syncStorage.sanitizeProjectionPending(
-        records.projectionPending?.value
-      );
+      this.state.projectionPending = records.projectionPending?.value ?? null;
       this.state.outgoingSync = records.outgoingSync?.value || null;
+      this.state.timerDependencies = records.timerDependencies?.value ?? null;
+      this.state.workspaceObservation = records.workspaceObservation?.value ?? null;
+      this.state.completionState = records.completionState?.value ?? null;
       this.state.durationSyncBootstrapped = settings?.value?.durationSyncBootstrapped === true;
       this.state.autoStartSyncBootstrapped = settings?.value?.autoStartSyncBootstrapped === true;
       this.state.selectedTaskSyncBootstrapped = settings?.value?.selectedTaskSyncBootstrapped === true;
@@ -396,9 +450,9 @@
       this.state.deviceSequence = Math.max(this.state.deviceSequence, highest);
     }
 
-    async persistNewLocalIdentity(records) {
+    async persistNewLocalIdentity(records, context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       if (records.deviceId?.value) return;
-      const context = this.use.captureAccountContext();
       await this.syncStorage.guardedMutation(this.connection.database(), [], (transaction) => {
         const store = transaction.objectStore(META_STORE);
         store.put({ key: "deviceId", value: this.state.deviceId });
@@ -408,46 +462,72 @@
       }, { ...context, allowBootstrap: true });
     }
 
-    acquireBootstrapGate() {
+    acquireBootstrapGate(context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
       return this.syncStorage.acquireBootstrapGateWithLegacyAutoStart(this.connection.database(), {
-        ...this.use.captureAccountContext(),
+        ...context,
         token: this.use.tabId(), nowMs: Date.now(), leaseMs: BOOTSTRAP_LEASE_MS,
         legacyAutoStartOperationId: this.host.crypto.randomUUID(),
         legacySelectedTaskOperationId: this.host.crypto.randomUUID()
       });
     }
 
-    async loadLocalState() {
-      this.connection.setDatabaseForTest(await this.connection.openDatabase());
-      const initial = await this.syncStorage.readSyncState(this.connection.database());
-      this.state.localOwnerId = this.syncCore.accountOwnerId(initial.snapshot?.user);
+    async loadLocalState(issuer = null) {
+      if (issuer) accountOperation.requireBound(issuer);
+      const opened = await this.connection.openDatabase();
+      try { if (issuer) accountOperation.requireBound(issuer); }
+      catch (error) { opened.close(); throw error; }
+      this.connection.setDatabaseForTest(opened);
       const context = this.use.captureAccountContext();
-      const lease = await this.acquireBootstrapGate();
+      try { return await this.restoreLocalWorkspace(context); }
+      catch (error) {
+        if (accountOperation.isCurrent(context)) error.startupContext = this.connection.captureDatabaseContext();
+        throw error;
+      }
+    }
+
+    async restoreLocalWorkspace(context) {
+      const initial = await this.syncStorage.readSyncState(this.connection.database());
+      context.assertCurrent();
+      this.assertDisplayContext(initial);
+      context.publishIdentity(() => { this.state.localOwnerId = this.syncCore.accountOwnerId(initial.snapshot?.user); });
+      const lease = await this.acquireBootstrapGate(context);
+      context.assertCurrent();
       this.state.bootstrapGatePersisted = true;
       this.state.bootstrapGateOwned = lease.acquired;
       const database = this.connection.database();
       const bootstrapState = await this.syncStorage.readBootstrapState(database);
+      context.assertCurrent();
       if (this.state.bootstrapGateOwned && !bootstrapState.resolution) {
-        await this.migrateDurationQueueFromSettings();
-        await this.bootstrapLegacyDurations();
+        await this.syncStorage.migrateLegacyDependencies(database, {
+          ...context, deviceId: initial.deviceId || this.state.deviceId, nowMs: Date.now()
+        });
+        context.assertCurrent();
+        await this.migrateDurationQueueFromSettings(context);
+        context.assertCurrent();
+        await this.bootstrapLegacyDurations(context);
+        context.assertCurrent();
       }
       const normalized = this.state.bootstrapGateOwned ? await this.syncStorage.normalizeLegacyDurationOperations(database, {
         ...context, ...(this.state.bootstrapGateOwned ? {
           gateToken: this.use.tabId(), replacementRequestId: this.host.crypto.randomUUID()
         } : {})
       }) : { resolution: bootstrapState.resolution };
+      context.assertCurrent();
       const records = await this.readLocalRecords();
       context.assertCurrent();
       this.syncStorage.assertAccountOwnership(records.snapshot?.value, context.expectedUserId);
-      this.restoreLocalRecords(records, normalized);
-      await this.persistNewLocalIdentity(records);
+      context.publishIdentity(() => this.restoreLocalRecords(records, normalized));
+      await this.persistNewLocalIdentity(records, context);
+      context.assertCurrent();
       this.use.rebuildOptimisticState();
       this.use.quarantineOwnerState();
+      return this.connection.captureDatabaseContext();
     }
 
-    async refreshMigratedPreferences(gate) {
+    async refreshMigratedPreferences(gate, context) {
+      accountOperation.requireBound(context);
       if (!gate?.legacyAutoStartMigration?.migrated && !gate?.legacySelectedTaskMigration?.migrated) return;
-      const context = this.use.captureAccountContext();
       const queues = await this.syncStorage.readSyncState(this.connection.database());
       context.assertCurrent();
       this.syncStorage.assertAccountOwnership(queues.snapshot, context.expectedUserId);
@@ -465,12 +545,35 @@
       while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
       await this.syncStorage.guardedMutation(this.connection.database(), [], (transaction) => {
         transaction.objectStore(META_STORE).put({ key: "settings", value: settings });
-      }, { ...context, expectedUserId }).catch((error) => storageFailure(error, this.use));
+      }, { ...context, expectedUserId, deviceId: this.state.deviceId })
+        .catch((error) => storageFailure(error, this.use));
     }
 
-    async reloadPersistedState(persisted = null) {
+    assertDisplayContext(records) {
+      this.state.projectionPending = records.projectionPending ?? null;
+      if (records.projectionPending == null) return;
+      try { this.syncStorage.assertPersistedDisplayContext(records, records.deviceId || this.state.deviceId); }
+      catch (error) {
+        if (error.name !== "PersistedDisplayContextError") throw error;
+        const message = `Persisted display context needs recovery. ${error.message}`;
+        Object.assign(this.state, { workspaceBlocked: true, bootstrapBlocked: true,
+          bootstrapError: message, conflict: message });
+        this.use.showNotice(message);
+        throw error;
+      }
+    }
+
+    async validatePersistedDisplayContext(context) {
+      accountOperation.requireBound(context);
+      const records = await this.syncStorage.readSyncState(this.connection.database());
+      context.assertCurrent();
+      this.assertDisplayContext(records);
+      return records;
+    }
+
+    async reloadPersistedState(persisted = null, context = this.use.captureAccountContext(), failureOwner = "storage") {
+      accountOperation.requireBound(context);
       const expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
-      const context = this.use.captureAccountContext();
       const syncState = persisted || await this.syncStorage.readSyncState(this.connection.database());
       if (!syncState.snapshot) throw new Error(this.use.tr(
         "sync.snapshotUnavailable", {}, "Canonical timer snapshot is unavailable."
@@ -481,14 +584,21 @@
         this.use.assertExpectedAccount(expectedUserId);
         this.syncStorage.assertAccountOwnership(snapshot, expectedUserId);
       } catch (error) {
+        if (!accountOperation.isCurrent(context) || failureOwner === "mutation") throw error;
         storageFailure(error, this.use);
       }
+      this.assertDisplayContext(syncState);
+      context.publishIdentity(() => this.installPersistedState(syncState));
+    }
+
+    installPersistedState(syncState) {
+      const snapshot = syncState.snapshot;
       this.state.revision = Number(snapshot.revision) || 0;
-      this.state.baseDurationsMs = this.use.normalizeDurationsMs(snapshot.durationsMs);
+      this.state.baseDurationsMs = this.use.clone(snapshot.durationsMs);
       this.state.durationsMs = this.use.clone(this.state.baseDurationsMs);
       this.state.baseAutoStartBreaks = snapshot.autoStartBreaks === true;
       this.state.baseSelectedTaskId = snapshot.selectedTaskId ?? null;
-      this.state.baseTimer = snapshot.canonicalTimer ? this.use.normalizeTimer(snapshot.canonicalTimer)
+      this.state.baseTimer = snapshot.canonicalTimer ? this.use.clone(snapshot.canonicalTimer)
         : this.use.emptyTimer(this.state.selectedPhase, this.state.baseDurationsMs[this.state.selectedPhase]);
       this.state.baseHistory = Array.isArray(snapshot.history) ? snapshot.history : [];
       this.state.baseTasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
@@ -503,15 +613,20 @@
       this.state.pendingSelectedTaskOperations = syncState.selectedTaskOperations || [];
       this.state.deliveryProof = this.syncStorage.sanitizeDeliveryProof(syncState.deliveryProof);
       this.state.canonicalHead = this.syncStorage.sanitizeCanonicalHead(syncState.canonicalHead);
-      this.state.projectionPending = this.syncStorage.sanitizeProjectionPending(syncState.projectionPending);
+      this.state.projectionPending = syncState.projectionPending ?? null;
       this.state.outgoingSync = syncState.outgoing || null;
+      this.state.timerDependencies = syncState.timerDependencies ?? null;
+      this.state.workspaceObservation = syncState.workspaceObservation ?? null;
+      this.state.completionState = syncState.completionState ?? null;
+      if (syncState.settings) this.state.selectedPhase = syncState.settings.selectedPhase;
+      if (syncState.deviceSequence != null) this.state.deviceSequence = syncState.deviceSequence;
       this.use.rebuildOptimisticState();
     }
   }
 
   class MutationRepository {
-    constructor(state, external, use, connection) {
-      Object.assign(this, { state, use, connection }, external);
+    constructor(state, external, use, connection, localState) {
+      Object.assign(this, { state, use, connection, localState }, external);
       this.inFlightDurationOperationIds = new Set();
     }
 
@@ -519,184 +634,85 @@
       return bindActions(this, [
         "persistCommand", "persistTaskOperation", "persistAutoStartOperation",
         "persistSelectedTaskOperation", "persistDurationOperation", "persistRetargetOperation",
-        "setInFlightDurationOperationIds"
+        "setInFlightDurationOperationIds", "persistWorkspaceIntent", "persistWorkspaceCompletion"
       ]);
     }
 
-    timerCommandContext(type, options, localNow) {
-      const activeTimer = this.state.timer;
-      const starting = type === "start";
-      const startingPhase = this.use.phaseConfig()[options.phase] ? options.phase : this.state.selectedPhase;
-      const phase = starting ? startingPhase : activeTimer.phase;
-      const timerId = starting ? this.host.crypto.randomUUID() : activeTimer.id;
-      if (!timerId) throw new Error(this.use.tr("timer.noTimer", {}, "No timer is available for this action."));
-      return {
-        type, activeTimer, starting, startingPhase, phase, timerId, localNow,
-        now: this.use.trustedNow(localNow),
-        plannedDurationMs: starting ? this.state.durationsMs[startingPhase] : activeTimer.plannedDurationMs
-      };
+    mutationInput(extra, context) {
+      const localNowMs = Date.now();
+      const { context: _context, ...options } = extra;
+      return { ...context, deviceId: this.state.deviceId,
+        tabId: this.use.tabId(), nowMs: this.use.trustedNow(localNowMs), localNowMs,
+        leaseMs: TIMER_OWNER_LEASE_MS, monotonicMs: this.host.performance?.now?.() ?? null,
+        continuityId: this.use.clockContinuityId?.() ?? null, timerUuid: this.host.crypto.randomUUID(),
+        inFlightDurationOperationIds: [...this.inFlightDurationOperationIds], ...options };
     }
 
-    buildTimerCommand(context, allocation) {
-      const command = {
-        id: allocation.id, deviceId: this.state.deviceId, deviceSequence: allocation.deviceSequence,
-        timerId: context.timerId, type: context.type, phase: context.phase,
-        plannedDurationMs: context.plannedDurationMs,
-        occurredAt: new Date(allocation.wallMs).toISOString(), hlcWallMs: allocation.wallMs,
-        hlcCounter: allocation.counter, observedElapsedMs: context.starting ? 0
-          : Math.round(this.use.elapsedFor(context.activeTimer, context.now))
-      };
-      const selectedTaskId = this.use.selectedTaskIdForNextFocus();
-      if (context.starting && context.startingPhase === "focus" && selectedTaskId) command.taskId = selectedTaskId;
-      if (!context.starting && context.activeTimer.dependsOnCommandId) {
-        command.dependsOnCommandId = context.activeTimer.dependsOnCommandId;
-      }
-      return command;
+    async commitWorkspace(extra) {
+      const context = extra.context || this.use.captureAccountContext();
+      try { accountOperation.requireBound(context); }
+      catch (error) { rethrowOwnershipWithoutReport(error, this.use); }
+      const input = this.mutationInput(extra, context);
+      const plan = await this.syncStorage.planWorkspaceMutation(this.connection.database(), input)
+        .catch((error) => {
+          if (error.name === "LegacyDependencyRecoveryError" && accountOperation.isCurrent(context)) {
+            this.state.workspaceBlocked = error.recovery.blocksMutations;
+            this.state.workspaceRecovery = error.recovery;
+            this.state.conflict = error.message;
+          }
+          rethrowOwnershipWithoutReport(error, this.use);
+        });
+      try {
+        input.assertCurrent();
+        this.use.assertExpectedAccount(input.ownerId);
+        if (plan.outcome === "planned") await this.localState.reloadPersistedState(null, context, "mutation");
+        input.assertCurrent();
+      } catch (error) { rethrowOwnershipWithoutReport(error, this.use); }
+      return plan;
     }
 
-    async persistCommand(type, options = {}) {
-      const localNow = Date.now();
-      const context = this.timerCommandContext(type, options, localNow);
-      const command = await this.allocateOperation({
-        ...this.use.captureAccountContext(),
-        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
-        storeName: PENDING_STORE, requireProjection: true, nowMs: context.now,
-        withDeviceSequence: true, withUuidV7: true,
-        timerOwner: context.starting ? {
-          deviceId: this.state.deviceId, tabId: this.use.tabId(), nowMs: localNow, leaseMs: TIMER_OWNER_LEASE_MS
-        } : null,
-        build: (allocation) => this.buildTimerCommand(context, allocation)
-      });
-      this.state.deviceSequence = command.deviceSequence;
-      this.state.hlcWallMs = command.hlcWallMs;
-      this.state.hlcCounter = command.hlcCounter;
-      return command;
+    persistWorkspaceIntent(intent, options = {}) {
+      return this.commitWorkspace({ intent, ...options });
     }
 
-    mutationOptions(storeName, build, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      return {
-        ...this.use.captureAccountContext(), storeName, expectedUserId, requireProjection: true, nowMs: this.use.trustedNow(),
-        withDeviceSequence: false, withUuidV7: true, build
-      };
+    persistWorkspaceCompletion(stage, requestedTimer, context = this.use.captureAccountContext()) {
+      accountOperation.requireBound(context);
+      return this.commitWorkspace({ stage, requestedTimer, context });
     }
 
-    async allocateOperation(options) {
-      const expectedUserId = options.expectedUserId;
-      const operation = await this.syncStorage.allocateMutation(this.connection.database(), options)
-        .catch((error) => rethrowOwnershipWithoutReport(error, this.use));
-      try { options.assertCurrent?.(); } catch (error) { rethrowOwnershipWithoutReport(error, this.use); }
-      this.use.assertExpectedAccount(expectedUserId);
-      return operation;
+    async persistCommand(type) {
+      const plan = await this.persistWorkspaceIntent({ kind: type });
+      return plan.commands[0] ?? null;
     }
 
-    async persistTaskOperation(type, task, expectedUserId) {
-      const operation = await this.allocateOperation(this.mutationOptions(
-        TASK_PENDING_STORE, ({ id, wallMs, counter }) => {
-          const value = {
-            id, deviceId: this.state.deviceId, taskId: task.id, type,
-            occurredAt: new Date(wallMs).toISOString(), hlcWallMs: wallMs, hlcCounter: counter
-          };
-          if (type === "upsert") value.title = task.title;
-          return value;
-        }, expectedUserId
-      ));
-      this.recordOperationHlc(operation);
-      return operation;
+    async persistTaskOperation(type, task, expectedUserId = this.use.captureAccountContext().ownerId) {
+      const intent = type === "upsert" ? { kind: "upsertTask", title: task.title }
+        : { kind: "deleteTask", taskId: task.id };
+      const plan = await this.persistWorkspaceIntent(intent, { preference: true, ownerId: expectedUserId });
+      return plan.durableOperations?.taskOperations[0] ?? null;
     }
 
-    async persistAutoStartOperation(enabled, expectedUserId) {
-      const operation = await this.allocateOperation(this.mutationOptions(
-        AUTO_START_PENDING_STORE, ({ id, wallMs, counter }) => ({
-          id, deviceId: this.state.deviceId, enabled, occurredAt: new Date(wallMs).toISOString(),
-          hlcWallMs: wallMs, hlcCounter: counter
-        }), expectedUserId
-      ));
-      this.recordOperationHlc(operation);
-      return operation;
+    async persistAutoStartOperation(enabled, expectedUserId = this.use.captureAccountContext().ownerId) {
+      const plan = await this.persistWorkspaceIntent({ kind: "setAutoStart", enabled }, { preference: true, ownerId: expectedUserId });
+      return plan.durableOperations?.autoStartOperations[0] ?? null;
     }
 
-    buildRetargetCommand(timer, taskId, allocation) {
-      const fields = this.syncCore.retargetRequestFields
-        ? this.syncCore.retargetRequestFields(taskId)
-        : { taskId };
-      return {
-        id: allocation.id, deviceId: this.state.deviceId, deviceSequence: allocation.deviceSequence,
-        timerId: timer.id, type: "retarget", phase: "focus",
-        plannedDurationMs: timer.plannedDurationMs,
-        occurredAt: new Date(allocation.wallMs).toISOString(),
-        hlcWallMs: allocation.wallMs, hlcCounter: allocation.counter,
-        observedElapsedMs: Math.round(this.use.elapsedFor(timer, this.use.trustedNow())),
-        ...fields
-      };
+    async persistSelectedTaskOperation(taskId, expectedUserId = this.use.captureAccountContext().ownerId) {
+      const plan = await this.persistWorkspaceIntent({ kind: "selectTask", taskId }, { preference: true, ownerId: expectedUserId });
+      return plan.durableOperations?.selectedTaskOperations[0] ?? null;
     }
 
     async persistRetargetOperation(timerId, taskId) {
-      const timer = this.state.timer;
-      if (!timer?.id || timer.id !== timerId) throw new Error(this.use.tr(
-        "timer.noTimer", {}, "No timer is available for this action."
-      ));
-      if (!["running", "paused"].includes(timer.status) || timer.phase !== "focus") {
-        throw new Error(this.use.tr("timer.noTimer", {}, "No timer is available for this action."));
-      }
-      if (taskId !== null && !this.state.tasks.some((task) => task.id === taskId)) {
-        throw new Error(this.use.tr("timer.noTimer", {}, "No timer is available for this action."));
-      }
-      const command = await this.allocateOperation({
-        ...this.use.captureAccountContext(),
-        expectedUserId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null,
-        storeName: PENDING_STORE, requireProjection: true, nowMs: this.use.trustedNow(),
-        withDeviceSequence: true, withUuidV7: true,
-        build: (allocation) => this.buildRetargetCommand(timer, taskId, allocation)
+      const plan = await this.persistWorkspaceIntent({ kind: "selectTask", taskId }, {
+        preference: true, requestedTimer: this.state.timer
       });
-      this.state.deviceSequence = command.deviceSequence;
-      this.state.hlcWallMs = command.hlcWallMs;
-      this.state.hlcCounter = command.hlcCounter;
-      return command;
-    }
-
-    async persistSelectedTaskOperation(taskId, expectedUserId) {
-      const operation = await this.allocateOperation(this.mutationOptions(
-        SELECTED_TASK_PENDING_STORE, ({ id, wallMs, counter }) => ({
-          id, deviceId: this.state.deviceId, taskId, occurredAt: new Date(wallMs).toISOString(),
-          hlcWallMs: wallMs, hlcCounter: counter
-        }), expectedUserId
-      ));
-      this.recordOperationHlc(operation);
-      return operation;
-    }
-
-    recordOperationHlc(operation) {
-      this.state.hlcWallMs = operation.hlcWallMs;
-      this.state.hlcCounter = operation.hlcCounter;
+      return plan.commands[0] ?? null;
     }
 
     async persistDurationOperation(phase, durationMs) {
-      const options = this.mutationOptions(DURATION_PENDING_STORE, ({ id, wallMs, counter }) => ({
-        id, deviceId: this.state.deviceId, ownerId: this.use.tabId(), phase, durationMs,
-        occurredAt: new Date(wallMs).toISOString(), hlcWallMs: wallMs, hlcCounter: counter
-      }));
-      options.supersede = (existing) => existing.phase === phase
-        && existing.ownerId === this.use.tabId() && !this.inFlightDurationOperationIds.has(existing.id);
-      const database = this.connection.database();
-      const operation = await this.allocateOperation(options);
-      const queues = await this.syncStorage.readSyncState(database);
-      try {
-        options.assertCurrent();
-        this.use.assertExpectedAccount(options.expectedUserId);
-        this.syncStorage.assertAccountOwnership(queues.snapshot, options.expectedUserId);
-      } catch (error) {
-        // Fail-closed (S52, mirrors S50): never return stale queues after
-        // a post-write ownership change. The caller
-        // (`issueDurationOperation`) owns the
-        // `actions.duration.save-failed` Sentry event, so rethrow without
-        // an inner report.
-        rethrowOwnershipWithoutReport(error, this.use);
-      }
-      this.recordOperationHlc(operation);
-      return {
-        operation,
-        pendingDurationOperations: (queues.durationOperations || []).sort(this.use.compareDurationOperations)
-      };
+      const plan = await this.persistWorkspaceIntent({ kind: "setDuration", phase, minutes: durationMs / 60000 }, { preference: true });
+      return { operation: plan.durableOperations?.durationOperations[0] ?? null,
+        pendingDurationOperations: this.state.pendingDurationOperations };
     }
 
     setInFlightDurationOperationIds(values) {
@@ -707,7 +723,7 @@
   function create({ state, external, use }) {
     const connection = new DatabaseConnection(state, external, use);
     const localState = new LocalStateRepository(state, external, use, connection);
-    const mutations = new MutationRepository(state, external, use, connection);
+    const mutations = new MutationRepository(state, external, use, connection, localState);
     return { ...connection.actions(), ...localState.actions(), ...mutations.actions() };
   }
 

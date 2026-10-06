@@ -278,6 +278,21 @@ Checked `just-me-inc`/`pomodorough` 2026-09-16: 20 unresolved issues are Apple `
 
 ## Shared definition of done
 
+### Core client migration checkpoint, 2026-10-02
+
+Status: partial, not release-qualified. The PWA now routes supported workspace intents, completion mutations, display reads, trusted-clock observations, raw bootstrap classification, outgoing batch selection, and rejected-Finish selection through the official Core `v0.46.0` WASM at `4c16270f2da6f4a65a2813070670f2ac98624ad0`.
+
+The adapter commits new atomic groups, proof, selection, allocation, dependencies, observations, ownership, and queued members in one IndexedDB transaction. Saved requests replay exactly. Possibly delivered oversized or legacy requests without their original bytes remain blocked and unchanged.
+
+Remaining blockers:
+
+- Official intent and read-model contracts cannot consume the persisted head-covered PWA display context. Affected timer actions fail closed without rewriting canonical state.
+- Official `reconcile.rebase.v2` rejects the server's completed timer with its matching history row. Actual completion synchronization remains blocked. Null-timer acknowledgement vectors pass but do not close this gap.
+- Response HLC maximum-merge semantics and missing-owner installation retain local policy.
+- The full web suite is not green. Legacy mocked contracts and storage entrypoints need migration before verified-unused domain duplicates can be removed.
+
+`docs/pwa-core-migration.md` records operation ownership, provenance, exact retry behavior, regression scope, and the required Core contracts. S01, S02, S05, S06, and S07 work remains retained.
+
 Every backlog item that changes core state or sync must include:
 1. durable-write-before-render behavior;
 2. offline queue and restart tests;

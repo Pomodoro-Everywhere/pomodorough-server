@@ -21,6 +21,8 @@ class FakeGitHub:
         self.tag_sha = COMMIT
         self.calls = []
         self.hook = lambda endpoint, arguments: None
+        self.immutable_enabled = True
+        self.immutable_payload = None
         self.contents = {}
         assets = []
         for number, path in enumerate(sorted(directory.iterdir()), 100):
@@ -35,6 +37,14 @@ class FakeGitHub:
     def api(self, endpoint, *arguments, binary=False):
         self.calls.append((endpoint, arguments))
         self.hook(endpoint, arguments)
+        if endpoint.endswith("/immutable-releases"):
+            if self.immutable_payload is not None:
+                return copy.deepcopy(self.immutable_payload)
+            if not self.immutable_enabled:
+                raise subprocess.CalledProcessError(
+                    returncode=1, cmd=["gh", "api", endpoint],
+                    output=b'{"message": "Not Found"}', stderr=b"Not Found")
+            return {"enabled": True, "enforced_by_owner": False}
         if "/git/ref/tags/" in endpoint:
             return {"object": {"type": "commit", "sha": self.tag_sha}}
         if endpoint == self.root + "?per_page=100":
@@ -86,6 +96,19 @@ class PublicationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(self.github.patches(), [self.github.root + "/42"])
         self.assertTrue(self.github.release["immutable"])
+
+    def test_immutable_releases_disabled_refuses_before_patch(self):
+        self.verify()
+        self.github.immutable_enabled = False
+        with self.assertRaisesRegex(ValueError, "immutable releases are disabled"):
+            self.publish()
+        self.assertEqual(self.github.patches(), [])
+        self.assertTrue(self.github.release["draft"])
+        self.github.immutable_enabled = True
+        self.github.immutable_payload = {"enabled": False, "enforced_by_owner": False}
+        with self.assertRaisesRegex(ValueError, "owner action"):
+            self.publish()
+        self.assertEqual(self.github.patches(), [])
 
     def test_replacement_draft_same_tag_rejected_before_patch(self):
         self.verify()

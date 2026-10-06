@@ -352,7 +352,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	db, err := s.store.OpenExistingUser(r.Context(), userID)
 	if err != nil {
-		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
+		s.writeRefreshOpenError(w, r, err)
 		return
 	}
 	defer db.Close()
@@ -383,6 +383,14 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, nativeTokenResponse(accessToken, refreshToken, access.ExpiresAt, refresh.ExpiresAt))
+}
+
+func (s *Server) writeRefreshOpenError(w http.ResponseWriter, r *http.Request, err error) {
+	if isUnauthorized(err) {
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	s.internalAPIError(w, r, "open user account for refresh", err)
 }
 
 func (s *Server) verifyGoogleIDToken(ctx context.Context, rawToken string, verifier *oidc.IDTokenVerifier, expectedNonce string, allowedAudiences map[string]struct{}) (googleIdentity, error) {

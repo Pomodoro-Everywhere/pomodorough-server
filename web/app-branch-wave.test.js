@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const runtimeModule = require("./app-runtime.js");
 const sessionModule = require("./app-session.js");
 const actionModule = require("./app-actions.js");
+const workspaceFixture = require("./test/p222-completion-fixture.js");
 
 function runtimeModuleValue(name, fields = {}) {
   const manifest = {
@@ -155,6 +156,7 @@ function dialogDocument() {
 
 function sessionFixture(overrides = {}) {
   const state = sessionState(overrides.state);
+  let database = {};
   const calls = [];
   const localStorage = overrides.localStorage || memoryStorage();
   const host = {
@@ -179,10 +181,13 @@ function sessionFixture(overrides = {}) {
   };
   const cleanup = require("./app-storage.js").create({ state, external: { host, syncCore, syncStorage }, use: {} });
   const use = {
-    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host, () => database),
     cleanupIdentity: cleanup.cleanupIdentity, assertCleanupIdentity: cleanup.assertCleanupIdentity,
-    database: () => ({}), tabId: () => "tab-1", needsBootstrapResolution: () => false,
-    clearLocalData: async () => calls.push("clear"), tr: (_key, _values, fallback) => fallback,
+    database: () => database, tabId: () => "tab-1", needsBootstrapResolution: () => false,
+    clearLocalData: async () => {
+      calls.push("clear"); database = null;
+      return incarnationFixture.captureAccountContext(state, host, () => database);
+    }, tr: (_key, _values, fallback) => fallback,
     render: () => calls.push("render"), renderProfile: () => calls.push("profile"),
     renderSyncStatus: () => calls.push("status"), showNotice: (value) => calls.push(["notice", value]),
     quarantineOwnerState: () => calls.push("quarantine"), restoreOwnerState: () => calls.push("restore"),
@@ -226,24 +231,24 @@ test("session stream gates, parses hints, polls, and closes offline", () => {
 test("session payload checks preserve sign-out and account-switch guarantees", async () => {
   const unauthorized = sessionFixture({ localStorage: memoryStorage({ pomodoroughPendingLogout: "1" }),
     host: { fetch: async () => ({ status: 401 }) } });
-  assert.equal(await unauthorized.actions.fetchSessionPayload(), null);
+  assert.equal(await unauthorized.actions.fetchSessionPayload(unauthorized.use.captureAccountContext()), null);
   assert.equal(unauthorized.localStorage.getItem("pomodoroughPendingLogout"), null);
   assert.equal(unauthorized.calls.filter((entry) => entry[0] === "assign").length, 1);
   unauthorized.actions.redirectToLogin();
   assert.equal(unauthorized.calls.filter((entry) => entry[0] === "assign").length, 1);
 
   const failed = sessionFixture({ host: { fetch: async () => ({ status: 503, ok: false }) } });
-  await assert.rejects(() => failed.actions.fetchSessionPayload(), /503/);
+  await assert.rejects(() => failed.actions.fetchSessionPayload(failed.use.captureAccountContext()), /503/);
   const switched = sessionFixture({ host: { fetch: async () => ({ ok: true, status: 200,
     json: async () => ({ user: incarnationFixture.accountUser("user-2"), csrfToken: "new" }) }) } });
   assert.equal(await switched.actions.loadSession(), true);
   assert.ok(switched.calls.includes("quarantine"));
   assert.ok(switched.calls.includes("restart"));
-  await assert.rejects(() => switched.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1")), /account changed/i);
+  await assert.rejects(() => switched.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1"), switched.use.captureAccountContext()), /account changed/i);
 
   const signedOut = sessionFixture();
   signedOut.actions.setFetchForTest(async () => ({ status: 401 }));
-  await assert.rejects(() => signedOut.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1")), /requires sign-in/i);
+  await assert.rejects(() => signedOut.actions.refreshMutationCsrf(incarnationFixture.ownerId("user-1"), signedOut.use.captureAccountContext()), /requires sign-in/i);
 });
 
 test("pending sign-out cleans up before revocation and retains marker when revocation is unavailable", async () => {
@@ -278,29 +283,29 @@ test("offline restoration and cleanup fail closed around unavailable storage", a
   assert.equal(fixture.actions.pendingLocalLogout(), false);
   fixture.actions.markPendingLogout();
   fixture.actions.clearPendingLogout();
-  assert.equal(await fixture.actions.clearPendingLogoutData(), true);
+  assert.equal((await fixture.actions.clearPendingLogoutData(undefined, fixture.use.captureAccountContext())).cleared, true);
 
   fixture.actions.setStorageMethodForTest("clearBootstrapGate", async () => {});
   assert.equal(await fixture.actions.activateCachedOwnerOffline(), true);
   assert.equal(fixture.state.offlineOwnerMode, true);
   const cleanup = sessionFixture({ localStorage: memoryStorage({ pomodoroughPendingLogout: "1" }),
     use: { clearLocalData: async () => { throw new Error("disk full"); } } });
-  assert.equal(await cleanup.actions.clearPendingLogoutData(), false);
+  assert.equal((await cleanup.actions.clearPendingLogoutData(undefined, cleanup.use.captureAccountContext())).cleared, false);
   assert.ok(cleanup.calls.some((entry) => entry[0] === "notice" && /disk full/.test(entry[1])));
 });
 
 test("session restore chooses bootstrap, normal sync, and retry recovery", async () => {
   const bootstrap = sessionFixture({ use: { needsBootstrapResolution: () => true } });
-  await bootstrap.actions.restoreSessionAndSync();
+  await bootstrap.actions.restoreSessionAndSync(bootstrap.use.captureAccountContext());
   assert.ok(bootstrap.calls.includes("prepare"));
 
   const normal = sessionFixture();
-  await normal.actions.restoreSessionAndSync();
+  await normal.actions.restoreSessionAndSync(normal.use.captureAccountContext());
   assert.ok(normal.calls.some((entry) => entry[0] === "sync" && entry[1] === true));
 
   const retry = sessionFixture({ state: { authenticated: false, sessionIdentityValidated: false, csrfToken: null },
     host: { fetch: async () => { throw new Error("offline"); } }, syncCore: { canUseCachedOwnerOffline: () => false } });
-  await retry.actions.restoreSessionAndSync();
+  await retry.actions.restoreSessionAndSync(retry.use.captureAccountContext());
   assert.equal(retry.state.retrying, true);
   assert.ok(retry.calls.includes("retry"));
   retry.actions.handleOffline();
@@ -408,31 +413,51 @@ function actionBranchFixture(overrides = {}) {
   return { actions, calls, state, syncStorage, timers, use };
 }
 
-test("durable action mutations cover writes, no-ops, and translated failures", async () => {
-  const f = actionBranchFixture();
-  assert.equal(await f.actions.issueDurationOperation("focus", 1000), false);
-  assert.equal(await f.actions.issueDurationOperation("focus", 2000), true);
-  assert.equal(await f.actions.issueAutoStartOperation(true), true);
-  f.state.autoStartBreaks = true;
-  assert.equal(await f.actions.issueAutoStartOperation(true), false);
-  assert.equal(await f.actions.issueSelectedTaskOperation("task"), true);
-  f.state.selectedTaskId = "task";
-  assert.equal(await f.actions.issueSelectedTaskOperation("task"), false);
-  assert.equal(await f.actions.issueTaskOperation("upsert", { id: "new" }), true);
-  assert.equal(await f.actions.issueCommand("pause"), true);
-  f.state.actionLocked = true;
-  assert.equal(await f.actions.issueTaskOperation("delete", { id: "new" }), false);
-  assert.equal(await f.actions.issueCommand("resume"), false);
-  f.state.actionLocked = false;
-  f.use.persistDurationOperation = async () => { throw new Error(""); };
-  assert.equal(await f.actions.issueDurationOperation("focus", 3000), false);
-  assert.ok(f.calls.some((entry) => entry[0] === "notice" && /Duration change/.test(entry[1])));
+test("durable action mutations cover writes, no-ops, and translated failures", async (t) => {
+  const { client, core } = await workspaceFixture.fixture(t);
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  assert.equal(await client.use.issueDurationOperation("focus", 1500000), false);
+  assert.equal(await client.use.issueDurationOperation("focus", 1800000), true);
+  assert.equal(await client.use.issueAutoStartOperation(true), true);
+  assert.equal(await client.use.issueAutoStartOperation(true), false);
+  const task = core.taskIdentity({ title: "Current task" });
+  assert.equal(await client.use.issueTaskOperation("upsert", task), true);
+  assert.equal(await client.use.issueSelectedTaskOperation(task.id), true);
+  assert.equal(await client.use.issueSelectedTaskOperation(task.id), false);
+  await workspaceFixture.startFocus(client);
+  assert.equal(await client.use.issueCommand("pause"), true);
+  client.state.actionLocked = true;
+  assert.equal(await client.use.issueTaskOperation("delete", task), false);
+  assert.equal(await client.use.issueCommand("resume"), false);
+  client.state.actionLocked = false;
+  const database = client.use.database();
+  const transaction = database.transaction.bind(database);
+  database.transaction = (...argumentsList) => {
+    const current = transaction(...argumentsList);
+    const objectStore = current.objectStore.bind(current);
+    current.objectStore = (name) => {
+      const store = objectStore(name);
+      if (name === "pendingDurations" && current.mode === "readwrite") store.add = () => { throw new Error(""); };
+      return store;
+    };
+    return current;
+  };
+  const before = await workspaceFixture.dump(database);
+  assert.equal(await client.use.issueDurationOperation("focus", 2100000), false);
+  assert.deepEqual(await workspaceFixture.dump(database), before);
+  assert.ok(client.notices.some((message) => /Duration change/.test(message)));
 });
 
-test("task identity distinguishes duplicates and validation failures", async () => {
-  const duplicate = actionBranchFixture({ state: { tasks: [{ id: "deep", title: "Deep" }] } });
-  assert.equal(await duplicate.actions.addTask("Deep"), true);
-  assert.equal(await duplicate.actions.deleteTask({ id: "deep" }), true);
+test("task identity distinguishes duplicates and validation failures", async (t) => {
+  const { client, core } = await workspaceFixture.fixture(t);
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  assert.equal(await client.use.addTask("Deep"), true);
+  const before = await workspaceFixture.dump(client.use.database());
+  assert.equal(await client.use.addTask("Deep"), true);
+  const after = await workspaceFixture.dump(client.use.database());
+  assert.deepEqual(after.pendingTasks, before.pendingTasks);
+  assert.equal(await client.use.deleteTask(client.state.tasks[0]), true);
   for (const [message, expected] of [["must not be empty", /printable/], ["over 512 bytes", /too long/]]) {
     const invalid = actionBranchFixture({ use: { sharedTaskIdentity: async () => { throw new Error(message); } } });
     await assert.rejects(() => invalid.actions.addTask("bad"), expected);
@@ -483,57 +508,39 @@ function finishActionBranchFixture(overrides = {}) {
   });
 }
 
-test("timer finish, ownership retry, and cancellation preserve atomic outcomes", async () => {
-  const command = finishResultCommand();
-  const breakCommand = {
-    id: "break-start", deviceId: "device", deviceSequence: 9, timerId: "break", type: "start",
-    phase: "short_break", plannedDurationMs: 300_000, occurredAt: "1970-01-01T00:00:02.000Z",
-    hlcWallMs: 2000, hlcCounter: 2, observedElapsedMs: 0, dependsOnCommandId: "finish",
-    generatedBreak: true
-  };
-  const finished = finishActionBranchFixture({ state: { autoStartBreaks: true }, syncStorage: {
-    finishTimer: async (_db, request) => {
-      assert.equal(Object.hasOwn(request, "breakPhase"), false);
-      assert.equal(request.requestedTimer.id, "timer");
-      assert.equal(request.breakTimerId, "break");
-      return {
-        transitioned: true, reason: "", selectedPhase: "short_break", selectedPhaseDurationMs: 300_000,
-        commands: [command, breakCommand]
-      };
-    }, cancelAndClearTimer: async () => ({ transitioned: true, commands: [command] })
-  } });
-  assert.equal(await finished.actions.finishTimer(false), true);
-  assert.equal(await finished.actions.cancelAndClearTimer(), true);
-  const retry = actionBranchFixture({ syncStorage: {
-    finishTimer: async () => ({ transitioned: false, reason: "not_owner", retryAtMs: Date.now() + 500 })
-  } });
-  assert.equal(await retry.actions.finishTimer(true), true);
-  retry.timers[0].callback();
-  assert.ok(retry.calls.includes("timer"));
-  assert.equal(retry.actions.completionRetryDelay({ reason: "other" }), null);
-  assert.equal(retry.actions.completionRetryDelay({ reason: "not_owner", retryAtMs: "bad" }, 1000), 15001);
-  const ignored = actionBranchFixture();
-  assert.equal(await ignored.actions.finishTimer(false), false);
-  assert.equal(await ignored.actions.finishTimer(true), true);
+test("timer finish, ownership retry, and cancellation preserve atomic outcomes", async (t) => {
+  const { client, open } = await workspaceFixture.fixture(t, { autoStartBreaks: true });
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  await workspaceFixture.startFocus(client);
+  const peer = await open();
+  await peer.use.reloadPersistedState();
+  peer.use.trustedNow = () => workspaceFixture.nowMs + 1500000;
+  const before = await workspaceFixture.dump(client.use.database());
+  assert.equal(await peer.use.finishTimer(true), true);
+  assert.deepEqual(await workspaceFixture.dump(client.use.database()), before);
+  assert.equal(await client.use.finishTimer(false), true);
+  const after = await workspaceFixture.dump(client.use.database());
+  const finish = after.pending.find((command) => command.type === "finish");
+  const generated = after.pending.find((command) => command.generatedBreak);
+  assert.equal(generated.dependsOnCommandId, finish.id);
+  assert.equal(await client.use.cancelAndClearTimer(), true);
+  const cancelled = await workspaceFixture.dump(client.use.database());
+  assert.deepEqual(cancelled.pending.slice(-2).map((command) => command.type), ["cancel", "clear"]);
+  assert.equal(client.use.completionRetryDelay({ reason: "other" }), null);
+  assert.equal(client.use.completionRetryDelay({ reason: "not_owner", retryAtMs: "bad" }, 1000), 15001);
 });
 
-test("dependent finish command accepts its exact optional producer key", async () => {
-  const dependent = finishActionBranchFixture({
-    state: {
-      timer: {
-        id: "timer", phase: "focus", status: "running", plannedDurationMs: 60_000,
-        dependsOnCommandId: "parent"
-      }
-    },
-    syncStorage: { finishTimer: async () => ({
-      transitioned: true, reason: "", selectedPhase: "short_break",
-      selectedPhaseDurationMs: 300_000,
-      commands: [finishResultCommand({ dependsOnCommandId: "parent" })]
-    }) }
-  });
-
-  assert.equal(await dependent.actions.finishTimer(false), true);
-  assert.equal(dependent.state.pending[0].dependsOnCommandId, "parent");
+test("dependent finish command accepts its exact optional producer key", async (t) => {
+  const { client } = await workspaceFixture.fixture(t, { autoStartBreaks: true });
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  await workspaceFixture.startFocus(client);
+  assert.equal(await client.use.finishTimer(false), true);
+  const generated = client.state.pending.find((command) => command.generatedBreak);
+  assert.equal(await client.use.finishTimer(false), true);
+  const finish = client.state.pending.at(-1);
+  assert.equal(finish.dependsOnCommandId, generated.id);
+  assert.equal(finish.timerId, generated.timerId);
+  assert.equal(finish.type, "finish");
 });
 
 test("malformed successful finish leaves caller state unchanged", async () => {
@@ -737,6 +744,9 @@ test("completion alerts cover audio, notifications, dismissal, and ownership hea
     close() { audioCalls.push("close"); }
   }
   const f = actionBranchFixture({ host: { AudioContext, Notification } });
+  const database = {};
+  f.use.database = () => database;
+  f.use.captureDatabaseContext = () => incarnationFixture.captureAccountContext(f.state, {}, () => database);
   assert.equal(f.actions.startCompletionAlert(null), false);
   assert.equal(f.actions.startCompletionAlert({ id: "timer", phase: "unknown" }), true);
   assert.equal(f.actions.startCompletionAlert({ id: "timer", phase: "focus" }), false);
@@ -747,9 +757,12 @@ test("completion alerts cover audio, notifications, dismissal, and ownership hea
   assert.equal(f.actions.completionAlertDismissedTimerIDTest(), "timer");
   assert.equal(f.actions.startCompletionAlert({ id: "timer", phase: "focus" }), false);
   let renewed = null;
-  f.syncStorage.renewTimerOwnership = async (_db, input) => { renewed = input; };
-  f.actions.heartbeatTimerOwnership();
-  await Promise.resolve();
+  f.syncStorage.renewTimerOwnership = async (issuedDatabase, input) => {
+    assert.equal(issuedDatabase, database);
+    input.assertCurrent();
+    renewed = input;
+  };
+  await f.actions.heartbeatTimerOwnership();
   assert.equal(renewed.timerId, "timer");
   f.state.ready = false;
   renewed = null;

@@ -21,53 +21,6 @@
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
 
-  function completedHistoryCount(history) {
-    if (!Array.isArray(history)) return 0;
-    const identities = new Set();
-    let count = 0;
-    for (const item of history) {
-      if (item?.status && item.status !== "completed") continue;
-      const identity = typeof item?.timerId === "string" && item.timerId
-        ? `timer:${item.timerId}`
-        : typeof item?.id === "string" && item.id
-          ? `id:${item.id}`
-          : null;
-      if (identity && identities.has(identity)) continue;
-      if (identity) identities.add(identity);
-      count += 1;
-    }
-    return count;
-  }
-
-  function durationsDiffer(durationsMs, defaults) {
-    if (!durationsMs || !defaults) return false;
-    return Object.keys(defaults).some((phase) => Number(durationsMs[phase]) !== Number(defaults[phase]));
-  }
-
-  function hasLocalState(local) {
-    return (Array.isArray(local.history) && local.history.length > 0)
-      || (Array.isArray(local.commands) && local.commands.length > 0)
-      || (Array.isArray(local.taskOperations) && local.taskOperations.length > 0)
-      || (Array.isArray(local.durationOperations) && local.durationOperations.length > 0)
-      || (Array.isArray(local.autoStartOperations) && local.autoStartOperations.length > 0)
-      || (Array.isArray(local.selectedTaskOperations) && local.selectedTaskOperations.length > 0)
-      || (Array.isArray(local.tasks) && local.tasks.length > 0)
-      || Boolean(local.timer?.id)
-      || Boolean(local.timer?.status && local.timer.status !== "idle")
-      || Boolean(local.selectedTaskId)
-      || local.autoStartBreaks === true
-      || durationsDiffer(local.durationsMs, local.defaultDurationsMs);
-  }
-
-  function hasRemoteState(remote) {
-    return (Array.isArray(remote.history) && remote.history.length > 0)
-      || (Array.isArray(remote.tasks) && remote.tasks.length > 0)
-      || Boolean(remote.canonicalTimer?.id)
-      || Boolean(remote.selectedTaskId)
-      || remote.autoStartBreaks === true
-      || durationsDiffer(remote.durationsMs, remote.defaultDurationsMs);
-  }
-
   function confirmationFor(strategy) {
     switch (strategy) {
       case "replace_remote":
@@ -175,6 +128,17 @@
     };
   }
 
+  function bootstrapDependencies(operations) {
+    if (Array.isArray(operations.timerDependencies)) return operations.timerDependencies;
+    const derived = [];
+    for (const command of operations.commands || []) {
+      if (command && typeof command.dependsOnCommandId === "string" && command.dependsOnCommandId) {
+        derived.push({ operationId: command.id, dependsOnOperationId: command.dependsOnCommandId });
+      }
+    }
+    return derived;
+  }
+
   function resolutionOperations(strategy, operations) {
     if (!STRATEGIES.has(strategy)) throw new Error(`Unknown bootstrap strategy: ${strategy}`);
     const includesAutoStart = Object.prototype.hasOwnProperty.call(operations, "autoStartOperations");
@@ -183,14 +147,30 @@
       if (includesAutoStart) result.autoStartOperations = [];
       return result;
     }
+    const storage = typeof module === "object" && module.exports ? require("./sync-storage.js") : globalThis.PomodoroughStorage;
+    const workspaceCore = typeof module === "object" && module.exports ? require("./workspace-core.js") : globalThis.PomodoroughWorkspaceCore;
+    const deviceId = operations.deviceId || operations.commands?.[0]?.deviceId || "legacy-web";
+    const queues = {
+      commands: operations.commands || [],
+      taskOperations: operations.taskOperations || [],
+      durationOperations: operations.durationOperations || [],
+      autoStartOperations: operations.autoStartOperations || [],
+      selectedTaskOperations: operations.selectedTaskOperations || []
+    };
+    const request = workspaceCore.batchRequest(queues, deviceId, bootstrapDependencies(operations), "commands", strategy, null);
+    const plan = storage.callWorkspaceCore("sync.batchPlan.v1", request);
+    if (plan.status !== "planned") {
+      throw new Error(`Bootstrap ${plan.status} exceeds Core aggregate limits. Retained work needs recovery.`);
+    }
+    const selected = workspaceCore.selectedRecords(plan, queues);
     const result = {
-      commands: sendableTimerCommands(operations.commands, Number.POSITIVE_INFINITY),
-      taskOperations: clone(operations.taskOperations || []),
-      durationOperations: (operations.durationOperations || []).map(durationRequestOperation),
-      selectedTaskOperations: (operations.selectedTaskOperations || []).map(selectedTaskRequestOperation)
+      commands: selected.commands.map(timerRequestCommand),
+      taskOperations: clone(selected.taskOperations),
+      durationOperations: selected.durationOperations.map(durationRequestOperation),
+      selectedTaskOperations: selected.selectedTaskOperations.map(selectedTaskRequestOperation)
     };
     if (includesAutoStart) {
-      result.autoStartOperations = (operations.autoStartOperations || []).map(autoStartRequestOperation);
+      result.autoStartOperations = selected.autoStartOperations.map(autoStartRequestOperation);
     }
     return result;
   }
@@ -237,9 +217,29 @@
   }
 
   function resolutionLimitViolation(payload, limit = RESOLUTION_OPERATION_LIMIT) {
-    for (const field of ["commands", "taskOperations", "durationOperations", "autoStartOperations", "selectedTaskOperations"]) {
+    const fields = ["commands", "taskOperations", "durationOperations", "autoStartOperations", "selectedTaskOperations"];
+    for (const field of fields) {
       const count = Array.isArray(payload?.[field]) ? payload[field].length : 0;
       if (count > limit) return { field, count, limit };
+    }
+    for (const field of fields) {
+      const items = Array.isArray(payload?.[field]) ? payload[field] : [];
+      for (let index = 0; index < items.length; index += 1) {
+        if (!items[index] || typeof items[index].id !== "string") return null;
+      }
+    }
+    const storage = typeof module === "object" && module.exports ? require("./sync-storage.js") : globalThis.PomodoroughStorage;
+    const workspaceCore = typeof module === "object" && module.exports ? require("./workspace-core.js") : globalThis.PomodoroughWorkspaceCore;
+    const request = workspaceCore.savedBatchRequest({
+      commands: payload?.commands || [],
+      taskOperations: payload?.taskOperations || [],
+      durationOperations: payload?.durationOperations || [],
+      autoStartOperations: payload?.autoStartOperations || [],
+      selectedTaskOperations: payload?.selectedTaskOperations || []
+    }, "merge");
+    const plan = storage.callWorkspaceCore("sync.batchPlan.v1", request);
+    if (plan.status === "oversized_saved") {
+      return { field: "total", count: plan.total, limit: 8192 };
     }
     return null;
   }
@@ -317,14 +317,7 @@
   }
 
   function sendableTimerCommands(commands, limit) {
-    const result = [];
-    const ordered = [...(commands || [])].sort(compareTimerCommands);
-    for (const command of ordered) {
-      if (command.dependsOnCommandId) break;
-      result.push(timerRequestCommand(command));
-      if (result.length === limit) break;
-    }
-    return result;
+    return buildSyncBatch({ commands }, limit).commands;
   }
 
   function autoStartRequestOperation(operation) {
@@ -365,13 +358,11 @@
   }
 
   function buildSyncBatch(input, limit = 256) {
-    return {
-      commands: sendableTimerCommands(input.commands, limit),
-      taskOperations: clone((input.taskOperations || []).slice(0, limit)),
-      durationOperations: (input.durationOperations || []).slice(0, limit).map(durationRequestOperation),
-      autoStartOperations: (input.autoStartOperations || []).slice(0, limit).map(autoStartRequestOperation),
-      selectedTaskOperations: (input.selectedTaskOperations || []).slice(0, limit).map(selectedTaskRequestOperation)
-    };
+    const storage = typeof module === "object" && module.exports ? require("./sync-storage.js") : globalThis.PomodoroughStorage;
+    const mode = limit === Infinity ? "merge" : "sync";
+    const limits = mode === "sync" ? { perDomain: limit, total: 512 } : { perDomain: 4096, total: 8192 };
+    return storage.selectWorkspaceBatch(input, input.deviceId || input.commands?.[0]?.deviceId || "legacy-web",
+      input.batchNextDomain || "commands", limits, mode).sent;
   }
 
 
@@ -459,29 +450,6 @@
     return Number.isSafeInteger(result) ? result : null;
   }
 
-  function serverClockOffset(serverTime, requestAtMs, receivedAtMs, requestSequence) {
-    const serverTimeMs = dateTimeMs(serverTime);
-    if (serverTimeMs === null || !Number.isSafeInteger(requestAtMs) || !Number.isSafeInteger(receivedAtMs)
-      || requestAtMs <= 0 || receivedAtMs < requestAtMs || !validInteger(requestSequence, 1)) {
-      throw new Error("Canonical response timing is invalid.");
-    }
-    const roundTripMs = receivedAtMs - requestAtMs;
-    const uncertaintyMs = Math.ceil(roundTripMs / 2);
-    if (uncertaintyMs > MAX_CLOCK_UNCERTAINTY_MS) {
-      throw new Error("Canonical response clock uncertainty is too high.");
-    }
-    const sampledAtWallMs = requestAtMs + Math.floor(roundTripMs / 2);
-    const sample = {
-      offsetMs: serverTimeMs - sampledAtWallMs,
-      uncertaintyMs,
-      sampledAtWallMs,
-      requestSequence,
-      receivedAtWallMs: receivedAtMs
-    };
-    if (!validClockSample(sample)) throw new Error("Canonical response clock sample is invalid.");
-    return sample;
-  }
-
   function validClockSample(sample) {
     if (!isObject(sample)
       || !Number.isSafeInteger(sample.offsetMs)
@@ -494,18 +462,6 @@
     if (sample.receivedAtWallMs < sample.sampledAtWallMs) return false;
     const sampledServerTimeMs = sample.sampledAtWallMs + sample.offsetMs;
     return Number.isSafeInteger(sampledServerTimeMs) && sampledServerTimeMs > 0;
-  }
-
-  function trustedNow(localNowMs, clockOffset, minimumWallMs = 0) {
-    if (!validInteger(localNowMs, 1)
-      || clockOffset != null && !validClockSample(clockOffset)
-      || !validInteger(minimumWallMs, 0)) {
-      throw new Error("Trusted clock is outside the synchronization range.");
-    }
-    const candidate = localNowMs + (clockOffset?.offsetMs || 0);
-    const result = Math.max(candidate, minimumWallMs);
-    if (!Number.isSafeInteger(result) || result <= 0) throw new Error("Trusted clock is outside the synchronization range.");
-    return result;
   }
 
   function validInteger(value, minimum, maximum = Number.MAX_SAFE_INTEGER) {
@@ -611,8 +567,11 @@
     const now = input.now || Date.now;
     const fetcher = input.fetcher;
     const send = async (csrfToken) => {
+      input.assertCurrent?.();
       const requestSequence = await input.nextRequestSequence();
+      input.assertCurrent?.();
       const requestAtMs = now();
+      input.assertCurrent?.();
       const response = await fetcher(input.url, {
         method: "POST",
         credentials: "same-origin",
@@ -623,17 +582,23 @@
         },
         body: input.body
       });
+      input.assertCurrent?.();
       const receivedAtMs = now();
+      input.assertCurrent?.();
       input.onTiming?.({ requestAtMs, receivedAtMs, requestSequence });
       return response;
     };
     let response = await send(input.csrfToken);
+    input.assertCurrent?.();
     if (response.status !== 403) return response;
+    input.assertCurrent?.();
     const refreshedToken = await input.refreshCsrf();
+    input.assertCurrent?.();
     if (typeof refreshedToken !== "string" || !refreshedToken) {
       throw new Error("CSRF refresh failed.");
     }
     response = await send(refreshedToken);
+    input.assertCurrent?.();
     return response;
   }
 
@@ -650,14 +615,11 @@
     canExposeOwnerState,
     canSubmitResolution,
     canUseCachedOwnerOffline,
-    completedHistoryCount,
     compareTimerCommands,
     confirmationFor,
     createPendingResolution,
     durationRequestOperation,
 
-    hasLocalState,
-    hasRemoteState,
     isResolutionStrategy,
     pendingMatchesUser,
     pendingResolutionCanSubmit,
@@ -665,7 +627,6 @@
     requiresBootstrapResolution,
     RESOLUTION_OPERATION_LIMIT,
     resolutionLimitViolation,
-    serverClockOffset,
     sendableTimerCommands,
     selectedTaskRequestOperation,
     timerRequestCommand,
@@ -673,7 +634,6 @@
     retargetRequestFields,
     emptyNeverSent,
     neverSentForQueues,
-    trustedNow,
     validClockSample,
     validDateTime,
     validateCanonicalResponse,

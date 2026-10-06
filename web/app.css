@@ -1920,11 +1920,11 @@ main {
   }
 
   .task-stat:nth-child(2)::before {
-    content: "Finished";
+    content: attr(data-stat-label);
   }
 
   .task-stat:nth-child(3)::before {
-    content: "Time";
+    content: attr(data-stat-label);
   }
 
   .task-delete {

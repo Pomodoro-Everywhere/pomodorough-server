@@ -104,7 +104,7 @@ test("S39 pending logout cleanup failure warns, notices, and reports", async (t)
     use: { clearLocalData: async () => { throw new Error("disk full"); } }
   });
   const reports = withSentryStub(t);
-  assert.equal(await fixture.actions.clearPendingLogoutData(), false);
+  assert.equal((await fixture.actions.clearPendingLogoutData(undefined, fixture.use.captureAccountContext())).cleared, false);
   assert.equal(fixture.state.logoutRecoveryRequired, true);
   assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /disk full/.test(entry[1])));
   assert.ok(fixture.calls.some((entry) => entry[0] === "warn"

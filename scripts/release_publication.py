@@ -131,12 +131,31 @@ def require_published(state, sealed):
         raise ValueError("published release differs from sealed draft or is not immutable")
 
 
+def immutable_disabled_message(repository):
+    return (
+        f"immutable releases are disabled for {repository}; "
+        "enable immutable releases in repository settings (owner action) "
+        "before publishing; refusing to publish mutable release"
+    )
+
+
+def require_immutable_releases(bound):
+    endpoint = f"repos/{bound['repository']}/immutable-releases"
+    try:
+        setting = gh_api(endpoint)
+    except subprocess.CalledProcessError as error:
+        raise ValueError(immutable_disabled_message(bound["repository"])) from error
+    if not isinstance(setting, dict) or setting.get("enabled") is not True:
+        raise ValueError(immutable_disabled_message(bound["repository"]))
+
+
 def publish(bound, seal_path):
     seal = json.loads(seal_path.read_text(encoding="utf-8"))
     if seal["identity"] != bound:
         raise ValueError("seal source or workflow run/attempt differs; rerun refused")
     sealed = seal["release"]
     release_id = positive_id(sealed["id"])
+    require_immutable_releases(bound)
     current = release_state(bound, release_id)
     require_draft(current)
     if current != sealed:

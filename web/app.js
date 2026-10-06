@@ -1,6 +1,8 @@
 (() => {
   "use strict";
 
+  const accountOperation = globalThis.PomodoroughAccountOperation;
+
   function reportFrontendError(error, operation) {
     try {
       const reporter = typeof globalThis !== "undefined"
@@ -13,7 +15,8 @@
   const SINGLE_ELEMENT_IDS = Object.freeze([
     "installButton", "syncStatus", "syncStatusText", "profile", "profileAvatar",
     "logoutButton", "deleteAccountButton", "conflictPanel", "conflictReason",
-    "conflictDismiss", "notice", "noticeText", "noticeDismiss", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
+    "conflictDismiss", "savedClaimRecovery", "savedClaimRecoveryText", "savedClaimDiscard",
+    "savedClaimCancel", "notice", "noticeText", "noticeDismiss", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
     "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
@@ -48,7 +51,7 @@
     "completionAlertTimerIDTest", "completionAlertDismissedTimerIDTest",
     "accountDeletionConfirmationIsValid", "pendingLocalLogout", "markPendingLogout",
     "clearPendingLogout", "requestSessionRevocation", "deleteAccount", "logout", "clearLocalData",
-    "fetchSessionPayload", "loadSession", "applySessionPayload", "refreshMutationCsrf", "syncPreflight",
+    "captureAccountContext", "getWorkspaceReadModel", "fetchSessionPayload", "loadSession", "applySessionPayload", "refreshMutationCsrf", "syncPreflight",
     "scheduleRetry", "retryDelayMsForTest", "persistBootstrapResolution",
     "restartBootstrapForCurrentAccount", "loadBootstrapPreview", "validateBootstrapSubmission",
     "localBootstrapState", "buildBootstrapPlan", "setFetchForTest", "setStorageMethodForTest",
@@ -106,7 +109,7 @@
     const application = { root, host, state, externals };
     builder.install({
       manifest: { name: "startup", provides: ["resumeStartup"] },
-      create: () => ({ resumeStartup: () => resumeStartup(application) })
+      create: () => ({ resumeStartup: (context) => resumeStartup(application, context) })
     });
     for (const browserModule of browserModules(root)) builder.install(browserModule);
     return Object.assign(application, { runtime: builder.finalize() });
@@ -127,22 +130,40 @@
     }
   }
 
-  async function initializeStorage(application) {
-    const { host, state, externals } = application;
+  function reportStorageUnavailable(application, error) {
+    application.host.console.warn("Pomodorough durable storage unavailable:", error);
+    reportFrontendError(error, "startup.storage.unavailable");
+    call(application, "showNotice", call(application, "tr", "storage.unavailable",
+      { error: error.message }, `Durable timer storage unavailable: ${error.message}`));
+    call(application, "renderSyncStatus");
+    return false;
+  }
+
+  async function initializeSharedCore(application, context) {
     try {
-      externals.syncStorage.setSharedCore(await call(application, "loadSharedCore"));
-      await call(application, "loadLocalState");
+      const core = await call(application, "loadSharedCore");
+      context.assertCurrent();
+      application.externals.syncStorage.setSharedCore(core);
+      return true;
+    } catch (error) {
+      if (!accountOperation.isCurrent(context)) return false;
+      return reportStorageUnavailable(application, error);
+    }
+  }
+
+  async function initializeStorage(application, context) {
+    const { state } = application;
+    try {
+      const completed = await call(application, "loadLocalState", context);
+      accountOperation.requireBound(completed);
       state.ready = true;
       call(application, "renderDeviceMark");
       call(application, "render");
-      return true;
+      return { ready: true, context: completed };
     } catch (error) {
-      host.console.warn("Pomodorough durable storage unavailable:", error);
-      reportFrontendError(error, "startup.storage.unavailable");
-      call(application, "showNotice", call(application, "tr", "storage.unavailable",
-        { error: error.message }, `Durable timer storage unavailable: ${error.message}`));
-      call(application, "renderSyncStatus");
-      return false;
+      const completed = error.startupContext || context;
+      if (accountOperation.isCurrent(completed)) reportStorageUnavailable(application, error);
+      return { ready: false, context: completed };
     }
   }
 
@@ -169,9 +190,10 @@
     await resumeStartup(application);
   }
 
-  async function resumeStartup(application) {
+  async function resumeStartup(application, context = call(application, "captureDatabaseContext")) {
+    if (!accountOperation.isCurrent(context)) return { result: false, context };
     if (application.startup) return application.startup;
-    application.startup = resumeStorageAndSession(application);
+    application.startup = Promise.resolve().then(() => resumeStorageAndSession(application, context));
     try {
       return await application.startup;
     } finally {
@@ -179,14 +201,26 @@
     }
   }
 
-  async function resumeStorageAndSession(application) {
-    if (!await call(application, "clearPendingLogoutData")) {
-      await call(application, "initializeSession");
-      if (application.state.logoutRecoveryRequired) return false;
+  async function resumeStorageAndSession(application, context) {
+    if (!accountOperation.isCurrent(context)) return { result: false, context };
+    if (call(application, "pendingLocalLogout")) {
+      application.state.logoutRecoveryRequired = true;
+      call(application, "render");
     }
-    if (!await initializeStorage(application)) return;
-    await call(application, "initializeSession");
-    return true;
+    if (!await initializeSharedCore(application, context) || !accountOperation.isCurrent(context)) return { result: false, context };
+    const identity = call(application, "cleanupIdentity");
+    const cleanup = await call(application, "clearPendingLogoutData", identity, context);
+    context = cleanup.context;
+    if (!accountOperation.isCurrent(context)) return { result: false, context };
+    if (!cleanup.cleared) {
+      context = await call(application, "initializeSession", context) || context;
+      if (application.state.logoutRecoveryRequired || !accountOperation.isCurrent(context)) return { result: false, context };
+    }
+    const stored = await initializeStorage(application, context);
+    context = stored.context;
+    if (!stored.ready) return { result: false, context };
+    context = await call(application, "initializeSession", context) || context;
+    return { result: accountOperation.isCurrent(context), context };
   }
 
   function applicationOrchestration(application) {

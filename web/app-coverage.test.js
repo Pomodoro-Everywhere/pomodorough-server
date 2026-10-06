@@ -5,6 +5,8 @@ const incarnationFixture = require("./test/incarnation-fixture.js");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const official = require("./test/official-core-fixture.js");
+const workspaceFixture = require("./test/p222-completion-fixture.js");
 
 function baseState(overrides = {}) {
   return {
@@ -13,7 +15,7 @@ function baseState(overrides = {}) {
     clockOffset: 0, csrfToken: "", deviceId: "device-1", durationsMs: { focus: 1_500_000 },
     hlcCounter: 0, hlcWallMs: 0, history: [], localOwnerId: incarnationFixture.ownerId("user-1"), pending: [],
     pendingAutoStartOperations: [], pendingDurationOperations: [], pendingSelectedTaskOperations: [],
-    pendingTaskOperations: [], ready: true, revision: 2, selectedPhase: "focus",
+    pendingTaskOperations: [], ready: true, workspaceBlocked: false, revision: 2, selectedPhase: "focus",
     selectedTaskId: null, sessionIdentityValidated: true, tasks: [], user: incarnationFixture.accountUser("user-1"),
     ...overrides
   };
@@ -45,34 +47,34 @@ function actionFixture(overrides = {}) {
   return { actions, calls, notices, state, use };
 }
 
-test("action persistence serializes writes, updates queues, and unlocks after failures", async () => {
-  const fixture = actionFixture();
-  assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), true);
-  assert.deepEqual(fixture.state.pendingDurationOperations, [{ phase: "focus", durationMs: 1_800_000 }]);
-  assert.equal(fixture.state.actionLocked, false);
-  assert.ok(fixture.calls.includes("rebuild"));
-  assert.ok(fixture.calls.includes("sync:0"));
-
-  fixture.use.persistDurationOperation = async () => { throw new Error("disk full"); };
-  assert.equal(await fixture.actions.issueDurationOperation("focus", 2_000_000), false);
-  assert.deepEqual(fixture.notices, ["disk full"]);
-  assert.equal(fixture.state.actionLocked, false);
-
-  fixture.state.actionLocked = true;
-  assert.equal(await fixture.actions.issueCommand("pause"), false);
+test("action persistence serializes writes, updates queues, and unlocks after failures", async (t) => {
+  const { client } = await workspaceFixture.fixture(t);
+  const scheduled = [];
+  client.use.scheduleSync = (delay) => scheduled.push(delay);
+  assert.equal(await client.use.issueDurationOperation("focus", 1_800_000), true);
+  assert.equal(client.state.pendingDurationOperations[0].durationMs, 1800000);
+  assert.equal(client.state.actionLocked, false);
+  assert.deepEqual(scheduled, [0]);
+  const before = await workspaceFixture.dump(client.use.database());
+  client.use.persistWorkspaceIntent = async () => { throw new Error("disk full"); };
+  assert.equal(await client.use.issueDurationOperation("focus", 2_100_000), false);
+  assert.equal(client.notices.at(-1), "disk full");
+  assert.deepEqual(await workspaceFixture.dump(client.use.database()), before);
+  assert.equal(client.state.actionLocked, false);
+  client.state.actionLocked = true;
+  assert.equal(await client.use.issueCommand("pause"), false);
 });
 
-test("task actions select existing identities and reject invalid printable names", async () => {
-  const fixture = actionFixture();
-  fixture.state.tasks = [{ id: "existing", title: "Existing" }];
-  assert.equal(await fixture.actions.addTask("existing"), true);
-  assert.deepEqual(fixture.state.pendingSelectedTaskOperations, [{ id: "selected-existing" }]);
-  assert.match(fixture.notices[0], /already exists/i);
-
-  fixture.use.sharedTaskIdentity = async () => { throw new Error("title must not be empty or non-printable"); };
-  await assert.rejects(() => fixture.actions.addTask("\n"), /printable task name/i);
-  fixture.use.sharedTaskIdentity = async () => { throw new Error("title exceeds 512 bytes"); };
-  await assert.rejects(() => fixture.actions.addTask("x"), /too long/i);
+test("task actions select existing identities and reject invalid printable names", async (t) => {
+  const { client, core } = await workspaceFixture.fixture(t);
+  client.external.sharedCoreHost.SharedCore = { load: async () => core };
+  await workspaceFixture.seedMeta(client.use.database(), { canonicalHead: { wallMs: workspaceFixture.nowMs, counter: 2 } });
+  assert.equal(await client.use.addTask("Existing"), true);
+  const before = await workspaceFixture.dump(client.use.database());
+  assert.equal(await client.use.addTask("Existing"), true);
+  assert.deepEqual((await workspaceFixture.dump(client.use.database())).pendingTasks, before.pendingTasks);
+  await assert.rejects(() => client.use.addTask("\n"), /printable task name/i);
+  await assert.rejects(() => client.use.addTask("x".repeat(513)), /too long/i);
 });
 
 function syncFixture(overrides = {}) {
@@ -93,10 +95,11 @@ function syncFixture(overrides = {}) {
     AccountOwnershipError, readBootstrapState: async () => ({ gate: null, resolution: null }),
     normalizeLegacyDurationOperations: async () => {}, readQueues: async () => ({})
   };
+  const database = {};
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     renderSyncStatus: () => calls.push("status"), rebuildOptimisticState: () => calls.push("rebuild"),
-    database: () => ({}), compareDurationOperations: () => 0,
+    database: () => database, compareDurationOperations: () => 0,
     restoreSessionAndSync: () => calls.push("restore"), stopCompletionAlert: () => calls.push("stop"),
     closeRevisionStream: () => calls.push("close"), quarantineOwnerState: () => calls.push("quarantine"),
     render: () => calls.push("render"), ...overrides.use
@@ -147,7 +150,7 @@ function bootstrapFixture() {
   class BootstrapGateError extends Error {}
   class ResolutionLimitError extends Error {}
   const syncStorage = {
-    BootstrapGateError, ResolutionLimitError,
+    BootstrapGateError, ResolutionLimitError, sampleClock: () => 23,
     allocateClockRequestSequence: async () => 4,
     saveClockOffset: async (_db, offset) => offset,
     captureResolution: async (_db, payload) => payload
@@ -160,6 +163,7 @@ function bootstrapFixture() {
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     database: () => ({}), tabId: () => "tab-1", acquireBootstrapGate: async () => ({ acquired: true }),
+    validatePersistedDisplayContext: async () => {},
     refreshMigratedPreferences: async () => {}, defaultDurationsMs: () => ({}), render: () => calls.push("render"),
     redirectToLogin: () => calls.push("login"), tr: (_key, _args, fallback) => fallback
   };
@@ -271,12 +275,16 @@ test("view timer instructions and controls distinguish active and terminal state
   fixture.view.renderTimerInstruction(timer, "completed");
   assert.equal(fixture.elements.timerInstruction.textContent, "Run complete. Stop the sound or start another.");
 
+  fixture.state.timer = { ...timer, id: "render-timer", status: "running", plannedDurationMs: 60000 };
+  fixture.state.readModel = official.renderModel(fixture.state);
   fixture.view.renderTimerControls(timer, { status: "running", remaining: 25 });
   assert.equal(fixture.elements.finishButton.disabled, false);
+  fixture.state.timer.status = "completed";
+  fixture.state.readModel = official.renderModel(fixture.state);
   fixture.view.renderTimerControls(timer, { status: "completed", remaining: 0 });
   assert.equal(fixture.elements.finishButton.disabled, true);
   assert.equal(fixture.elements.clearButton.disabled, false);
-  assert.deepEqual(updates.at(-1), [timer, "completed", 0, false]);
+  assert.deepEqual(updates.at(-1), [fixture.state.timer, "completed", 0, false]);
 
   fixture.view.renderTimerInstruction(timer, "cancelled");
   assert.equal(fixture.elements.timerInstruction.textContent, "Run cancelled. Start another.");
@@ -332,7 +340,7 @@ function dialFixture() {
     elapsedFor: () => 0, emptyTimer: (phase, plannedDurationMs) => ({ phase, plannedDurationMs }),
     selectedDurationMs: () => 1_500_000, completedFocusCountForDay: () => 0,
     longBreakProgress: () => 0, positiveNumber: (value, fallback) => Number(value) || fallback,
-    startCompletionAlert: () => {}
+    startCompletionAlert: () => {}, getWorkspaceReadModel: () => (state.readModel = official.renderModel(state))
   };
   const view = require("./app-view.js").create({
     state, external: { host: { document }, syncCore: {}, syncStorage: {}, elements }, use
@@ -400,8 +408,7 @@ test("immutable retarget failure keeps the selection and reports statically", as
   fixture.state.timer = { id: "timer-1", phase: "focus", status: "running", plannedDurationMs: 1_500_000 };
   fixture.state.pending = [];
   fixture.state.pendingSelectedTaskOperations = [];
-  fixture.use.persistSelectedTaskOperation = async (taskId) => ({ id: `selected-${taskId}`, taskId });
-  fixture.use.persistRetargetOperation = async () => { throw new Error("retarget offline"); };
+  fixture.use.persistWorkspaceIntent = async () => { throw new Error("retarget offline"); };
   const reports = [];
   const previous = globalThis.PomodoroughSentryClient;
   globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
@@ -409,23 +416,23 @@ test("immutable retarget failure keeps the selection and reports statically", as
     if (previous === undefined) delete globalThis.PomodoroughSentryClient;
     else globalThis.PomodoroughSentryClient = previous;
   });
-  assert.equal(await fixture.actions.issueSelectedTaskOperation("task-new"), true);
-  assert.deepEqual(fixture.state.pendingSelectedTaskOperations, [{ id: "selected-task-new", taskId: "task-new" }]);
+  assert.equal(await fixture.actions.issueSelectedTaskOperation("task-new"), false);
+  assert.deepEqual(fixture.state.pendingSelectedTaskOperations, []);
   assert.deepEqual(fixture.state.pending.filter((command) => command.type === "retarget"), []);
   assert.equal(fixture.state.actionLocked, false);
-  assert.ok(fixture.calls.includes("rebuild"));
+  assert.equal(fixture.calls.includes("rebuild"), false);
   assert.equal(reports.length, 1);
-  assert.equal(reports[0][1], "actions.retarget.save-failed");
+  assert.equal(reports[0][1], "actions.selected-task.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
   assert.match(String(reports[0][0]?.message || reports[0][0]), /retarget offline/);
 });
 
 test("view timer projection clamps elapsed time and formats accessible clock text", () => {
-  const state = baseState({ timer: { status: "idle" } });
+  const state = baseState({ timer: { id: "render-timer", phase: "focus", status: "running", plannedDurationMs: 125000, elapsedAtAnchorMs: 61001 } });
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
     elapsedFor: () => 61_001, emptyTimer: (phase, plannedDurationMs) => ({ phase, plannedDurationMs }),
-    selectedDurationMs: () => 90_000
+    selectedDurationMs: () => 90_000, getWorkspaceReadModel: () => (state.readModel = official.renderModel(state))
   };
   const view = require("./app-view.js").create({
     state, external: { host: { document: {} }, syncCore: {}, syncStorage: {}, elements: {} }, use
@@ -434,22 +441,26 @@ test("view timer projection clamps elapsed time and formats accessible clock tex
     remaining: 63_999, progress: 61_001 / 125_000, totalSeconds: 64,
     minutes: 1, seconds: 4, timeText: "01:04", status: "running"
   });
-  use.elapsedFor = () => 500;
-  assert.equal(view.timerDisplayView({ plannedDurationMs: 0 }, "paused").progress, 0);
-  assert.deepEqual(view.displayTimer(), { phase: "focus", plannedDurationMs: 90_000 });
+  state.readModel = null;
+  state.timer = { phase: "focus", status: "paused", id: "paused", plannedDurationMs: 60000, elapsedAtAnchorMs: 500 };
+  state.readModel = use.getWorkspaceReadModel();
+  assert.equal(view.timerDisplayView({ plannedDurationMs: 0 }, "paused").progress, 500 / 60000);
+  state.timer = { status: "idle" };
+  state.durationsMs.focus = 120000;
+  assert.equal(view.displayTimer().plannedDurationMs, 120000);
 });
 
 function immutableRetargetStorageFixture(allocateMutation) {
   const state = baseState();
   const host = { setTimeout, clearTimeout, crypto: { randomUUID: () => "retarget-uuid" } };
-  const syncStorage = { allocateMutation };
+  const syncStorage = { planWorkspaceMutation: allocateMutation };
   const quarantines = [];
   const compareTimerCommands = (left, right) => String(left.id).localeCompare(String(right.id));
   const use = {
-    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host, () => use.database()),
     quarantineAccountMismatch: () => quarantines.push("quarantine"),
     assertExpectedAccount: () => {},
-    trustedNow: () => 1000, tabId: () => "tab-1",
+    trustedNow: () => 1000, tabId: () => "tab-1", monotonicNow: () => null, clockContinuityId: () => "unit-clock",
     elapsedFor: () => 0, clampNumber: (value) => value,
     emptyTimer: (phase) => ({ phase, status: "idle" }),
     normalizeTimer: (timer) => timer, phaseConfig: () => ({ focus: {} }),
@@ -459,6 +470,7 @@ function immutableRetargetStorageFixture(allocateMutation) {
   const storage = require("./app-storage.js").create({
     state, external: { host, syncCore: incarnationFixture.sync, syncStorage }, use
   });
+  use.database = storage.database;
   return { host, quarantines, state, storage, use };
 }
 
@@ -475,22 +487,26 @@ function withSentryCapture(t) {
 
 function allocateStorageFixture({ allocateMutation, readSyncState, assertAccountOwnership } = {}) {
   const state = baseState();
-  const host = { setTimeout, clearTimeout };
+  const host = { setTimeout, clearTimeout, crypto: require("node:crypto").webcrypto };
   const quarantines = [];
   const use = {
-    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host),
-    trustedNow: () => 1000, tabId: () => "tab-1",
+    captureAccountContext: () => incarnationFixture.captureAccountContext(state, host, () => use.database()),
+    trustedNow: () => 1000, tabId: () => "tab-1", monotonicNow: () => null, clockContinuityId: () => "unit-clock",
     compareDurationOperations: (left, right) => (left.hlcWallMs - right.hlcWallMs) || (left.hlcCounter - right.hlcCounter),
     assertExpectedAccount: () => {},
     quarantineAccountMismatch: () => quarantines.push("quarantine")
   };
   const syncStorage = {
-    allocateMutation, readSyncState: readSyncState || (async () => ({})),
+    planWorkspaceMutation: async (...argumentsList) => {
+      await allocateMutation(...argumentsList);
+      return official.plannedWorkspace();
+    }, readSyncState: readSyncState || (async () => ({})),
     assertAccountOwnership: assertAccountOwnership || (() => {})
   };
   const storage = require("./app-storage.js").create({
     state, external: { host, syncCore: incarnationFixture.sync, syncStorage }, use
   });
+  use.database = storage.database;
   storage.setDatabaseForTest({});
   return { host, quarantines, state, storage, use };
 }
@@ -554,21 +570,23 @@ test("S50 immutable retarget failure surfaces a single operation tag end to end"
     state,
     external: { host: storageFixture.host, syncCore: incarnationFixture.sync, syncStorage: {} },
     use: {
+      ...storageFixture.use,
       controlsBlocked: () => false,
-      persistSelectedTaskOperation: async (taskId) => ({ id: `selected-${taskId}`, taskId }),
-      persistRetargetOperation: (...args) => storageFixture.storage.persistRetargetOperation(...args),
+      persistWorkspaceIntent: (...args) => storageFixture.storage.persistWorkspaceIntent(...args),
       rebuildOptimisticState: () => calls.push("rebuild"),
       renderTaskSelector: () => calls.push("selector"),
       renderSyncStatus: () => calls.push("status"),
-      scheduleSync: () => calls.push("sync")
+      scheduleSync: () => calls.push("sync"), tr: (_key, _args, fallback) => fallback,
+      showNotice: (message) => calls.push(["notice", message])
     }
   });
   storageFixture.storage.setDatabaseForTest({});
   const reports = withSentryCapture(t);
-  assert.equal(await actions.issueSelectedTaskOperation("task-new"), true);
+  assert.equal(await actions.issueSelectedTaskOperation("task-new"), false);
   assert.deepEqual(state.pending.filter((command) => command.type === "retarget"), []);
+  assert.deepEqual(state.pendingSelectedTaskOperations, []);
   assert.equal(reports.length, 1);
-  assert.equal(reports[0][1], "actions.retarget.save-failed");
+  assert.equal(reports[0][1], "actions.selected-task.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);
 });
 
@@ -587,14 +605,10 @@ test("S51 allocateOperation rethrows without an inner Sentry report", async (t) 
   assert.equal(reports.length, 0);
   assert.deepEqual(owned.quarantines, ["quarantine"]);
 
-  const drifted = allocateStorageFixture({ allocateMutation: async () => ({ id: "op-1" }) });
-  const liveContext = drifted.use.captureAccountContext;
-  drifted.use.captureAccountContext = () => ({
-    ...liveContext(), assertCurrent: () => { throw new Error("tab superseded"); }
-  });
-  await assert.rejects(() => drifted.storage.persistTaskOperation("upsert", task), /tab superseded/);
+  const drifted = allocateStorageFixture({ allocateMutation: async () => { drifted.storage.setDatabaseForTest({}); } });
+  await assert.rejects(() => drifted.storage.persistTaskOperation("upsert", task), { name: "AccountOwnershipError" });
   assert.equal(reports.length, 0);
-  assert.deepEqual(drifted.quarantines, []);
+  assert.deepEqual(drifted.quarantines, ["quarantine"]);
 });
 
 test("S51 mutation failure surfaces a single operation tag end to end", async (t) => {
@@ -602,7 +616,8 @@ test("S51 mutation failure surfaces a single operation tag end to end", async (t
     allocateMutation: async () => { throw new Error("idb offline"); }
   });
   const fixture = actionFixture({
-    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+    captureAccountContext: storageFixture.use.captureAccountContext,
+    persistWorkspaceIntent: (...args) => storageFixture.storage.persistWorkspaceIntent(...args)
   });
   const reports = withSentryCapture(t);
   assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
@@ -641,7 +656,8 @@ test("S52 post-write drift surfaces a single operation tag end to end", async (t
     }
   });
   const fixture = actionFixture({
-    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+    captureAccountContext: storageFixture.use.captureAccountContext,
+    persistWorkspaceIntent: (...args) => storageFixture.storage.persistWorkspaceIntent(...args)
   });
   const reports = withSentryCapture(t);
   assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
@@ -658,7 +674,8 @@ test("S52 generic post-write failure surfaces a single operation tag end to end"
     assertAccountOwnership: () => { throw new Error("post-write conflict"); }
   });
   const fixture = actionFixture({
-    persistDurationOperation: (...args) => storageFixture.storage.persistDurationOperation(...args)
+    captureAccountContext: storageFixture.use.captureAccountContext,
+    persistWorkspaceIntent: (...args) => storageFixture.storage.persistWorkspaceIntent(...args)
   });
   const reports = withSentryCapture(t);
   assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);

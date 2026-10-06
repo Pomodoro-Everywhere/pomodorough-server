@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   const DIAL_RADIUS = 108;
   const DIAL_CIRCUMFERENCE = 2 * Math.PI * DIAL_RADIUS;
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
@@ -77,8 +80,9 @@
       "finishTimer", "cancelAndClearTimer", "stopCompletionAlert", "logout", "deleteAccount",
       "closeRevisionStreamForIdentityChange", "clearLocalData", "redirectToLogin",
       "chooseBootstrapStrategy", "retryBootstrapResolution", "handleOnline", "handleOffline",
-      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState",
-      "quarantineAccountMismatch", "retryPendingLogout", "captureAccountContext"
+      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState", "getWorkspaceReadModel", "issuePhaseSelection",
+      "quarantineAccountMismatch", "retryPendingLogout", "captureAccountContext", "captureDatabaseContext",
+      "armSavedClaimRecovery", "cancelSavedClaimRecovery", "discardSavedClaimRecovery"
     ],
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
@@ -87,7 +91,7 @@
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
       "renderTasks", "formatTaskDuration", "formatHistoryDate", "renderProfile",
       "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice", "dismissNotice",
-      "createDialTicks", "dialTickCountFor", "clampInput", "setupPreferenceEvents", "setupTaskEvents",
+      "createDialTicks", "dialTickCountFor", "commitDurationInput", "setupPreferenceEvents", "setupTaskEvents",
       "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel",
       "setupBootstrapEvents", "setupConnectivityEvents", "setupInstallEvents", "setupEvents"
     ],
@@ -110,7 +114,7 @@
       return super.actions([
         "renderScreens", "activateScreen", "handleScreenKeydown", "renderDurations",
         "renderVersion", "renderTaskSelector", "renderDeviceMark", "createDialTicks",
-        "dialTickCountFor", "clampInput"
+        "dialTickCountFor", "commitDurationInput"
       ]);
     }
 
@@ -160,7 +164,8 @@
 
     renderDurations() {
       const { state, use, elements, document } = this;
-      const active = ["running", "paused"].includes(state.timer.status);
+      const status = state.ready ? use.getWorkspaceReadModel().canonical.status : state.timer.status;
+      const active = ["running", "paused"].includes(status);
       const blocked = use.controlsBlocked();
       for (const button of elements.phaseButtons) {
         const selected = button.dataset.phase === state.selectedPhase;
@@ -225,12 +230,12 @@
       renderDialTickMarks(this.document, this.elements, count);
     }
 
-    clampInput(input) {
+    commitDurationInput(input) {
       const { use } = this;
-      const value = Math.round(use.clampNumber(input.value, 1, 180));
-      input.value = String(value);
+      const context = use.captureAccountContext();
+      const value = Number(input.value);
       use.issueDurationOperation(input.name, value * 60_000).then((saved) => {
-        if (!saved) this.renderDurations();
+        if (!saved && accountOperation.isCurrent(context)) this.renderDurations();
       });
     }
   }
@@ -249,16 +254,16 @@
 
     displayTimer() {
       const { state, use } = this;
-      if (!["idle", "completed"].includes(state.timer.status)) return state.timer;
-      return use.emptyTimer(state.selectedPhase, use.selectedDurationMs());
+      if (!state.ready) return state.timer;
+      const display = use.getWorkspaceReadModel().display;
+      return { ...state.timer, ...display };
     }
 
     timerDisplayView(timer, status) {
-      const { use } = this;
-      const elapsed = use.elapsedFor(timer);
-      const remaining = Math.max(0, timer.plannedDurationMs - elapsed);
-      const progress = timer.plannedDurationMs > 0 ? elapsed / timer.plannedDurationMs : 0;
-      const totalSeconds = Math.ceil(remaining / 1000);
+      const model = this.state.ready ? this.state.readModel || this.use.getWorkspaceReadModel() : null;
+      const remaining = model?.display.remainingMs ?? timer.plannedDurationMs;
+      const progress = model?.display.progress ?? 0;
+      const totalSeconds = model?.display.remainingSecondsCeil ?? 1500;
       const minutes = Math.floor(totalSeconds / 60);
       const seconds = totalSeconds % 60;
       const timeText = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
@@ -280,7 +285,7 @@
         { status: use.timerStatusLabel(view.status).toUpperCase(), minutes: Math.round(timer.plannedDurationMs / 60000) },
         `${use.timerStatusLabel(view.status).toUpperCase()} / ${Math.round(timer.plannedDurationMs / 60000)} MIN`
       );
-      const breakProgress = use.longBreakProgress(use.completedFocusCountForDay(state.history));
+      const breakProgress = state.readModel?.cadence.longBreakProgress ?? 0;
       elements.longBreakProgress.textContent = `${"●".repeat(breakProgress)}${"○".repeat(4 - breakProgress)}`;
       elements.longBreakProgress.setAttribute("aria-label", use.tr(
         "timer.pomodoroProgress", { count: breakProgress, total: 4 },
@@ -325,23 +330,24 @@
 
     renderTimerControls(timer, view) {
       const { use, elements } = this;
-      const active = ["running", "paused"].includes(view.status);
-      const blocked = use.controlsBlocked();
-      elements.timerToggle.disabled = blocked;
-      elements.finishButton.disabled = blocked || !active;
-      elements.cancelButton.disabled = blocked || !active;
+      const intents = this.state.readModel?.availableIntents || [];
+      const blocked = use.controlsBlocked() || this.state.workspaceBlocked;
+      elements.timerToggle.disabled = blocked || !intents.some((intent) => ["start", "pause", "resume"].includes(intent));
+      elements.finishButton.disabled = blocked || !intents.includes("finish");
+      elements.cancelButton.disabled = blocked || !intents.includes("cancelAndClear");
       // Finished timers offer Start only: the clear control stops the
       // completion sound while it rings and never dismisses the terminal
       // timer. The next Start replaces it.
       elements.clearButton.disabled = blocked || !use.activeCompletionAlertTimerId();
-      use.updateTimerCompletion(timer, view.status, view.remaining, blocked);
+      use.updateTimerCompletion(this.state.timer, this.state.timer.status,
+        this.state.readModel?.canonical.remainingMs ?? view.remaining, blocked);
     }
 
     renderTimer() {
       const { state, use } = this;
       const timer = this.displayTimer();
-      const status = state.timer.status;
-      if (status === "completed") use.startCompletionAlert(state.timer);
+      const status = state.readModel?.display.status || state.timer.status;
+      if (state.timer.status === "completed") use.startCompletionAlert(state.timer);
       const view = this.timerDisplayView(timer, status);
       this.renderDialTicks(timer);
       this.renderTimerClock(timer, view);
@@ -478,12 +484,14 @@
       const { use, document } = this;
       const row = document.createElement("article");
       row.className = "task-row";
+      row.dataset.taskId = task.id;
       const name = document.createElement("strong");
       name.className = "task-name";
       name.textContent = task.title;
       const count = document.createElement("span");
       count.className = "task-stat";
       count.textContent = String(summary.count);
+      count.setAttribute("data-stat-label", use.tr("tasks.column.finished", {}, "Finished"));
       count.setAttribute("aria-label", use.tr(
         "tasks.finishedToday", { count: summary.count },
         `${summary.count} finished pomodoros today`
@@ -491,6 +499,7 @@
       const duration = document.createElement("span");
       duration.className = "task-stat";
       duration.textContent = this.formatTaskDuration(summary.durationMs);
+      duration.setAttribute("data-stat-label", use.tr("tasks.column.time", {}, "Time"));
       duration.setAttribute("aria-label", use.tr(
         "tasks.spentToday", { duration: this.formatTaskDuration(summary.durationMs) },
         `${this.formatTaskDuration(summary.durationMs)} spent today`
@@ -508,8 +517,33 @@
       return row;
     }
 
+    focusedTaskDeletion() {
+      const { document, elements } = this;
+      const active = document.activeElement;
+      if (!active) return null;
+      const rows = Array.from(elements.taskList.children);
+      const index = rows.findIndex((row) => row.querySelector(".task-delete") === active);
+      if (index < 0) return null;
+      // Prefer the same task, then surviving successors, then predecessors.
+      const candidates = [...rows.slice(index), ...rows.slice(0, index).reverse()];
+      return { active, taskIds: candidates.map((row) => row.dataset.taskId) };
+    }
+
+    restoreTaskDeletionFocus(focus, blocked) {
+      const { document, elements } = this;
+      if (!focus || blocked || elements.tasksScreen.hidden) return;
+      // A synchronous focus handler may have moved focus elsewhere during rendering.
+      if (document.activeElement !== document.body && document.activeElement !== focus.active) return;
+      const rows = new Map(Array.from(elements.taskList.children).map((row) => [row.dataset.taskId, row]));
+      const taskId = focus.taskIds.find((id) => rows.has(id));
+      const target = taskId ? rows.get(taskId).querySelector(".task-delete") : elements.taskInput;
+      if (target.disabled || target.closest("[hidden], [inert]")) return;
+      target.focus({ preventScroll: true });
+    }
+
     renderTasks() {
       const { state, use, elements } = this;
+      const focus = this.focusedTaskDeletion();
       const blocked = use.controlsBlocked();
       elements.taskCount.textContent = String(state.tasks.length).padStart(2, "0");
       elements.taskList.replaceChildren();
@@ -517,6 +551,7 @@
       elements.taskForm.querySelector("button[type='submit']").disabled = blocked;
       if (state.tasks.length === 0) {
         elements.taskList.append(this.emptyTaskListItem());
+        this.restoreTaskDeletionFocus(focus, blocked);
         return;
       }
       const summaries = this.taskSummariesToday();
@@ -525,29 +560,14 @@
           task, summaries.get(task.id) || { count: 0, durationMs: 0 }, blocked
         ));
       }
+      this.restoreTaskDeletionFocus(focus, blocked);
     }
 
     taskSummariesToday() {
-      const { state, use } = this;
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 1);
-      const summaries = new Map();
-      for (const item of state.history) {
-        if (item.phase !== "focus" || (item.status && item.status !== "completed")) continue;
-        const taskId = this.effectiveHistoryTaskId(item);
-        if (!taskId) continue;
-        const completedAt = use.historyDateMs(item);
-        if (completedAt < start.getTime() || completedAt >= end.getTime()) continue;
-        const summary = summaries.get(taskId) || { count: 0, durationMs: 0 };
-        summary.count += 1;
-        summary.durationMs += use.positiveNumber(
-          item.plannedDurationMs ?? item.durationMs ?? item.timer?.plannedDurationMs, 0
-        );
-        summaries.set(taskId, summary);
-      }
-      return summaries;
+      if (!this.state.ready) return new Map();
+      const rows = this.use.getWorkspaceReadModel().tasks.completedFocusTodayByTask;
+      return new Map(Object.entries(rows).map(([id, row]) => [id,
+        { count: row.count, durationMs: row.plannedDurationMs }]));
     }
 
     formatTaskDuration(durationMs) {
@@ -649,17 +669,29 @@
     }
 
     renderConflict() {
-      const { state, elements } = this;
+      const { state, elements, use } = this;
       elements.conflictPanel.hidden = !state.conflict;
       if (state.conflict) elements.conflictReason.textContent = state.conflict;
+      const recovery = state.savedClaimRecovery;
+      if (!elements.savedClaimRecovery) return;
+      elements.savedClaimRecovery.hidden = !recovery;
+      if (!recovery) return;
+      const names = (recovery.queues || []).join(", ");
+      elements.savedClaimRecoveryText.textContent = use.tr("sync.savedClaimBlocked",
+        { queues: names || "sync queue" }, state.conflict);
+      const armed = recovery.armed === true;
+      elements.savedClaimDiscard.textContent = use.tr(armed
+        ? "sync.confirmDiscardSavedClaim" : "sync.discardSavedClaim", {},
+        armed ? "Confirm discard — queued work stays" : "Discard unrecoverable claim");
+      elements.savedClaimCancel.hidden = !armed;
     }
 
     renderBootstrapSummary(view, limitRecovery) {
-      const { state, use, elements, syncCore } = this;
+      const { state, use, elements } = this;
       const localCount = state.bootstrapPlan?.localHistoryCount
-        ?? syncCore.completedHistoryCount(use.localBootstrapState().history);
+        ?? state.bootstrapClassification?.local.completedHistoryCount ?? 0;
       const remoteCount = state.bootstrapPlan?.remoteHistoryCount
-        ?? syncCore.completedHistoryCount(state.bootstrapPreview?.history);
+        ?? state.bootstrapClassification?.remote.completedHistoryCount ?? 0;
       elements.bootstrapTitle.textContent = limitRecovery
         ? use.tr("bootstrap.limitTitle", {}, "Local queue too large")
         : use.tr("bootstrap.title", {}, "Choose synchronized state");
@@ -685,13 +717,15 @@
     }
 
     renderBootstrapActions(view, limitRecovery) {
-      const { state, elements, host } = this;
+      const { state, elements, use, host } = this;
       elements.bootstrapError.hidden = !view.failed && !limitRecovery;
       elements.bootstrapRetry.hidden = !view.failed;
       elements.bootstrapSignOut.hidden = !limitRecovery;
       elements.bootstrapSignOut.disabled = state.bootstrapSubmitting || !host.navigator.onLine;
       elements.bootstrapRetry.disabled = state.bootstrapSubmitting || !host.navigator.onLine;
-      elements.bootstrapRetry.textContent = state.bootstrapConflict ? "Refresh and retry" : "Retry saved choice";
+      elements.bootstrapRetry.textContent = state.bootstrapConflict
+        ? use.tr("bootstrap.retryRefresh", {}, "Refresh and retry")
+        : use.tr("bootstrap.retry", {}, "Retry saved choice");
       if (view.failed || limitRecovery) {
         elements.bootstrapError.textContent = state.bootstrapError || state.bootstrapLimitError;
       }
@@ -705,13 +739,13 @@
     }
 
     renderBootstrapConfirmation(view) {
-      const { state, elements, syncCore } = this;
+      const { state, elements, use, syncCore } = this;
       if (!view.confirming) return;
       const confirmation = syncCore.confirmationFor(state.bootstrapStrategy);
       elements.bootstrapConfirmationTitle.textContent = confirmation.title;
       elements.bootstrapConfirmationMessage.textContent = confirmation.message;
       elements.bootstrapConfirm.textContent = state.bootstrapSubmitting
-        ? "Applying choice" : confirmation.confirmLabel;
+        ? use.tr("bootstrap.applyingChoice", {}, "Applying choice") : confirmation.confirmLabel;
     }
 
     focusBootstrapDialog() {
@@ -851,11 +885,17 @@
     }
 
     setupScreenNavigation() {
-      const { elements, view } = this;
+      const { elements, view, document } = this;
       for (const button of elements.screenButtons) {
         button.addEventListener("click", () => view.activateScreen(button, true));
         button.addEventListener("keydown", view.handleScreenKeydown);
       }
+      document.querySelector?.("#skipTimerLink")?.addEventListener("click", () => {
+        const timerTab = elements.screenButtons.find((button) => button.dataset.screenButton === "timer");
+        view.activateScreen(timerTab);
+        // Reveal before focusing; leave the anchor's native hash navigation intact.
+        document.getElementById("timer-workbench").focus();
+      });
     }
 
     setupPreferenceEvents() {
@@ -863,23 +903,12 @@
       elements.durationForm.addEventListener("submit", (event) => event.preventDefault());
       for (const button of elements.phaseButtons) {
         button.addEventListener("click", () => {
-          if (!use.phaseConfig()[button.dataset.phase]) return;
-          state.selectedPhase = button.dataset.phase;
-          view.renderDurations();
-          view.renderTaskSelector();
-          view.renderTimer();
-          use.persistSettings().catch((error) => {
-            host.console.warn("Pomodorough phase choice save failed:", error);
-            reportFrontendError(error, "view.phase.save-failed");
-            view.showNotice(use.tr(
-              "notice.phaseSaveFailed", {}, "Phase choice could not be saved."
-            ));
-          });
+          use.issuePhaseSelection(button.dataset.phase);
         });
       }
       for (const input of elements.durationInputs) {
-        input.addEventListener("change", () => view.clampInput(input));
-        input.addEventListener("blur", () => view.clampInput(input));
+        input.addEventListener("change", () => view.commitDurationInput(input));
+        input.addEventListener("blur", () => view.commitDurationInput(input));
       }
       for (const button of elements.stepButtons) {
         button.addEventListener("click", () => {
@@ -887,9 +916,9 @@
           if (!input) return;
           const step = Number(button.dataset.step);
           const delta = Number.isFinite(step) ? step : 0;
-          const base = use.clampNumber(input.value, 1, 180);
-          input.value = String(Math.round(base + delta));
-          view.clampInput(input);
+          const base = Number(input.value);
+          input.value = String(base + delta);
+          view.commitDurationInput(input);
         });
       }
       elements.autoStartBreaks.addEventListener("change", () => {
@@ -917,10 +946,11 @@
     setupTimerEvents() {
       const { state, use, elements, view } = this;
       elements.timerToggle.addEventListener("click", () => {
+        const kind = use.getWorkspaceReadModel().availableIntents.find((intent) =>
+          ["start", "pause", "resume"].includes(intent));
+        if (!kind) return;
         use.primeCompletionAlerts();
-        if (state.timer.status === "running") use.issueCommand("pause");
-        else if (state.timer.status === "paused") use.issueCommand("resume");
-        else use.issueCommand("start");
+        use.issueCommand(kind);
       });
       elements.finishButton.addEventListener("click", () => use.finishTimer(false));
       elements.cancelButton.addEventListener("click", use.cancelAndClearTimer);
@@ -940,18 +970,34 @@
       elements.logoutRecoverySignIn?.addEventListener("click", use.redirectToLogin);
       host.addEventListener("storage", (event) => {
         if (event.key !== PENDING_LOGOUT_KEY || event.newValue !== "1") return;
+        const context = use.captureDatabaseContext();
         use.closeRevisionStreamForIdentityChange();
-        use.clearLocalData()
-          .catch((error) => {
+        use.clearLocalData(undefined, context)
+          .then((completed) => {
+            if (accountOperation.isCurrent(completed)) use.redirectToLogin();
+          }, (error) => {
+            if (!accountOperation.isCurrent(context)) return;
             host.console.warn("Cross-tab sign-out cleanup was incomplete:", error);
             reportFrontendError(error, "view.cross-tab-logout.cleanup-incomplete");
-          })
-          .finally(use.redirectToLogin);
+            use.redirectToLogin();
+          });
       });
       elements.conflictDismiss.addEventListener("click", () => {
         state.conflict = null;
         view.renderConflict();
         view.renderSyncStatus();
+      });
+      elements.savedClaimDiscard?.addEventListener("click", () => {
+        if (state.savedClaimRecovery?.armed === true) {
+          use.discardSavedClaimRecovery(use.captureAccountContext()).catch((error) => {
+            view.showNotice(error.message || state.conflict);
+          });
+        } else {
+          use.armSavedClaimRecovery();
+        }
+      });
+      elements.savedClaimCancel?.addEventListener("click", () => {
+        use.cancelSavedClaimRecovery();
       });
       elements.noticeDismiss?.addEventListener("click", () => view.dismissNotice());
     }
@@ -965,7 +1011,7 @@
         use.chooseBootstrapStrategy(state.bootstrapStrategy, true);
       });
       elements.bootstrapCancel.addEventListener("click", () => view.resetBootstrapChoice(true));
-      elements.bootstrapRetry.addEventListener("click", use.retryBootstrapResolution);
+      elements.bootstrapRetry.addEventListener("click", () => use.retryBootstrapResolution(use.captureAccountContext()));
       elements.bootstrapSignOut.addEventListener("click", use.logout);
       elements.bootstrapDialog.addEventListener("cancel", (event) => {
         event.preventDefault();
@@ -975,19 +1021,22 @@
     }
 
     setupConnectivityEvents() {
-      const { state, use, host, syncStorage, syncCore, document, view } = this;
+      const { state, use, host, syncStorage, document, view } = this;
       host.addEventListener("online", use.handleOnline);
       host.addEventListener("offline", use.handleOffline);
       host.addEventListener("pagehide", () => {
         if (!use.database() || !state.deviceId) return;
-        syncStorage.releaseTimerOwnership(use.database(), {
-          ...use.captureAccountContext(),
-          expectedUserId: syncCore.accountOwnerId(state.user) || state.localOwnerId || null,
+        const context = use.captureDatabaseContext();
+        accountOperation.requireBound(context);
+        syncStorage.releaseTimerOwnership(context.database, {
+          ...context, expectedUserId: context.ownerId,
           deviceId: state.deviceId, tabId: use.tabId(), nowMs: Date.now()
         }).catch((error) => {
+          if (!accountOperation.isCurrent(context)) return;
           if (error.name === "AccountOwnershipError") use.quarantineAccountMismatch();
           else {
             host.console.warn("Timer ownership release failed:", error);
+            if (!accountOperation.isCurrent(context)) return;
             reportFrontendError(error, "view.timer-ownership.release-failed");
           }
         });

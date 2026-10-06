@@ -5,6 +5,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  const accountOperation = typeof module === "object" && module.exports
+    ? require("./account-operation.js") : globalThis.PomodoroughAccountOperation;
+
   const PHASES = Object.freeze({
     focus: Object.freeze({ labelKey: "phase.focus", shortKey: "phase.focus.short", defaultMinutes: 25 }),
     short_break: Object.freeze({ labelKey: "phase.shortBreak", shortKey: "phase.shortBreak.short", defaultMinutes: 5 }),
@@ -79,7 +82,9 @@
       baseHistory: [], history: [], baseTasks: [], tasks: [],
       pending: [], pendingTaskOperations: [], pendingDurationOperations: [],
       pendingAutoStartOperations: [], pendingSelectedTaskOperations: [],
-      deliveryProof: null, canonicalHead: null, projectionPending: null, outgoingSync: null
+      deliveryProof: null, canonicalHead: null, projectionPending: null, outgoingSync: null,
+      timerDependencies: null, workspaceObservation: null, workspaceBlocked: false, readModel: null,
+      completionState: null
     };
   }
 
@@ -99,7 +104,7 @@
       logoutRecoveryRequired: false, logoutRecoveryBusy: false,
       offlineOwnerMode: false, user: null, csrfToken: null, deviceId: null,
       deviceSequence: 0, hlcWallMs: 0, hlcCounter: 0, clockOffset: null,
-      activeScreen: "timer", syncing: false, retrying: false, conflict: null,
+      activeScreen: "timer", syncing: false, retrying: false, conflict: null, savedClaimRecovery: null,
       durationSyncBootstrapped: false, autoStartSyncBootstrapped: false,
       selectedTaskSyncBootstrapped: false, actionLocked: false,
       tabId: tabID(host),
@@ -112,12 +117,12 @@
   const manifest = Object.freeze({
     name: "state",
     externals: ["host", "sharedCoreHost", "syncCore", "syncStorage"],
-    requires: ["activeCompletionAlertTimerId", "stopCompletionAlert", "queueSessionRevalidation"],
+    requires: ["database", "activeCompletionAlertTimerId", "stopCompletionAlert", "queueSessionRevalidation"],
     provides: [
       "clone", "emptyTimer", "controlsBlocked", "normalizeTimer", "loadSharedCore",
       "sharedTaskIdentity", "positiveNumber", "clampNumber", "selectedDurationMs",
       "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
-      "compareTimerCommands", "trustedNow", "monotonicNow", "elapsedFor", "projectOwnerState",
+      "compareTimerCommands", "trustedNow", "monotonicNow", "clockContinuityId", "getWorkspaceReadModel", "elapsedFor", "projectOwnerState",
       "rebuildOptimisticState", "ownerStateValue", "resetOwnerState", "quarantineOwnerState",
       "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "tr", "phaseLabel", "phaseShortLabel", "timerStatusLabel",
       "setI18nForTest", "phaseConfig", "defaultDurationsMs", "tabId"
@@ -166,16 +171,16 @@
   }
 
   class TrustedClock {
-    constructor(state, host, syncCore) {
+    constructor(state, host, syncStorage) {
       this.state = state;
       this.host = host;
-      this.syncCore = syncCore;
-      this.elapsedMonotonicAnchor = null;
+      this.syncStorage = syncStorage;
+      this.continuityId = null;
       this.runtime = null;
     }
 
     actions() {
-      return bindActions(this, ["trustedNow", "monotonicNow", "elapsedFor"]);
+      return bindActions(this, ["trustedNow", "monotonicNow", "clockContinuityId"]);
     }
 
     monotonicNow() {
@@ -184,33 +189,13 @@
     }
 
     trustedNow(localNowMs = Date.now(), monotonicMs = this.monotonicNow()) {
-      const sample = this.syncCore.validClockSample(this.state.clockOffset) ? this.state.clockOffset : null;
-      const identity = sample ? `${sample.offsetMs}:${sample.uncertaintyMs}:${sample.sampledAtWallMs}` : "local";
-      if (monotonicMs === null) return this.syncCore.trustedNow(localNowMs, sample, this.state.hlcWallMs);
-      if (this.runtime?.identity !== identity || monotonicMs < this.runtime.monotonicMs) {
-        const wallMs = this.syncCore.trustedNow(localNowMs, sample, this.state.hlcWallMs);
-        this.runtime = { identity, monotonicMs, wallMs };
-        return wallMs;
-      }
-      const wallMs = this.runtime.wallMs + Math.round(monotonicMs - this.runtime.monotonicMs);
-      return this.syncCore.trustedNow(wallMs, null, this.state.hlcWallMs);
+      const value = this.syncStorage.observeClock({ clockOffset: this.state.clockOffset,
+        minimumWallMs: this.state.hlcWallMs, runtime: this.runtime }, { wallMs: localNowMs, monotonicMs });
+      this.runtime = value.state.runtime ?? null;
+      return value.trustedNowMs;
     }
 
-    elapsedFor(timer, now = this.trustedNow(), monotonicMs = this.monotonicNow()) {
-      if (!timer) return 0;
-      const planned = positiveNumber(timer.plannedDurationMs, 0);
-      let elapsed = clampNumber(timer.elapsedAtAnchorMs, 0, planned);
-      if (timer.status === "running" && timer.anchorAt) {
-        const anchorMs = Date.parse(timer.anchorAt);
-        if (Number.isFinite(anchorMs)) elapsed += Math.max(0, now - anchorMs);
-        const key = `${timer.id || ""}\u0000${timer.anchorAt}\u0000${timer.elapsedAtAnchorMs}`;
-        if (monotonicMs !== null && this.elapsedMonotonicAnchor?.key === key
-          && monotonicMs >= this.elapsedMonotonicAnchor.monotonicMs) {
-          elapsed = this.elapsedMonotonicAnchor.elapsedMs + monotonicMs - this.elapsedMonotonicAnchor.monotonicMs;
-        } else if (monotonicMs !== null) this.elapsedMonotonicAnchor = { key, elapsedMs: elapsed, monotonicMs };
-      } else if (this.elapsedMonotonicAnchor) this.elapsedMonotonicAnchor = null;
-      return clampNumber(elapsed, 0, planned);
-    }
+    clockContinuityId() { return this.continuityId ||= this.host.crypto.randomUUID(); }
   }
 
   class SharedTaskCore {
@@ -252,7 +237,7 @@
       return bindActions(this, [
         "emptyTimer", "controlsBlocked", "normalizeTimer", "selectedDurationMs",
         "selectedTaskIdForNextFocus", "normalizeDurationsMs", "compareDurationOperations",
-        "projectOwnerState", "rebuildOptimisticState", "ownerStateValue", "resetOwnerState",
+        "projectOwnerState", "getWorkspaceReadModel", "elapsedFor", "rebuildOptimisticState", "ownerStateValue", "resetOwnerState",
         "quarantineOwnerState", "restoreOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "captureAccountContext", "phaseConfig", "defaultDurationsMs", "tabId"
       ]);
     }
@@ -270,9 +255,9 @@
     }
 
     normalizeDurationsMs(value) {
-      return Object.fromEntries(Object.keys(PHASES).map((phase) => [phase, Math.round(clampNumber(
-        value?.[phase] ?? DEFAULT_DURATIONS_MS[phase], 60_000, 10_800_000
-      ))]));
+      return this.syncStorage.projectWorkspace({ snapshot: { canonicalTimer: null, history: [], tasks: [],
+        durationsMs: value ?? DEFAULT_DURATIONS_MS, autoStartBreaks: false, selectedTaskId: null },
+        deviceId: this.state.deviceId, nowMs: 0 }).workspace.durationsMs;
     }
 
     selectedDurationMs() {
@@ -289,24 +274,10 @@
     }
 
     normalizeTimer(timer) {
-      if (!timer || typeof timer !== "object") {
-        return this.emptyTimer(this.state.selectedPhase, this.selectedDurationMs());
-      }
-      const phase = PHASES[timer.phase] ? timer.phase : "focus";
-      const plannedDurationMs = positiveNumber(timer.plannedDurationMs, this.state.durationsMs[phase]);
-      return {
-        ...timer,
-        id: timer.id || null,
-        phase,
-        status: ["idle", "running", "paused", "completed", "cancelled", "superseded"].includes(timer.status)
-          ? timer.status : "idle",
-        plannedDurationMs,
-        elapsedAtAnchorMs: clampNumber(timer.elapsedAtAnchorMs, 0, plannedDurationMs),
-        anchorAt: timer.anchorAt || null,
-        lastIntent: timer.lastIntent || null,
-        taskId: timer.taskId || null,
-        dependsOnCommandId: timer.dependsOnCommandId || null
-      };
+      const result = this.syncStorage.projectWorkspace({ snapshot: {
+        canonicalTimer: timer?.id ? timer : null, history: [], tasks: [], durationsMs: this.state.durationsMs,
+        autoStartBreaks: false, selectedTaskId: null }, deviceId: this.state.deviceId, nowMs: 0 });
+      return result.workspace.canonicalTimer || this.emptyTimer(this.state.selectedPhase, this.selectedDurationMs());
     }
 
     compareDurationOperations(left, right) {
@@ -315,73 +286,51 @@
         || String(left.id).localeCompare(String(right.id));
     }
 
-    projectionQueuesForDisplay(local) {
-      if (local.projectionPending && typeof local.projectionPending === "object") {
-        const safe = local.projectionPending;
-        const safeIds = new Set((safe.commands || []).map((command) => command.id));
-        const fresh = (local.pending || []).filter((command) =>
-          !safeIds.has(command.id) && this.hasImmutableProof(local, "commands", command.id)
-          && this.isNewerThanHead(local, command)
-        );
-        if (fresh.length === 0) return {
-          commands: safe.commands || [], taskOperations: safe.taskOperations || [],
-          durationOperations: safe.durationOperations || [],
-          autoStartOperations: safe.autoStartOperations || [],
-          selectedTaskOperations: safe.selectedTaskOperations || []
-        };
-        return {
-          commands: [...(safe.commands || []), ...fresh],
-          taskOperations: safe.taskOperations || [],
-          durationOperations: safe.durationOperations || [],
-          autoStartOperations: safe.autoStartOperations || [],
-          selectedTaskOperations: safe.selectedTaskOperations || []
-        };
-      }
+    workspaceInput(local = this.state) {
       return {
+        snapshot: { canonicalTimer: local.baseTimer?.id ? local.baseTimer : null,
+          user: local.user ?? this.state.user,
+          history: local.baseHistory, tasks: local.baseTasks, durationsMs: local.baseDurationsMs,
+          autoStartBreaks: local.baseAutoStartBreaks, selectedTaskId: local.baseSelectedTaskId },
         commands: local.pending, taskOperations: local.pendingTaskOperations,
-        durationOperations: local.pendingDurationOperations,
-        autoStartOperations: local.pendingAutoStartOperations,
-        selectedTaskOperations: local.pendingSelectedTaskOperations
+        durationOperations: local.pendingDurationOperations, autoStartOperations: local.pendingAutoStartOperations,
+        selectedTaskOperations: local.pendingSelectedTaskOperations,
+        deliveryProof: local.deliveryProof, canonicalHead: local.canonicalHead,
+        timerDependencies: local.timerDependencies, deviceId: this.state.deviceId,
+        projectionPending: local.projectionPending, outgoing: local.outgoingSync, completionState: local.completionState
       };
     }
 
-    hasImmutableProof(local, queue, id) {
-      return Array.isArray(local.deliveryProof?.[queue]) && local.deliveryProof[queue].includes(id);
+    getWorkspaceReadModel() {
+      const monotonicMs = this.clock.monotonicNow();
+      const nowMs = this.clock.trustedNow(Date.now(), monotonicMs);
+      const observed = this.syncStorage.observeWorkspace({ ...this.workspaceInput(), nowMs, monotonicMs,
+        selectedPhase: this.state.selectedPhase, continuityId: this.clock.clockContinuityId(),
+        deviceSequence: this.state.deviceSequence, hlc: { wallMs: this.state.hlcWallMs, counter: this.state.hlcCounter },
+        workspaceObservation: this.state.workspaceObservation });
+      this.state.workspaceObservation = observed.observation;
+      const readModel = this.syncStorage.readWorkspace({ ...this.workspaceInput(),
+        selectedPhase: this.state.selectedPhase, nowMs,
+        monotonic: monotonicMs === null || !this.state.workspaceObservation?.monotonicAnchor ? null
+          : { nowMs: monotonicMs, continuityId: this.clock.clockContinuityId(),
+            anchor: this.state.workspaceObservation.monotonicAnchor } });
+      this.state.readModel = readModel;
+      return readModel;
     }
 
-    isNewerThanHead(local, operation) {
-      if (!local.canonicalHead) return true;
-      const wall = Number(operation.hlcWallMs);
-      const counter = Number(operation.hlcCounter);
-      if (!Number.isSafeInteger(wall) || !Number.isSafeInteger(counter)) return false;
-      return wall > local.canonicalHead.wallMs
-        || wall === local.canonicalHead.wallMs && counter > local.canonicalHead.counter;
+    elapsedFor() {
+      return this.getWorkspaceReadModel().canonical.elapsedMs;
     }
 
     projectOwnerState(local) {
-      const projection = this.syncStorage.projectState({
-        snapshot: {
-          canonicalTimer: local.baseTimer?.id ? clone(local.baseTimer) : null,
-          history: clone(local.baseHistory || []), tasks: clone(local.baseTasks || []),
-          durationsMs: this.normalizeDurationsMs(local.baseDurationsMs),
-          autoStartBreaks: local.baseAutoStartBreaks === true,
-          selectedTaskId: local.baseSelectedTaskId ?? null
-        },
-        queues: this.projectionQueuesForDisplay(local),
-        nowMs: this.clock.trustedNow(), deviceId: this.state.deviceId
-      });
-      const pendingStart = [...local.pending].filter((command) =>
-        command.type === "start" && command.timerId === projection.canonicalTimer?.id
-      ).sort(this.syncCore.compareTimerCommands).at(-1);
-      local.timer = projection.canonicalTimer
-        ? this.normalizeTimer(pendingStart?.dependsOnCommandId
-          ? { ...projection.canonicalTimer, dependsOnCommandId: pendingStart.dependsOnCommandId }
-          : projection.canonicalTimer)
-        : this.emptyTimer(local.selectedPhase, projection.durationsMs[local.selectedPhase]);
+      const result = this.syncStorage.projectWorkspace({ ...this.workspaceInput(local), nowMs: 0 });
+      const projection = result.workspace;
+      local.timer = projection.canonicalTimer || this.emptyTimer(local.selectedPhase, projection.durationsMs[local.selectedPhase]);
       Object.assign(local, {
         history: projection.history, tasks: projection.tasks, durationsMs: projection.durationsMs,
         autoStartBreaks: projection.autoStartBreaks, selectedTaskId: projection.selectedTaskId
       });
+      local.workspaceBlocked = false;
     }
 
     rebuildOptimisticState() {
@@ -405,7 +354,9 @@
         pendingAutoStartOperations: clone(this.state.pendingAutoStartOperations),
         pendingSelectedTaskOperations: clone(this.state.pendingSelectedTaskOperations), user: clone(this.state.user),
         deliveryProof: clone(this.state.deliveryProof), canonicalHead: clone(this.state.canonicalHead),
-        projectionPending: clone(this.state.projectionPending), outgoingSync: clone(this.state.outgoingSync)
+        projectionPending: clone(this.state.projectionPending), outgoingSync: clone(this.state.outgoingSync),
+        timerDependencies: clone(this.state.timerDependencies), workspaceObservation: clone(this.state.workspaceObservation),
+        workspaceBlocked: this.state.workspaceBlocked, completionState: clone(this.state.completionState)
       };
     }
 
@@ -431,6 +382,11 @@
     }
 
     captureAccountContext() {
+      return accountOperation.bind(this.accountIdentity(), () => this.use.database(), this.syncStorage.AccountOwnershipError,
+        () => this.accountIdentity());
+    }
+
+    accountIdentity() {
       const ownerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
       const localOwnerId = this.state.localOwnerId;
       const marker = () => {
@@ -460,7 +416,8 @@
         "baseTimer", "timer", "baseHistory", "history", "baseTasks", "tasks", "pending",
         "pendingTaskOperations", "pendingDurationOperations", "pendingAutoStartOperations",
         "pendingSelectedTaskOperations", "user",
-        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync"
+        "deliveryProof", "canonicalHead", "projectionPending", "outgoingSync",
+        "timerDependencies", "workspaceObservation", "workspaceBlocked", "completionState"
       ];
       for (const field of fields) this.state[field] = local[field];
     }
@@ -471,7 +428,7 @@
   }
 
   function create({ state, external, use }) {
-    const clock = new TrustedClock(state, external.host, external.syncCore);
+    const clock = new TrustedClock(state, external.host, external.syncStorage);
     const owner = new OwnerStateProjector(state, external.syncCore, external.syncStorage, use, clock, external.host);
     const language = new LanguageCatalog();
     const sharedTasks = new SharedTaskCore(external.sharedCoreHost);

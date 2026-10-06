@@ -5,13 +5,22 @@ const { accountUser, ownerId } = require("./test/incarnation-fixture.js");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  storage, stores, nowMs, loadCore, snapshot, seedMeta, dump, deferred, fixture, switchOwner, assertQuarantined
+  storage: productionStorage, stores, nowMs, loadCore, snapshot, seedMeta, dump, deferred, fixture, switchOwner, assertQuarantined
 } = require("./test/account-ownership-fixture.js");
+const storage = { ...productionStorage, ...require("./test/core-planner-storage-fixture.js") };
 
 test("P1.20 runtime uses the bundled authoritative WASM", async (context) => {
   const { core, hash } = await loadCore();
   assert.equal(typeof core.projectSynchronizedState, "function");
   context.diagnostic(`WASM SHA256 ${hash}`);
+});
+
+test("P1.20 explicit task issuer cannot be replaced by the currently captured account", async (context) => {
+  const { stale, core } = await fixture(context);
+  const before = await dump(stale.use.database());
+  const task = core.taskIdentity({ title: "Foreign issuer confidential task" });
+  assert.equal(await stale.use.issueTaskOperation("upsert", task, ownerId("account-B")), false);
+  assert.deepEqual(await dump(stale.use.database()), before);
 });
 
 test("P1.20 stale A confidential task cannot enter B after peer bootstrap and reopen", async (context) => {
@@ -79,14 +88,29 @@ test("P1.20 settings persistence rejects stale owner without overwriting peer pr
   assert.equal(after.meta.find((record) => record.key === "settings").value.selectedPhase, "short_break");
 });
 
+function retainedOwnerOperation(core, storeName) {
+  const common = { id: "retained-B-operation", deviceId: "shared-device", occurredAt: new Date(nowMs).toISOString(),
+    hlcWallMs: nowMs, hlcCounter: 0 };
+  const task = core.taskIdentity({ title: "Retained B work" });
+  const fields = {
+    pending: { deviceSequence: 8, timerId: "retained-B-timer", type: "start", phase: "focus",
+      plannedDurationMs: 1500000, observedElapsedMs: 0 },
+    pendingTasks: { taskId: task.id, type: "upsert", title: task.title },
+    pendingDurations: { phase: "focus", durationMs: 1800000 },
+    pendingAutoStarts: { enabled: false },
+    pendingSelectedTasks: { taskId: null }
+  };
+  return { ...common, ...fields[storeName] };
+}
+
 for (const storeName of stores.slice(1)) {
   for (const operation of ["delete", "clear"]) {
     test(`P1.20 destructive ${storeName}.${operation} checks owner before callback`, async (context) => {
-      const { stale, peer } = await fixture(context);
+      const { stale, peer, core } = await fixture(context);
       await switchOwner(peer);
       const database = stale.use.database();
       const transaction = database.transaction(storeName, "readwrite");
-      transaction.objectStore(storeName).put({ id: "retained-B-operation" });
+      transaction.objectStore(storeName).put(retainedOwnerOperation(core, storeName));
       await storage.transactionDone(transaction);
       const before = await dump(database);
       let called = false;
@@ -124,11 +148,11 @@ test("P1.20 stale cleanup cannot clear B; authorized cleanup is atomic without d
   await switchOwner(peer);
   await peer.use.addTask("Keep B queue");
   const before = await dump(peer.use.database());
-  await assert.rejects(stale.use.clearLocalData(), { name: "AccountOwnershipError" });
+  await assert.rejects(stale.use.clearLocalData(undefined, stale.use.captureDatabaseContext()), { name: "AccountOwnershipError" });
   assert.deepEqual(await dump(peer.use.database()), before);
   assertQuarantined(stale);
   indexedDB.deleteDatabase = () => { throw new Error("Nontransactional deletion forbidden"); };
-  await peer.use.clearLocalData();
+  await peer.use.clearLocalData(undefined, peer.use.captureDatabaseContext());
   assert.equal(peer.use.database(), null);
   const reopened = await open(null);
   assert.ok(Object.values(await dump(reopened.use.database())).every((records) => records.length === 0));
@@ -157,7 +181,7 @@ test("P1.20 lease heartbeat quarantines stale tab instead of silently retrying",
   const { stale, peer } = await fixture(context, "running");
   await switchOwner(peer, "account-B", "running");
   const before = await dump(peer.use.database());
-  stale.use.heartbeatTimerOwnership();
+  await stale.use.heartbeatTimerOwnership();
   await dump(stale.use.database());
   assertQuarantined(stale);
   assert.deepEqual(await dump(peer.use.database()), before);
@@ -177,7 +201,7 @@ test("P1.20 null identity only mutates unowned storage; offline cached identity 
   await switchOwner(peer);
   await assert.rejects(stale.use.persistTaskOperation("delete", { id: "private-id" }), { name: "AccountOwnershipError" });
   assertQuarantined(stale);
-  await peer.use.clearLocalData();
+  await peer.use.clearLocalData(undefined, peer.use.captureDatabaseContext());
   const fresh = await open(null);
   await fresh.use.persistAutoStartOperation(true);
   assert.equal((await storage.readQueues(fresh.use.database())).autoStartOperations.length, 1);
@@ -188,12 +212,13 @@ test("P1.20 absent or malformed expected owner fails closed on owned database wi
   const database = stale.use.database();
   const before = await dump(database);
   for (const expectedUserId of [undefined, null, "", 123, {}, "account-B"]) {
-    let built = false;
-    await assert.rejects(storage.allocateMutation(database, {
-      expectedUserId, storeName: "pendingTasks", nowMs,
-      build: () => { built = true; return { id: "must-not-allocate" }; }
+    let dispatched = false;
+    await assert.rejects(storage.planWorkspaceMutation(database, {
+      expectedUserId, deviceId: stale.state.deviceId, nowMs, localNowMs: nowMs,
+      intent: { kind: "upsertTask", title: "must-not-allocate" }, preference: true,
+      sharedCore: { call() { dispatched = true; throw new Error("Stale planner executed"); } }
     }), { name: "AccountOwnershipError" });
-    assert.equal(built, false);
+    assert.equal(dispatched, false);
     assert.deepEqual(await dump(database), before);
   }
 });
@@ -202,10 +227,10 @@ test("P1.20 transaction queued behind peer switch checks persisted owner, not pr
   const { stale, peer } = await fixture(context);
   const switching = seedMeta(peer.use.database(), { snapshot: snapshot("account-B") });
   const input = {
-    expectedUserId: ownerId("account-A"), storeName: "pendingTasks", nowMs,
-    build: () => { throw new Error("Stale build executed"); }
+    expectedUserId: ownerId("account-A"), deviceId: stale.state.deviceId, nowMs, localNowMs: nowMs,
+    intent: { kind: "upsertTask", title: "Stale private task" }, preference: true
   };
-  const writing = storage.allocateMutation(stale.use.database(), input);
+  const writing = storage.planWorkspaceMutation(stale.use.database(), input);
   input.expectedUserId = ownerId("account-B");
   const rejected = assert.rejects(writing, { name: "AccountOwnershipError" });
   await switching;
@@ -252,8 +277,8 @@ test("P1.20 delayed committed result cannot enter B in-memory sync batch", async
   const { stale, peer, core } = await fixture(context);
   const committed = deferred();
   const release = deferred();
-  stale.external.syncStorage = { ...storage, allocateMutation: async (...args) => {
-    const operation = await storage.allocateMutation(...args);
+  stale.external.syncStorage = { ...storage, planWorkspaceMutation: async (...args) => {
+    const operation = await storage.planWorkspaceMutation(...args);
     committed.resolve();
     await release.promise;
     return operation;
@@ -315,11 +340,11 @@ test("P1.20 unknown-owner cleanup cannot infer permission; known owner can clear
   const unknown = await open(null);
   await storage.acquireBootstrapGate(stale.use.database(), { token: "cleanup", nowMs, leaseMs: 300_000 });
   const before = await dump(stale.use.database());
-  await assert.rejects(unknown.use.clearLocalData(), { name: "AccountOwnershipError" });
+  await assert.rejects(unknown.use.clearLocalData(undefined, unknown.use.captureDatabaseContext()), { name: "AccountOwnershipError" });
   assert.deepEqual(await dump(stale.use.database()), before);
   assertQuarantined(unknown);
   stale.state.user = null;
-  await stale.use.clearLocalData();
+  await stale.use.clearLocalData(undefined, stale.use.captureDatabaseContext());
   assert.ok(Object.values(await dump(unknown.use.database())).every((records) => records.length === 0));
 });
 
@@ -329,7 +354,7 @@ test("P1.20 null-owned snapshot permits local work but cleared owner rejects sta
   await stale.use.persistCommand("start");
   assert.equal((await storage.readQueues(stale.use.database())).commands.length, 1);
   await switchOwner(peer);
-  await peer.use.clearLocalData();
+  await peer.use.clearLocalData(undefined, peer.use.captureDatabaseContext());
   stale.state.user = accountUser("account-A");
   stale.state.localOwnerId = ownerId("account-A");
   const before = await dump(stale.use.database());
@@ -360,12 +385,15 @@ for (const method of ["finishTimer", "cancelAndClearTimer"]) {
     const { stale, peer } = await fixture(context, "running");
     const committed = deferred();
     const release = deferred();
-    const external = { ...stale.external, syncStorage: { ...storage, [method]: async (...args) => {
-      const result = await storage[method](...args);
+    const external = { ...stale.external, syncStorage: { ...storage, planWorkspaceMutation: async (...args) => {
+      const result = await storage.planWorkspaceMutation(...args);
       committed.resolve();
       await release.promise;
       return result;
     } } };
+    const connection = stale.use.database();
+    Object.assign(stale.use, require("./app-storage.js").create({ state: stale.state, external, use: stale.use }));
+    stale.use.setDatabaseForTest(connection);
     Object.assign(stale.use, require("./app-actions.js").create({ state: stale.state, external, use: stale.use }));
     const issuing = stale.use[method]();
     await committed.promise;
