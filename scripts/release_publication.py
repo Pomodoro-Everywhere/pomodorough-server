@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -131,12 +133,53 @@ def require_published(state, sealed):
         raise ValueError("published release differs from sealed draft or is not immutable")
 
 
-def immutable_disabled_message(repository):
-    return (
+def immutable_disabled_message(repository, detail=""):
+    base = (
         f"immutable releases are disabled for {repository}; "
         "enable immutable releases in repository settings (owner action) "
         "before publishing; refusing to publish mutable release"
     )
+    return f"{base} ({detail})" if detail else base
+
+
+def _immutable_api_detail(error):
+    parts = []
+    for attr in ("stderr", "output"):
+        value = getattr(error, attr, None)
+        if not value:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        text = str(value).strip()
+        if text:
+            parts.append(f"{attr}: {text}")
+    combined = " ".join(parts)
+    match = re.search(r"HTTP\s+(\d{3})", combined, re.IGNORECASE)
+    if match is None:
+        match = re.search(r"\b(401|403|404)\b", combined)
+    status = f"HTTP {match.group(1)}" if match else f"exit {error.returncode}"
+    if parts:
+        return f"{status}; {'; '.join(parts)}"
+    return status
+
+
+def _is_immutable_permissions_error(error):
+    texts = []
+    for attr in ("stderr", "output"):
+        value = getattr(error, attr, None)
+        if not value:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        texts.append(str(value).lower())
+    combined = " ".join(texts)
+    if "http 403" in combined or "http 401" in combined:
+        return True
+    for marker in ("forbidden", "resource not accessible", "must have admin",
+                   "requires admin", "permission denied", "not authorized"):
+        if marker in combined:
+            return True
+    return bool(re.search(r"\b403\b", combined))
 
 
 def require_immutable_releases(bound):
@@ -144,9 +187,18 @@ def require_immutable_releases(bound):
     try:
         setting = gh_api(endpoint)
     except subprocess.CalledProcessError as error:
-        raise ValueError(immutable_disabled_message(bound["repository"])) from error
+        detail = _immutable_api_detail(error)
+        if _is_immutable_permissions_error(error):
+            print(f"warning: cannot verify immutable releases setting for "
+                  f"{bound['repository']} ({detail}); skipping precheck; "
+                  f"post-publish immutable:true check will enforce",
+                  file=sys.stderr)
+            return
+        raise ValueError(
+            immutable_disabled_message(bound["repository"], detail)) from error
     if not isinstance(setting, dict) or setting.get("enabled") is not True:
-        raise ValueError(immutable_disabled_message(bound["repository"]))
+        raise ValueError(
+            immutable_disabled_message(bound["repository"], f"enabled: {setting!r}"))
 
 
 def publish(bound, seal_path):

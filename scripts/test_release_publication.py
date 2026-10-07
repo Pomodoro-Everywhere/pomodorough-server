@@ -23,6 +23,7 @@ class FakeGitHub:
         self.hook = lambda endpoint, arguments: None
         self.immutable_enabled = True
         self.immutable_payload = None
+        self.immutable_api_error = None
         self.contents = {}
         assets = []
         for number, path in enumerate(sorted(directory.iterdir()), 100):
@@ -38,12 +39,15 @@ class FakeGitHub:
         self.calls.append((endpoint, arguments))
         self.hook(endpoint, arguments)
         if endpoint.endswith("/immutable-releases"):
+            if self.immutable_api_error is not None:
+                raise self.immutable_api_error
             if self.immutable_payload is not None:
                 return copy.deepcopy(self.immutable_payload)
             if not self.immutable_enabled:
                 raise subprocess.CalledProcessError(
                     returncode=1, cmd=["gh", "api", endpoint],
-                    output=b'{"message": "Not Found"}', stderr=b"Not Found")
+                    output=b'{"message": "Not Found"}',
+                    stderr=b"gh: Not Found (HTTP 404)")
             return {"enabled": True, "enforced_by_owner": False}
         if "/git/ref/tags/" in endpoint:
             return {"object": {"type": "commit", "sha": self.tag_sha}}
@@ -97,6 +101,13 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.github.patches(), [self.github.root + "/42"])
         self.assertTrue(self.github.release["immutable"])
 
+    def test_immutable_releases_enabled_publishes(self):
+        self.verify()
+        self.assertEqual(self.github.api("repos/owner/repo/immutable-releases")["enabled"], True)
+        self.publish()
+        self.assertEqual(self.github.patches(), [self.github.root + "/42"])
+        self.assertTrue(self.github.release["immutable"])
+
     def test_immutable_releases_disabled_refuses_before_patch(self):
         self.verify()
         self.github.immutable_enabled = False
@@ -104,11 +115,39 @@ class PublicationTests(unittest.TestCase):
             self.publish()
         self.assertEqual(self.github.patches(), [])
         self.assertTrue(self.github.release["draft"])
+        with self.assertRaisesRegex(ValueError, "HTTP 404"):
+            publication.require_immutable_releases(self.bound)
+        try:
+            publication.require_immutable_releases(self.bound)
+        except ValueError as error:
+            self.assertIn("HTTP 404", str(error))
+            self.assertIn("Not Found", str(error))
+        else:
+            self.fail("expected disabled ValueError")
         self.github.immutable_enabled = True
         self.github.immutable_payload = {"enabled": False, "enforced_by_owner": False}
         with self.assertRaisesRegex(ValueError, "owner action"):
             self.publish()
         self.assertEqual(self.github.patches(), [])
+
+    def test_immutable_permissions_error_skips_precheck_and_publishes(self):
+        self.verify()
+        self.github.immutable_api_error = subprocess.CalledProcessError(
+            returncode=1, cmd=["gh", "api", "repos/owner/repo/immutable-releases"],
+            output=b'{"message": "Resource not accessible by integration"}',
+            stderr=b"gh: Resource not accessible by integration (HTTP 403)")
+        import io
+        stderr = io.StringIO()
+        with mock.patch.object(publication.sys, "stderr", stderr):
+            publication.require_immutable_releases(self.bound)
+        self.assertIn("skipping precheck", stderr.getvalue())
+        self.assertIn("HTTP 403", stderr.getvalue())
+        self.assertIn("immutable:true", stderr.getvalue())
+        stderr = io.StringIO()
+        with mock.patch.object(publication.sys, "stderr", stderr):
+            self.publish()
+        self.assertEqual(self.github.patches(), [self.github.root + "/42"])
+        self.assertTrue(self.github.release["immutable"])
 
     def test_replacement_draft_same_tag_rejected_before_patch(self):
         self.verify()
