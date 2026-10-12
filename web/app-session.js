@@ -10,6 +10,7 @@
 
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
+  const PENDING_DELETION_KEY = "pomodoroughPendingDeletion";
 
   function timingMs(name, fallback) {
     try {
@@ -286,6 +287,7 @@
 
     async loadSession(context = this.use.captureAccountContext()) {
       accountOperation.requireBound(context);
+      if (this.pendingDeletionAttempt() && await this.recoverPendingDeletion(context)) return false;
       const identity = this.pendingLocalLogout() ? this.use.cleanupIdentity() : null;
       const payload = await this.fetchSessionPayload(context);
       const completed = this.sessionCompletionContexts.get(context) || context;
@@ -501,6 +503,35 @@
       }
     }
 
+    pendingDeletionAttempt() {
+      try {
+        const attempt = JSON.parse(this.host.localStorage.getItem(PENDING_DELETION_KEY) || "null");
+        return typeof attempt?.userId === "string" && attempt.userId.startsWith("account:v1:") && attempt?.csrfToken ? attempt : null;
+      } catch { return null; }
+    }
+    writePendingDeletionAttempt(attempt) {
+      try { if (attempt) this.host.localStorage.setItem(PENDING_DELETION_KEY, JSON.stringify(attempt));
+        else this.host.localStorage.removeItem(PENDING_DELETION_KEY); } catch {}
+    }
+    async recoverPendingDeletion(context) {
+      const attempt = this.pendingDeletionAttempt(); if (!attempt) return false;
+      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) && (this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId) !== attempt.userId) return false;
+      let response = null;
+      try {
+        response = await this.host.fetch("/api/v1/account", { method: "DELETE", credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": attempt.csrfToken, ...this.syncCore.accountHeaders(attempt.userId) }, body: JSON.stringify({ confirmation: "DELETE" }) });
+      } catch { return false; }
+      if (response?.status !== 204) {
+        if (response?.status === 401 || response?.status === 400 || response?.status === 403) this.writePendingDeletionAttempt(null);
+        return false;
+      }
+      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) !== attempt.userId) return false;
+      this.markPendingLogout();
+      await this.completeAccountCleanup(this.use.cleanupIdentity(), this.use.captureAccountContext(), { clearMarker: true,
+        reportFailure: (error) => { this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error); reportFrontendError(error, "session.delete-account.cleanup-retry"); } });
+      if (!this.pendingLocalLogout()) this.writePendingDeletionAttempt(null);
+      return true;
+    }
     async clearPendingLogoutData(identity, issuer) {
       accountOperation.requireBound(issuer);
       if (!this.pendingLocalLogout()) return { cleared: true, context: issuer };
@@ -675,18 +706,21 @@
       }
       this.elements.deleteAccountButton.disabled = true;
       const context = this.use.captureAccountContext();
+      this.writePendingDeletionAttempt({ userId: context.ownerId, csrfToken: this.state.csrfToken });
       if (!await this.requestAccountDeletion(value, context)) return false;
       context.assertCurrent();
       this.markPendingLogout();
       const cleanupContext = this.use.captureAccountContext();
       const identity = this.use.cleanupIdentity();
       this.stream.closeRevisionStreamForIdentityChange();
-      return this.completeAccountCleanup(identity, cleanupContext, {
+      const cleaned = await this.completeAccountCleanup(identity, cleanupContext, {
         clearMarker: true, reportFailure: (error) => {
           this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
           reportFrontendError(error, "session.delete-account.cleanup-retry");
         }
       });
+      if (!this.pendingLocalLogout()) this.writePendingDeletionAttempt(null);
+      return cleaned;
     }
 
     async completeAccountCleanup(identity, context, completion) {
@@ -719,10 +753,13 @@
           body: JSON.stringify({ confirmation })
         });
         context.assertCurrent();
-        if (!response.ok) throw new Error(this.use.tr(
-          "account.delete.httpFailed", { status: response.status },
-          `Account deletion failed (${response.status}).`
-        ));
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 400 || response.status === 403) this.writePendingDeletionAttempt(null);
+          throw new Error(this.use.tr(
+            "account.delete.httpFailed", { status: response.status },
+            `Account deletion failed (${response.status}).`
+          ));
+        }
         return true;
       } catch (error) {
         if (!accountOperation.isCurrent(context)) return false;

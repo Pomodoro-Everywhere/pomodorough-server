@@ -75,6 +75,7 @@ func runServer(cfg config.Config, application *server.Server, logger *slog.Logge
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	httpServer.RegisterOnShutdown(application.Shutdown)
 	serveErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "address", cfg.ListenAddr, "public_url", cfg.PublicURL)

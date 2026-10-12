@@ -15,18 +15,14 @@ import (
 )
 
 // POMODOROUGH-1J: shutdown/cancel noise on the sync mutation path must
-// not reach Sentry. The production chain is fmt.wrapError "sync account
-// mutations" -> "reduce timer with shared core" -> dispatch shared core
-// operation timer.reduce.v1 "module closed with context canceled".
+// not reach Sentry. Only typed cancellation suppresses; substring-only
+// closed-module phrasing stays actionable (R48-S07, see
+// sync_cancel_r48s07_test.go for live-closed reporting controls).
 func TestSyncCancellationDoesNotReportToSentry(t *testing.T) {
 	canceled := []error{
 		context.Canceled,
 		context.DeadlineExceeded,
 		fmt.Errorf("reduce timer with shared core: %w", context.Canceled),
-		fmt.Errorf("reduce timer with shared core: %w",
-			fmt.Errorf("dispatch shared core operation %q: %w",
-				"timer.reduce.v1", errors.New("module closed with context canceled"))),
-		errors.New("shared core is closed"),
 	}
 	for _, failure := range canceled {
 		transport := initMockSentry(t)

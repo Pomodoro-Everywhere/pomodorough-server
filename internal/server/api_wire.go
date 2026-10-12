@@ -53,13 +53,16 @@ type syncCommandJSON struct {
 }
 
 type syncTaskOperationJSON struct {
-	ID         string `json:"id"`
-	TaskID     string `json:"taskId"`
-	Type       string `json:"type"`
-	Title      string `json:"title,omitempty"`
-	OccurredAt string `json:"occurredAt"`
-	HLCWallMs  *int64 `json:"hlcWallMs"`
-	HLCCounter *int64 `json:"hlcCounter"`
+	ID     string `json:"id"`
+	TaskID string `json:"taskId"`
+	Type   string `json:"type"`
+	Title  string `json:"title,omitempty"`
+	// DeviceID is a narrow retained-claim compatibility field. New clients
+	// must omit it; when present it must equal the envelope deviceId.
+	DeviceID   *string `json:"deviceId,omitempty"`
+	OccurredAt string  `json:"occurredAt"`
+	HLCWallMs  *int64  `json:"hlcWallMs"`
+	HLCCounter *int64  `json:"hlcCounter"`
 }
 
 type syncDurationOperationJSON struct {

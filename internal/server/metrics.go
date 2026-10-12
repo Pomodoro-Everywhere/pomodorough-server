@@ -27,6 +27,7 @@ type requestMetrics struct {
 	requests       map[requestMetricKey]uint64
 	durationCounts map[durationMetricKey]uint64
 	durationSums   map[durationMetricKey]float64
+	cancels        map[durationMetricKey]uint64
 }
 
 func newRequestMetrics() *requestMetrics {
@@ -34,6 +35,7 @@ func newRequestMetrics() *requestMetrics {
 		requests:       make(map[requestMetricKey]uint64),
 		durationCounts: make(map[durationMetricKey]uint64),
 		durationSums:   make(map[durationMetricKey]float64),
+		cancels:        make(map[durationMetricKey]uint64),
 	}
 }
 
@@ -47,6 +49,23 @@ func (m *requestMetrics) observe(method, pattern string, status int, duration ti
 	m.requests[requestKey]++
 	m.durationCounts[durationKey]++
 	m.durationSums[durationKey] += duration.Seconds()
+}
+
+func (m *requestMetrics) observeCancellation(method, pattern string) {
+	route := metricRoute(method, pattern)
+	method = normalizeMetricMethod(method)
+	key := durationMetricKey{method: method, route: route}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cancels[key]++
+}
+
+func (m *requestMetrics) canceledCount(method, pattern string) uint64 {
+	route := metricRoute(method, pattern)
+	method = normalizeMetricMethod(method)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cancels[durationMetricKey{method: method, route: route}]
 }
 
 func metricRoute(method, pattern string) string {
@@ -76,6 +95,9 @@ func (m *requestMetrics) writePrometheus(w io.Writer) error {
 	if err := m.writeRequestMetrics(w); err != nil {
 		return err
 	}
+	if err := m.writeCancellationMetrics(w); err != nil {
+		return err
+	}
 	return m.writeDurationMetrics(w)
 }
 
@@ -100,6 +122,29 @@ func (m *requestMetrics) writeRequestMetrics(w io.Writer) error {
 	for _, key := range keys {
 		if _, err := fmt.Fprintf(w, "pomodorough_http_requests_total{method=%s,route=%s,status=%s} %d\n",
 			strconv.Quote(key.method), strconv.Quote(key.route), strconv.Quote(strconv.Itoa(key.status)), m.requests[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *requestMetrics) writeCancellationMetrics(w io.Writer) error {
+	keys := make([]durationMetricKey, 0, len(m.cancels))
+	for key := range m.cancels {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].method != keys[j].method {
+			return keys[i].method < keys[j].method
+		}
+		return keys[i].route < keys[j].route
+	})
+	if _, err := io.WriteString(w, "# TYPE pomodorough_http_cancellations_total counter\n"); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(w, "pomodorough_http_cancellations_total{method=%s,route=%s} %d\n",
+			strconv.Quote(key.method), strconv.Quote(key.route), m.cancels[key]); err != nil {
 			return err
 		}
 	}

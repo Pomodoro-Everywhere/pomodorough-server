@@ -73,6 +73,13 @@ func (s *Server) resolveWebRequest(w http.ResponseWriter, r *http.Request, reque
 		return relative, true, true
 	}
 	if _, err := s.authenticateWeb(r); err != nil {
+		if requestPath == "/app" {
+			if userID, cred, credErr := requestCredential(r); credErr == nil {
+				if receipt, receiptErr := s.store.CommittedDeletionReceipt(userID, cred); receiptErr == nil && receipt.Generation != 0 {
+					return "app.html", false, true
+				}
+			}
+		}
 		returnTo := r.URL.RequestURI()
 		if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
 			returnTo = "/app"

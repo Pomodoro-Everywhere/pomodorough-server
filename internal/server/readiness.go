@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.47.0"
+	readinessCoreVersion   = "0.48.0"
 )
 
 type readinessAsset struct {
@@ -42,23 +42,23 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "1c6a3d770b4664c05ac8285b99c7e8cd500a8161a04d4ef7c167d3571128d9c1", false},
+	{"index.html", "0edd95ac83fd6cff952748a08d5a4fd809364af29323a85e238c213994aadbbf", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "510c82512246cfb2bb4db1660cfe70b33bd27e8826433ed5d60c947f79904b11", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
 	{"sentry-client.js", "e7fac5ffee247eb1c18103d07915ab0f919dafbef761b9cf616df2e5f8370843", false},
-	{"app.html", "0d29b8a0a4ed28703a9e273d8f9ffb47be06f02d7236515740e03c34b960b662", false},
-	{"app.css", "cf82c78181143beff051e65818c3b39e6f145ddd0b37af0b971e66a8ea8928b9", false},
+	{"app.html", "43f454fbdb78b35e941c135a63fd0e464e4dc9dece6bb2261973b20621d03535", false},
+	{"app.css", "05104900bcb4bc370c60090a1c220974203f111f392db871faadefef5d06a26f", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "45501a8ae1dbce441c7b21c1a3862c00c69215ffd59a1754e8ca972224f3fbc3", true},
-	{"sync-core.js", "d28eacbc08fb614c6d5d838f75beb34f9fa33b13ab4339fcd3facee2543a6fca", false},
+	{"pomodorough_core.wasm", "775d3d85cc4f6ced2243fd8b831e0057d6264e2202fdc2bf28d83b62e311e05a", true},
+	{"sync-core.js", "cb2e919e9552db0e61ce5f29612d5fa112a8e8212a03ddca4771b70a51188a37", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
 	{"workspace-core.js", "a3e0281f194b3f761ac0b2726352902a80f36c7a2b3e4ac63a011a5603d040bb", false},
 	{"workspace-transaction.js", "ef38040371afe408691d8e6d485dc233ed581a6eb53bdbafbfa037236c73d574", false},
-	{"sync-storage.js", "a998fc1d7de9c39acb8f87c3428a279b756027ead415276e8f2572b6099ef7f7", false},
+	{"sync-storage.js", "d6f492f4a9f69ce625061f546cc81cdc02c0b9842440aa1dadb1d7c43f974e35", false},
 	{"i18n.js", "ca2dbece1883165f5297382d24ca94456ebb92e68abf113c8789e74eb0f6c676", false},
 	{"locales/en.json", "44eeb4ecbf1b2a4cc685e7022de49e8d78aa734ab92821e573755a28a1e89427", false},
 	{"locales/ar-XB.json", "b79f80785805f18168ad8f8562f97eb36e2f318264e44b746b87eaeec886e2a0", false},
@@ -69,7 +69,7 @@ var readinessAssets = []readinessAsset{
 	{"app-actions.js", "5d64eadcfd074746a48b5220c1706186b23e1b8f4481677ff24be05b904adab6", false},
 	{"app-sync.js", "486bcf79ebd081c695db1c212be54425cd3144cdbdb055b6ee6b9c0a78cf63ae", false},
 	{"app-bootstrap.js", "d9a1a54ef3aff014ff8ac250738fbe23b18e4d29dcddc0116edae37a71298e80", false},
-	{"app-session.js", "017a552350715cdba992bb2b82931c52a9e4d488f82d3c09a879b914b24ffc6b", false},
+	{"app-session.js", "f5eab2c0e91eb417651e84cd3d7183fd05def5eec9206f017867d824ae8d5613", false},
 	{"app-view.js", "d95be174324606a22dd61a3d1d0573470563fcd4105a644cdc5f8b4fb709e0b6", false},
 	{"app.js", "65ad1e4684eb740ec3509baa1777fdb75de75c360694baf677aeb35a925320a3", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},

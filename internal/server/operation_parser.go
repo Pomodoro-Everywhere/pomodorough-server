@@ -165,7 +165,7 @@ func validateCommandTaskAssociation(input syncCommandJSON) error {
 }
 
 func parseTaskOperations(ctx context.Context, deviceID string, inputs []syncTaskOperationJSON, now time.Time) ([]task.Operation, error) {
-	titles, err := validateTaskOperationInputs(inputs)
+	titles, err := validateTaskOperationInputs(deviceID, inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -197,10 +197,13 @@ func parseTaskOperations(ctx context.Context, deviceID string, inputs []syncTask
 	return operations, nil
 }
 
-func validateTaskOperationInputs(inputs []syncTaskOperationJSON) ([]string, error) {
+func validateTaskOperationInputs(deviceID string, inputs []syncTaskOperationJSON) ([]string, error) {
 	titles := make([]string, 0, len(inputs))
 	seen := make(map[string]struct{}, len(inputs))
 	for _, input := range inputs {
+		if input.DeviceID != nil && *input.DeviceID != deviceID {
+			return nil, fmt.Errorf("invalid task operation device")
+		}
 		if !validID(input.ID) || !validID(input.TaskID) {
 			return nil, fmt.Errorf("invalid task operation identity")
 		}

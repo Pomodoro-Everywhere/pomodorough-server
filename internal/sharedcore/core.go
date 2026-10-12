@@ -25,6 +25,11 @@ const (
 
 var ErrInputTooLarge = errors.New("shared core input is too large")
 
+// ErrClosed reports calls against a closed runtime. The message matches
+// the historical string so existing log matchers keep working; callers
+// must use errors.Is, never substring matching.
+var ErrClosed = errors.New("shared core is closed")
+
 var (
 	defaultOnce sync.Once
 	defaultCore *Core
@@ -164,7 +169,7 @@ func (c *Core) CallBatch(ctx context.Context, calls []Call) (results [][]byte, e
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.runtime == nil || c.compiled == nil {
-		return nil, errors.New("shared core is closed")
+		return nil, ErrClosed
 	}
 	module, err := c.runtime.InstantiateModule(ctx, c.compiled, wazero.NewModuleConfig().WithName(""))
 	if err != nil {

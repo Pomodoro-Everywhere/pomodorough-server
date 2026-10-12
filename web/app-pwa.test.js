@@ -50,5 +50,8 @@ test("W4 touch targets meet 44px minimum", () => {
 
 test("W5 wide Duo breakpoint places timer beside rail with hinge gap", () => {
   assert.match(appCss, /@media \(min-width: 921px\)[\s\S]{0,300}\.workbench[\s\S]{0,200}grid-template-columns: minmax\(0, 1\.15fr\) minmax\(0, 0\.85fr\)/);
-  assert.match(appCss, /@media \(horizontal-viewport-segments: 2\)[\s\S]{0,200}env\(viewport-segment-gap/);
+  assert.match(appCss, /@media \(horizontal-viewport-segments: 2\)[\s\S]{0,800}env\(viewport-segment-width 0 0/);
+  assert.match(appCss, /env\(viewport-segment-left 1 0/);
+  assert.match(appCss, /env\(viewport-segment-right 0 0/);
+  assert.doesNotMatch(appCss, /viewport-segment-gap/);
 });

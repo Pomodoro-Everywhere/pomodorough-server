@@ -619,8 +619,34 @@ main {
 }
 
 @media (horizontal-viewport-segments: 2) {
+  main {
+    width: env(viewport-segment-width 0 0, 100%);
+    max-width: env(viewport-segment-width 0 0, 92rem);
+    margin: 0 auto 0 env(viewport-segment-left 0 0, 0px);
+  }
+
   .workbench {
-    column-gap: env(viewport-segment-gap, 1rem);
+    column-gap: calc(env(viewport-segment-left 1 0, 1rem) - env(viewport-segment-right 0 0, 0px));
+  }
+
+  .tasks-screen,
+  .task-form,
+  .task-board {
+    max-width: 100%;
+  }
+
+  .task-form {
+    max-width: env(viewport-segment-width 0 0, 100%);
+  }
+}
+
+@media (vertical-viewport-segments: 2) {
+  main {
+    margin-top: env(viewport-segment-top 0 1, 0px);
+  }
+
+  .workbench {
+    row-gap: calc(env(viewport-segment-top 0 1, 1rem) - env(viewport-segment-bottom 0 0, 0px));
   }
 }
 
@@ -1610,6 +1636,51 @@ main {
   text-transform: uppercase;
 }
 
+.site-footer a,
+.site-footer a:link {
+  color: #f5d05b;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+}
+
+.site-footer a:visited {
+  color: #a8d9cb;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+}
+
+.site-footer a:hover {
+  color: #ffffff;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 2px;
+}
+
+.site-footer a:focus {
+  color: #ffffff;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 2px;
+}
+
+.site-footer a:focus-visible {
+  color: #ffffff;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 2px;
+  outline: 3px solid var(--signal);
+  outline-offset: 4px;
+}
+
+.site-footer a:active {
+  color: #ffffff;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 2px;
+}
+
 @keyframes lamp-pulse {
   50% {
     background: var(--porcelain);
@@ -1697,7 +1768,10 @@ main {
   .masthead {
     min-height: auto;
     display: block;
-    padding: 1rem;
+    padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
+    padding-bottom: 1rem;
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
   }
 
   .wordmark-symbol {
@@ -1730,7 +1804,10 @@ main {
   }
 
   main {
-    padding: 1rem 0.75rem 3.5rem;
+    padding-top: 1rem;
+    padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
+    padding-bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+    padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
   }
 
   .screen-nav {
@@ -1934,7 +2011,8 @@ main {
   }
 
   .site-footer {
-    padding-inline: 1rem;
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
   }
 }
 

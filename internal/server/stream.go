@@ -34,6 +34,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, identity p
 		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "read stream revision", err)
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, r, "read stream revision", err)
 		return

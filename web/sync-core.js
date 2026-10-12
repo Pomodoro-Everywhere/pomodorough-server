@@ -17,10 +17,6 @@
   const MAX_CLOCK_UNCERTAINTY_MS = 30_000;
   const LEGACY_EPOCH = new Date(0).toISOString();
 
-  function clone(value) {
-    return value == null ? value : JSON.parse(JSON.stringify(value));
-  }
-
   function confirmationFor(strategy) {
     switch (strategy) {
       case "replace_remote":
@@ -165,7 +161,7 @@
     const selected = workspaceCore.selectedRecords(plan, queues);
     const result = {
       commands: selected.commands.map(timerRequestCommand),
-      taskOperations: clone(selected.taskOperations),
+      taskOperations: selected.taskOperations.map(taskRequestOperation),
       durationOperations: selected.durationOperations.map(durationRequestOperation),
       selectedTaskOperations: selected.selectedTaskOperations.map(selectedTaskRequestOperation)
     };
@@ -256,6 +252,19 @@
       hlcWallMs: operation.hlcWallMs,
       hlcCounter: operation.hlcCounter
     };
+  }
+
+  function taskRequestOperation(operation) {
+    const result = {
+      id: operation.id,
+      taskId: operation.taskId,
+      type: operation.type,
+      occurredAt: operation.occurredAt,
+      hlcWallMs: operation.hlcWallMs,
+      hlcCounter: operation.hlcCounter
+    };
+    if (operation.type === "upsert") result.title = operation.title;
+    return result;
   }
 
   function timerRequestCommand(command) {
@@ -629,6 +638,7 @@
     resolutionLimitViolation,
     sendableTimerCommands,
     selectedTaskRequestOperation,
+    taskRequestOperation,
     timerRequestCommand,
     validRetargetTaskId,
     retargetRequestFields,

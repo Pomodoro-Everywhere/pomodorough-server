@@ -117,6 +117,10 @@ func NewForTraffic(cfg config.Config, userStore *store.Store, logger *slog.Logge
 	return application, nil
 }
 
+func (s *Server) Shutdown() {
+	s.hub.shutdown()
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -161,11 +165,15 @@ func (s *Server) requireAuth(next authenticatedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, err := s.authenticate(r)
 		if err != nil {
-			if !isUnauthorized(err) {
-				s.internalAPIError(w, r, "authenticate request", err)
+			if isUnauthorized(err) {
+				writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 				return
 			}
-			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
+			if isRequestCancellation(err, r.Context()) {
+				s.writeCanceledInternalError(w, r, "authenticate request", err)
+				return
+			}
+			s.internalAPIError(w, r, "authenticate request", err)
 			return
 		}
 		if allowed, retryAfter := s.accountLimiter.allow(identity.UserID, time.Now()); !allowed {
@@ -261,7 +269,7 @@ func (s *Server) validCSRF(r *http.Request, identity principal) bool {
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self' https://*.ingest.sentry.io https://*.ingest.de.sentry.io https://*.ingest.us.sentry.io; script-src 'self' https://browser.sentry-cdn.com; style-src 'self'; manifest-src 'self'; worker-src 'self' blob:")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self' https://*.ingest.sentry.io https://*.ingest.de.sentry.io https://*.ingest.us.sentry.io; script-src 'self' 'wasm-unsafe-eval' https://browser.sentry-cdn.com; style-src 'self'; manifest-src 'self'; worker-src 'self' blob:")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")

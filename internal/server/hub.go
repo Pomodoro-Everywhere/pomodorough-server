@@ -7,6 +7,7 @@ type revisionHub struct {
 	nextID      uint64
 	subscribers map[revisionScope]map[uint64]revisionSubscription
 	latest      map[revisionScope]int64
+	closed      bool
 }
 
 type revisionScope struct {
@@ -37,6 +38,12 @@ func (h *revisionHub) subscribe(userID string, generation int64, credentials ...
 	}
 	scope := revisionScope{userID: userID, generation: generation}
 	h.mu.Lock()
+	if h.closed {
+		closed := make(chan int64)
+		close(closed)
+		h.mu.Unlock()
+		return closed, func() {}
+	}
 	h.nextID++
 	id := h.nextID
 	channel := make(chan int64, 1)
@@ -89,6 +96,19 @@ func (h *revisionHub) disconnect(userID string, generation int64) {
 	}
 	delete(h.subscribers, scope)
 	delete(h.latest, scope)
+}
+
+func (h *revisionHub) shutdown() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for scope, subs := range h.subscribers {
+		for _, sub := range subs {
+			close(sub.channel)
+		}
+		delete(h.subscribers, scope)
+		delete(h.latest, scope)
+	}
 }
 
 func (h *revisionHub) disconnectSession(userID string, generation int64, sessionID string) {

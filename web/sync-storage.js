@@ -241,7 +241,7 @@
   function encodeSelectedBatch(selected) {
     return {
       commands: selected.commands.map(core.timerRequestCommand),
-      taskOperations: selected.taskOperations,
+      taskOperations: selected.taskOperations.map(core.taskRequestOperation),
       durationOperations: selected.durationOperations.map(core.durationRequestOperation),
       autoStartOperations: selected.autoStartOperations.map(core.autoStartRequestOperation),
       selectedTaskOperations: selected.selectedTaskOperations.map(core.selectedTaskRequestOperation)

@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 )
 
-// isSyncCancellation reports whether a sync mutation failure is
-// shutdown/cancel noise that must not reach error monitoring.
+// isSyncCancellation reports typed request cancellation on the sync
+// mutation path. Only errors.Is against context.Canceled and
+// context.DeadlineExceeded on the failure or the live request context
+// counts. Messages that merely mention cancellation stay actionable.
 //
 // Production signal (POMODOROUGH-1J): fmt.wrapError "sync account
 // mutations" -> "reduce timer with shared core" -> dispatch shared core
@@ -17,40 +18,27 @@ import (
 // and wazero tears down the module instance; there is no actionable
 // server fault, 13 events with 0 users.
 //
-// Keep the predicate narrow: context cancellation plus the wazero/shared
-// core closed-module strings observed on this path. Genuine dispatch
-// failures (validation, corrupt output, real runtime faults) do not match
-// and keep reporting.
+// Typed demarcation matches S05 isRequestCancellation and S06
+// monitoringCause: wazero sys.ExitError with a canceled or deadline
+// exit code matches errors.Is against context.Canceled or
+// context.DeadlineExceeded, while genuine traps use other exit codes
+// and stay actionable. sharedcore.ErrClosed on a live context is an
+// unexpectedly closed runtime and stays actionable; the same sentinel
+// with a canceled context suppresses via explicit lifecycle evidence.
 func isSyncCancellation(err error, ctx context.Context) bool {
-	if err == nil {
-		return false
-	}
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	if ctx != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return true
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return true
-		}
+	if ctx == nil {
+		return false
 	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"context canceled",
-		"context deadline exceeded",
-		"module closed",
-		"shared core is closed",
-	} {
-		if strings.Contains(message, marker) {
-			return true
-		}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return true
 	}
-	return false
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 // writeSyncMutationError answers a failed sync mutation without sending

@@ -32,12 +32,13 @@ var (
 // operation-scoped value. Request handling already logs the full error, so
 // monitoring only needs the pattern: raw messages can carry task titles,
 // tokens, emails, or URLs. The Go type name is static code identity, never
-// user content.
+// user content. The bounded cause class distinguishes unrelated root
+// causes that share one wrapper type.
 func sanitizedMonitoringError(operation string, err error) error {
 	if operation == "" {
 		return errors.New("internal error")
 	}
-	return fmt.Errorf("%s (%T)", operation, err)
+	return fmt.Errorf("%s cause=%s (%T)", operation, monitoringCause(err), err)
 }
 
 // reportPanicToErrorMonitoring forwards an already-logged request panic to
@@ -58,13 +59,13 @@ func reportPanicToErrorMonitoring(recovered any, request *http.Request) {
 }
 
 // reportInternalErrorToErrorMonitoring forwards an already-logged internal
-// request failure to error monitoring. Repeat bursts for one operation and
-// route pattern collapse to a single sampled error plus one breadcrumb per
-// suppressed repeat, so a hot failure cannot spam monitoring. Tags carry
-// only the route pattern (never raw paths, queries, bodies, or
-// credentials), the exception value carries only the static operation
-// (never the raw error message), and the call is a no-op when monitoring
-// is disabled.
+// request failure to error monitoring. Repeat bursts for one operation,
+// route pattern, and cause class collapse to a single sampled error plus
+// one breadcrumb per suppressed repeat, so a hot failure cannot spam
+// monitoring. Tags carry only the route pattern (never raw paths, queries,
+// bodies, or credentials), the exception value carries only the static
+// operation plus bounded cause (never the raw error message), and the call
+// is a no-op when monitoring is disabled.
 func reportInternalErrorToErrorMonitoring(err error, request *http.Request, operation string) {
 	if err == nil {
 		return
@@ -76,7 +77,9 @@ func reportInternalErrorToErrorMonitoring(err error, request *http.Request, oper
 	if operation != "" {
 		hub.Scope().SetTag("error.operation", operation)
 	}
-	key := internalErrorKey(operation, request)
+	cause := monitoringCause(err)
+	hub.Scope().SetTag("error.cause", cause)
+	key := internalErrorKey(operation, request, cause)
 	if repeats, sampled := sampleInternalError(key); !sampled {
 		noteInternalErrorRepeat(hub, operation, repeats)
 		return
@@ -84,17 +87,21 @@ func reportInternalErrorToErrorMonitoring(err error, request *http.Request, oper
 	hub.CaptureException(sanitizedMonitoringError(operation, err))
 }
 
-// internalErrorKey groups repeats by static operation plus route pattern.
-// Raw paths, queries, and header values never enter the key.
-func internalErrorKey(operation string, request *http.Request) string {
+// internalErrorKey groups repeats by static operation, route pattern, and
+// bounded cause class. Raw paths, queries, and header values never enter
+// the key.
+func internalErrorKey(operation string, request *http.Request, cause string) string {
+	if cause == "" {
+		cause = "internal"
+	}
 	if request == nil {
-		return "no-request|" + operation
+		return "no-request|" + operation + "|" + cause
 	}
 	route := request.Pattern
 	if route == "" {
 		route = "unpatterned"
 	}
-	return request.Method + "|" + route + "|" + operation
+	return request.Method + "|" + route + "|" + operation + "|" + cause
 }
 
 // sampleInternalError applies jittered exponential backoff per key. The
