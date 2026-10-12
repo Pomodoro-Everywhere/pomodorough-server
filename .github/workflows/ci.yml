@@ -51,6 +51,14 @@ jobs:
           cmp internal/sharedcore/pomodorough_core.wasm web/pomodorough_core.wasm
           test "$(cat internal/sharedcore/CORE_COMMIT)" = "3c609d4f2dd87a9d201f928772a466af7ab70581"
           (cd internal/sharedcore && sha256sum --check pomodorough_core.wasm.sha256)
+      # Core ships package-server Go overlay tests under shared-core/scripts.
+      # They run through a Go test overlay with PWA fixture drivers, which
+      # this job does not provide, and the checkout has no go.mod so the
+      # files would otherwise compile as pomodorough/shared-core/scripts
+      # and break every ./... invocation below. Remove them after the
+      # rebuild verification; the embedded wasm copies are unaffected.
+      - name: Remove pinned shared-core overlay test sources
+        run: rm -f shared-core/scripts/*_test.go
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
