@@ -547,16 +547,16 @@ test("CORE-PWA03 401 source contracts require issuer for every pending cleanup p
   assert.doesNotMatch(session, /clearLocalData\([^\n]*(?:issuer\?|issuer\.database \?)/);
   assert.match(view, /clearLocalData\(undefined, context\)/);
   assert.match(view, /accountOperation\.isCurrent\(completed\)/);
-  assert.equal([...session.matchAll(/\.clearLocalData\(\w+, (?:issuer|context)\)/g)].length, 3);
-  assert.equal([...session.matchAll(/\.clearLocalData\(/g)].length, 3);
+  assert.equal([...session.matchAll(/\.clearLocalData\(\w+, (?:issuer|context|recovery)\)/g)].length, 4);
+  assert.equal([...session.matchAll(/\.clearLocalData\(/g)].length, 4);
   assert.equal([...view.matchAll(/\.clearLocalData\(/g)].length, 1);
   assert.equal([...repository.matchAll(/return this\.clearLocalData\(/g)].length, 0);
   assert.match(repository, /assertAuthorizedCleanup\(identity, context\) \{\s*accountOperation\.requireBound\(context\)/);
   const production = fs.readdirSync(__dirname).filter((name) => name.endsWith(".js") && !name.endsWith(".test.js"))
     .map(source).join("\n");
   const writers = [...production.matchAll(/\.clearLocalData\(([^\n]*)\)/g)];
-  assert.equal(writers.length, 4);
-  for (const [, argumentsText] of writers) assert.match(argumentsText, /, (?:issuer|context)$/);
+  assert.equal(writers.length, 5);
+  for (const [, argumentsText] of writers) assert.match(argumentsText, /, (?:issuer|context|recovery)$/);
   assert.equal([...production.matchAll(/\.clearPendingLogoutData\(/g)].length, 1);
   assert.equal([...production.matchAll(/call\(application, "clearPendingLogoutData"/g)].length, 1);
   assert.equal([...production.matchAll(/call\(application, "clearLocalData"/g)].length, 0);

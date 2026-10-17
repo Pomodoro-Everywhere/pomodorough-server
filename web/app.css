@@ -108,6 +108,7 @@ select:focus-visible {
 .masthead {
   min-height: 7.5rem;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 2rem;
@@ -122,9 +123,11 @@ select:focus-visible {
 
 .wordmark {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.9rem;
   min-width: 0;
+  max-width: 100%;
   color: inherit;
   text-decoration: none;
 }
@@ -149,9 +152,12 @@ select:focus-visible {
 .wordmark-main,
 .wordmark-sub {
   display: block;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .wordmark-main {
+  overflow-wrap: anywhere;
   font-family: var(--display);
   font-size: clamp(1.75rem, 4vw, 3.15rem);
   font-weight: 900;
@@ -178,12 +184,17 @@ select:focus-visible {
 }
 
 .masthead-tools {
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 1rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .profile {
+  flex-wrap: wrap;
   min-width: 0;
+  max-width: 100%;
   gap: 0.65rem;
   padding-inline-start: 1rem;
   border-inline-start: 1px solid rgba(247, 248, 242, 0.35);
@@ -235,7 +246,9 @@ select:focus-visible {
 }
 
 .sync-status {
-  min-width: 9.75rem;
+  flex: 0 1 9.75rem;
+  min-width: 0;
+  max-width: 100%;
   gap: 0.65rem;
   padding: 0.55rem 0.75rem;
   border: 1px solid rgba(247, 248, 242, 0.4);
@@ -267,7 +280,13 @@ select:focus-visible {
   text-transform: uppercase;
 }
 
+.sync-label {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .sync-label span {
+  overflow-wrap: anywhere;
   font-family: var(--utility);
   font-size: 0.67rem;
   font-weight: 800;
@@ -326,6 +345,8 @@ select:focus-visible {
 main {
   width: min(100%, 92rem);
   margin: 0 auto;
+  /* R49-S07: expose usable segment width so workbench arrangement derives from container, not viewport. */
+  container-type: inline-size;
   padding: clamp(1.25rem, 3.5vw, 3.5rem) max(clamp(0.9rem, 4vw, 4.5rem), env(safe-area-inset-right, 0px)) calc(5rem + env(safe-area-inset-bottom, 0px)) max(clamp(0.9rem, 4vw, 4.5rem), env(safe-area-inset-left, 0px));
 }
 
@@ -420,8 +441,10 @@ main {
 }
 
 .bootstrap-dialog {
-  width: min(43rem, calc(100% - 2rem));
-  max-height: calc(100vh - 2rem);
+  box-sizing: border-box;
+  width: min(43rem, calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 2rem));
+  max-width: calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 1rem);
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 2rem);
   padding: 0;
   overflow: auto;
   color: var(--track);
@@ -429,6 +452,48 @@ main {
   border: 3px solid var(--track);
   border-radius: 0;
   box-shadow: 12px 12px 0 var(--signal);
+}
+
+/* R49-S09: keep deletion-dialog children inside usable dialog width so enlarged
+   text plus safe insets cannot push inputs or buttons past safe bounds. */
+.bootstrap-dialog > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bootstrap-dialog-title,
+.bootstrap-dialog-message {
+  overflow-wrap: anywhere;
+}
+
+.bootstrap-dialog > h2,
+.bootstrap-dialog > p {
+  overflow-wrap: anywhere;
+}
+
+.bootstrap-dialog-input,
+.bootstrap-dialog > input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bootstrap-dialog-actions,
+.bootstrap-dialog > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bootstrap-dialog-button,
+.bootstrap-dialog-actions button,
+.bootstrap-dialog > div > button {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .bootstrap-dialog::backdrop {
@@ -595,6 +660,8 @@ main {
   display: grid;
   grid-template-columns: 1fr;
   align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
   border: 3px solid var(--track);
   box-shadow: 10px 10px 0 var(--signal);
 }
@@ -602,6 +669,9 @@ main {
 .recipe-rail {
   position: relative;
   z-index: 1;
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
   padding: clamp(1.25rem, 3vw, 2.4rem);
   background: var(--porcelain);
   border-top: 3px solid var(--track);
@@ -638,6 +708,15 @@ main {
   .task-form {
     max-width: env(viewport-segment-width 0 0, 100%);
   }
+
+  /* R49-S09: anchor the deletion dialog to the first usable segment so the
+     centered viewport dialog cannot straddle the reserved fold strip. */
+  .bootstrap-dialog {
+    width: min(43rem, calc(env(viewport-segment-width 0 0, 100vw) - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 2rem));
+    max-width: calc(env(viewport-segment-width 0 0, 100vw) - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 1rem);
+    margin-left: calc(env(viewport-segment-left 0 0, 0px) + env(safe-area-inset-left, 0px) + 0.5rem);
+    margin-right: auto;
+  }
 }
 
 @media (vertical-viewport-segments: 2) {
@@ -648,12 +727,19 @@ main {
   .workbench {
     row-gap: calc(env(viewport-segment-top 0 1, 1rem) - env(viewport-segment-bottom 0 0, 0px));
   }
+
+  /* R49-S09: keep a horizontally folded dialog inside the first usable segment height. */
+  .bootstrap-dialog {
+    max-height: calc(env(viewport-segment-height 0 0, 100vh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 2rem);
+  }
 }
 
 .rail-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.9rem;
+  min-width: 0;
   padding-bottom: 1.35rem;
   border-bottom: 2px solid var(--track);
 }
@@ -672,9 +758,15 @@ main {
   clip-path: polygon(0 0, calc(100% - 0.65rem) 0, 100% 50%, calc(100% - 0.65rem) 100%, 0 100%);
 }
 
+.rail-heading > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .rail-heading strong,
 .rail-heading small {
   display: block;
+  overflow-wrap: anywhere;
 }
 
 .rail-heading strong {
@@ -707,16 +799,23 @@ main {
   grid-template-columns: minmax(8rem, 1fr) minmax(9rem, 1.2fr);
   align-items: center;
   gap: 0.8rem;
+  min-width: 0;
   margin-top: 1.35rem;
   padding: 0.9rem 0;
   border-top: 2px solid var(--track);
   border-bottom: 1px solid var(--steel);
 }
 
+.task-selector-row > span {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .task-selector-row span,
 .task-selector-row strong,
 .task-selector-row small {
   display: block;
+  overflow-wrap: anywhere;
 }
 
 .task-selector-row strong {
@@ -737,6 +836,8 @@ main {
 
 .task-selector-row select {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 3.25rem;
   padding: 0.65rem 2.3rem 0.65rem 0.75rem;
   color: var(--track);
@@ -759,16 +860,20 @@ main {
   grid-template-columns: minmax(7.2rem, 1fr) minmax(8.8rem, 0.95fr);
   align-items: stretch;
   gap: 0.7rem;
+  min-width: 0;
   padding: 0.9rem 0;
   border-bottom: 1px solid var(--steel);
 }
 
 .phase-button {
   min-height: 3.25rem;
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
+  overflow-wrap: anywhere;
   padding: 0.5rem 0.65rem;
   background: transparent;
   border: 0;
@@ -802,8 +907,10 @@ main {
 
 .stepper {
   display: grid;
-  grid-template-columns: 2.75rem minmax(3.5rem, 1fr) 2.75rem;
+  grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem;
   align-self: center;
+  min-width: 0;
+  max-width: 100%;
   border: 2px solid var(--track);
 }
 
@@ -875,9 +982,11 @@ main {
 
 .auto-start-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
   margin-top: 1.35rem;
   padding: 1rem 0;
   border-top: 2px solid var(--track);
@@ -885,10 +994,16 @@ main {
   cursor: pointer;
 }
 
+.auto-start-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .auto-start-copy,
 .auto-start-copy strong,
 .auto-start-copy small {
   display: block;
+  overflow-wrap: anywhere;
 }
 
 .auto-start-copy strong {
@@ -994,8 +1109,10 @@ main {
 
 .timer-machine {
   position: relative;
+  container: timer-actions / inline-size;
   display: flex;
   min-width: 0;
+  max-width: 100%;
   flex-direction: column;
   align-items: center;
   padding: clamp(1.2rem, 3vw, 2.5rem);
@@ -1234,6 +1351,9 @@ main {
 
 .action-bank button {
   min-height: 3.45rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 0.75rem 0.9rem;
   border: 2px solid var(--porcelain);
   border-radius: 0;
@@ -1290,9 +1410,11 @@ main {
 
 .history-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
   padding: 1.35rem 0 1.5rem;
   border-bottom: 1px solid var(--track);
 }
@@ -1306,8 +1428,14 @@ main {
   text-transform: uppercase;
 }
 
+.history-heading > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .history-heading h2 {
   margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
   font-family: var(--display);
   font-size: clamp(2.25rem, 5vw, 4.8rem);
   letter-spacing: 0.025em;
@@ -1316,7 +1444,9 @@ main {
 }
 
 .history-count {
-  min-width: 4.7rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 0.35rem 0.6rem;
   color: var(--ticket);
   background: var(--platform);
@@ -1456,15 +1586,23 @@ main {
 
 .tasks-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: 2rem;
+  min-width: 0;
   padding: 1.5rem 0 1.75rem;
   border-bottom: 1px solid var(--track);
 }
 
+.tasks-heading > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .tasks-heading h1 {
   margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
   font-family: var(--display);
   font-size: clamp(3rem, 8vw, 7rem);
   letter-spacing: 0.025em;
@@ -1599,15 +1737,19 @@ main {
   display: inline-flex;
   align-items: center;
   margin-inline-end: 0.8rem;
-  padding: 0.55rem 0;
-  color: var(--danger);
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid currentColor;
+  padding: 0.55rem 0.9rem;
+  color: var(--porcelain);
+  background: #7c1d18;
+  border: 2px solid #7c1d18;
   font-family: var(--utility);
   font-size: 0.65rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.task-delete:focus-visible {
+  outline: 3px solid var(--track);
+  outline-offset: 2px;
 }
 
 .task-empty {
@@ -1623,8 +1765,10 @@ main {
 
 .site-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
   padding: 1.3rem max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-right, 0px)) calc(1.3rem + env(safe-area-inset-bottom, 0px)) max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-left, 0px));
   color: var(--sky);
   background: var(--platform-deep);
@@ -1634,6 +1778,12 @@ main {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+}
+
+.site-footer > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .site-footer a,
@@ -1751,8 +1901,9 @@ main {
 
 @media (max-width: 640px) {
   .bootstrap-dialog {
-    width: calc(100% - 1rem);
-    max-height: calc(100vh - 1rem);
+    width: min(43rem, calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 1rem));
+    max-width: calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 1rem);
+    max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 1rem);
     box-shadow: 6px 6px 0 var(--signal);
   }
 
@@ -2030,13 +2181,15 @@ main {
     padding-inline-start: 0.5rem;
   }
 
+  /* R49-S06: stack narrow duration rows so scrolled steppers fit usable width inside safe insets. */
   .duration-row {
-    grid-template-columns: minmax(6.5rem, 0.85fr) minmax(8.75rem, 1.15fr);
-    gap: 0.4rem;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
   }
 
   .stepper {
-    grid-template-columns: 2.75rem minmax(3.25rem, 1fr) 2.75rem;
+    grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem;
+    align-self: stretch;
   }
 
   .dial-center {
@@ -2059,6 +2212,124 @@ main {
   .history-count {
     min-width: 3.7rem;
     font-size: 2rem;
+  }
+}
+
+/* R49-S05: stack rail rows from rail inline size so enlarged text wraps vertically. */
+@container (max-width: 24rem) {
+  .task-selector-row,
+  .duration-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stepper {
+    align-self: stretch;
+  }
+}
+
+/* R49-S05: stack stepper rows when the rail cannot fit edge buttons plus input. */
+@container (max-width: 12rem) {
+  .stepper {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stepper button:first-child,
+  .stepper label {
+    border-right: 0;
+    border-bottom: 1px solid var(--track);
+  }
+}
+
+/* R49-S07: stack workbench from usable segment/container width so timer/preference children stay in segment. */
+@container (max-width: 57.5625rem) {
+  .workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recipe-rail {
+    border-top: 3px solid var(--track);
+    border-left: 0;
+  }
+}
+
+/* R49-S07: arrange timer actions from usable machine width, including narrow
+   segments and enlarged text. Keep the primary action before terminal actions. */
+@container timer-actions (max-width: 32rem) {
+  .action-bank {
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr);
+  }
+
+  .action-bank .action-danger {
+    grid-column: 1 / -1;
+  }
+}
+
+@container timer-actions (max-width: 20rem) {
+  .action-bank {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* R49-S10: collapse duration fieldset from rail inline size so enlarged text
+   stacks durations vertically instead of squeezing stepper inputs. */
+@container (max-width: 40rem) {
+  .recipe-rail fieldset {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+/* R49-S10: stack task board from usable width so rem minimums cannot squeeze
+   Delete to zero. Mirrors the narrow task-row arrangement without shrinking
+   text or targets. */
+@container (max-width: 40rem) {
+  .task-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-form > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-form button {
+    border-left: 2px solid var(--porcelain);
+  }
+
+  .task-board-head {
+    display: none;
+  }
+
+  .task-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-name {
+    grid-column: 1 / -1;
+  }
+
+  .task-stat::before {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--muted);
+    font-size: 0.55rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .task-stat:nth-child(2)::before {
+    content: attr(data-stat-label);
+  }
+
+  .task-stat:nth-child(3)::before {
+    content: attr(data-stat-label);
+  }
+
+  .task-delete {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin: 0 0 0 0.8rem;
   }
 }
 
@@ -2141,6 +2412,16 @@ main {
 
   .history-stamp {
     border-color: var(--page-bg);
+  }
+
+  .task-delete {
+    color: var(--porcelain);
+    background: #7c1d18;
+    border-color: var(--porcelain);
+  }
+
+  .task-delete:focus-visible {
+    outline-color: var(--porcelain);
   }
 }
 

@@ -136,7 +136,7 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v67-/);
+  assert.match(workerSource, /pomodorough-shell-v70-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

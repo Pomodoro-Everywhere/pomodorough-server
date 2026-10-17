@@ -175,6 +175,8 @@
       this.logoutFailureContexts = new WeakMap();
       this.authenticatedContexts = new WeakMap();
       this.sessionCompletionContexts = new WeakMap();
+      this.deletionMarkerFailureNames = new Set();
+      this.deletionAttemptRecords = new WeakMap();
     }
 
     actions() {
@@ -505,31 +507,126 @@
 
     pendingDeletionAttempt() {
       try {
-        const attempt = JSON.parse(this.host.localStorage.getItem(PENDING_DELETION_KEY) || "null");
-        return typeof attempt?.userId === "string" && attempt.userId.startsWith("account:v1:") && attempt?.csrfToken ? attempt : null;
+        const record = this.host.localStorage.getItem(PENDING_DELETION_KEY);
+        const attempt = JSON.parse(record || "null");
+        if (!attempt || (attempt.stage !== "issued" && attempt.stage !== undefined)) return null;
+        this.syncCore.accountHeaders(attempt.userId);
+        if (typeof attempt.csrfToken !== "string" || !attempt.csrfToken) return null;
+        this.deletionAttemptRecords.set(attempt, record);
+        return attempt;
       } catch { return null; }
     }
     writePendingDeletionAttempt(attempt) {
-      try { if (attempt) this.host.localStorage.setItem(PENDING_DELETION_KEY, JSON.stringify(attempt));
-        else this.host.localStorage.removeItem(PENDING_DELETION_KEY); } catch {}
+      try {
+        if (!attempt) {
+          this.host.localStorage.removeItem(PENDING_DELETION_KEY);
+          return true;
+        }
+        this.syncCore.accountHeaders(attempt.userId);
+        const identified = { ...attempt, attemptId: this.host.crypto.randomUUID() };
+        const serialized = JSON.stringify({ ...identified, stage: "candidate" });
+        const storage = this.host.localStorage;
+        storage.setItem(PENDING_DELETION_KEY, serialized);
+        if (storage.getItem(PENDING_DELETION_KEY) !== serialized) {
+          throw new Error("Account deletion recovery marker readback failed.");
+        }
+        // Only a verified candidate can become recovery-eligible. setItem is atomic:
+        // a failed promotion leaves the candidate inert, including after a crash.
+        storage.setItem(PENDING_DELETION_KEY, JSON.stringify({ ...identified, stage: "issued" }));
+        this.deletionMarkerFailureNames.clear();
+        return true;
+      } catch (error) {
+        if (attempt) this.reportDeletionMarkerFailure(error);
+        return false;
+      }
+    }
+
+    reportDeletionMarkerFailure(error) {
+      const name = ["QuotaExceededError", "SecurityError"].includes(error?.name) ? error.name : "StorageError";
+      if (this.deletionMarkerFailureNames.has(name)) return;
+      this.deletionMarkerFailureNames.add(name);
+      // Storage exceptions can contain account credentials or marker contents.
+      const failure = new Error("Account deletion recovery marker storage failed.");
+      failure.name = name;
+      this.host.console.warn("Pomodorough account deletion recovery marker storage failed:", failure);
+      reportFrontendError(failure, "session.delete-account.marker-write-failed");
+    }
+
+    assertPendingDeletionAttempt(attempt) {
+      let record;
+      try { record = this.host.localStorage.getItem(PENDING_DELETION_KEY); }
+      catch { throw new this.syncStorage.AccountOwnershipError(); }
+      if (record !== this.deletionAttemptRecords.get(attempt)) throw new this.syncStorage.AccountOwnershipError();
+    }
+
+    deletionRecoveryContext(attempt, issuer) {
+      accountOperation.requireBound(issuer);
+      const captureIdentity = () => ({ ...issuer, assertCurrent: () => {
+        issuer.assertCurrent();
+        this.assertPendingDeletionAttempt(attempt);
+      } });
+      // Retain the issuing connection and account guard inside cleanup's transaction.
+      return accountOperation.bind(captureIdentity(), this.use.database,
+        this.syncStorage.AccountOwnershipError, captureIdentity);
+    }
+
+    requestDeletionRecovery(attempt, context) {
+      accountOperation.requireBound(context);
+      // Legacy markers cannot prove whether readback passed. Only consult an
+      // existing server receipt for them; never authorize a new deletion.
+      const issued = attempt.stage === "issued";
+      return this.host.fetch(issued ? "/api/v1/account" : "/api/v1/account/deletion-receipt", {
+        method: issued ? "DELETE" : "POST", credentials: "same-origin", cache: "no-store",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": attempt.csrfToken,
+          ...this.syncCore.accountHeaders(attempt.userId) },
+        ...(issued ? { body: JSON.stringify({ confirmation: "DELETE" }) } : {})
+      });
     }
     async recoverPendingDeletion(context) {
+      accountOperation.requireBound(context);
       const attempt = this.pendingDeletionAttempt(); if (!attempt) return false;
-      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) && (this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId) !== attempt.userId) return false;
-      let response = null;
+      if (context.ownerId && context.ownerId !== attempt.userId) return false;
+      const recovery = this.deletionRecoveryContext(attempt, context);
+      let response;
       try {
-        response = await this.host.fetch("/api/v1/account", { method: "DELETE", credentials: "same-origin",
-          headers: { "Content-Type": "application/json", "X-CSRF-Token": attempt.csrfToken, ...this.syncCore.accountHeaders(attempt.userId) }, body: JSON.stringify({ confirmation: "DELETE" }) });
-      } catch { return false; }
+        response = await this.requestDeletionRecovery(attempt, recovery);
+        recovery.assertCurrent();
+      } catch { return !accountOperation.isCurrent(recovery); }
       if (response?.status !== 204) {
         if (response?.status === 401 || response?.status === 400 || response?.status === 403) this.writePendingDeletionAttempt(null);
         return false;
       }
-      if ((this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) !== attempt.userId) return false;
-      this.markPendingLogout();
-      await this.completeAccountCleanup(this.use.cleanupIdentity(), this.use.captureAccountContext(), { clearMarker: true,
-        reportFailure: (error) => { this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error); reportFrontendError(error, "session.delete-account.cleanup-retry"); } });
-      if (!this.pendingLocalLogout()) this.writePendingDeletionAttempt(null);
+      if (context.ownerId !== attempt.userId) return false;
+      return this.completeDeletionRecovery(attempt, context, recovery);
+    }
+
+    async completeDeletionRecovery(attempt, issuer, recovery) {
+      let completed = recovery;
+      try {
+        recovery.assertCurrent();
+        recovery.publishIdentity(() => issuer.publishIdentity(() => this.markPendingLogout()));
+        const identity = this.use.cleanupIdentity();
+        recovery.assertCurrent();
+        completed = await this.use.clearLocalData(identity, recovery);
+        accountOperation.requireBound(completed);
+        this.assertPendingDeletionAttempt(attempt);
+        this.use.assertCleanupIdentity(identity);
+        // Only cleanup's own close authorizes this completion context. Never
+        // capture the active connection to authorize an old response.
+        completed.publishIdentity(() => {
+          this.assertPendingDeletionAttempt(attempt);
+          this.clearPendingLogout();
+          if (!this.pendingLocalLogout()) this.writePendingDeletionAttempt(null);
+        });
+      } catch (error) {
+        if (error.name === "AccountOwnershipError" || !accountOperation.isCurrent(completed)) return true;
+        try { this.assertPendingDeletionAttempt(attempt); }
+        catch { return true; }
+        this.host.console.warn("Deleted account local-data cleanup will retry on next launch:", error);
+        reportFrontendError(error, "session.delete-account.cleanup-retry");
+      }
+      if (!accountOperation.isCurrent(completed)) return true;
+      this.redirectToLogin();
       return true;
     }
     async clearPendingLogoutData(identity, issuer) {
@@ -633,16 +730,22 @@
       dialog.setAttribute?.("aria-modal", "true");
       const title = document.createElement("h2");
       title.id = "deleteAccountTitle";
+      title.className = "bootstrap-dialog-title";
       const message = document.createElement("p");
       message.id = "deleteAccountMessage";
+      message.className = "bootstrap-dialog-message";
       const input = document.createElement("input");
       input.type = "text";
       input.autocomplete = "off";
+      input.className = "bootstrap-dialog-input";
       const buttons = document.createElement("div");
+      buttons.className = "bootstrap-dialog-actions";
       const confirm = document.createElement("button");
       confirm.type = "button";
+      confirm.className = "bootstrap-dialog-button";
       const cancel = document.createElement("button");
       cancel.type = "button";
+      cancel.className = "bootstrap-dialog-button";
       confirm.addEventListener?.("click", () => this.confirmDeleteAccount());
       cancel.addEventListener?.("click", () => this.cancelDeleteAccount());
       dialog.addEventListener?.("cancel", () => this.cancelDeleteAccount());
@@ -706,7 +809,6 @@
       }
       this.elements.deleteAccountButton.disabled = true;
       const context = this.use.captureAccountContext();
-      this.writePendingDeletionAttempt({ userId: context.ownerId, csrfToken: this.state.csrfToken });
       if (!await this.requestAccountDeletion(value, context)) return false;
       context.assertCurrent();
       this.markPendingLogout();
@@ -743,9 +845,17 @@
 
     async requestAccountDeletion(confirmation, context) {
       accountOperation.requireBound(context);
+      try { this.syncCore.accountHeaders(context.ownerId); }
+      catch (error) {
+        this.reportDeletionMarkerFailure(error);
+        return this.deletionMarkerUnavailable();
+      }
       try {
         await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
         context.assertCurrent();
+        if (!this.writePendingDeletionAttempt({ userId: context.ownerId, csrfToken: this.state.csrfToken })) {
+          return this.deletionMarkerUnavailable();
+        }
         const response = await this.host.fetch("/api/v1/account", {
           method: "DELETE", credentials: "same-origin",
           headers: { "Content-Type": "application/json", "X-CSRF-Token": this.state.csrfToken,
@@ -771,6 +881,13 @@
         reportFrontendError(error, "session.delete-account.request-failed");
         return false;
       }
+    }
+
+    deletionMarkerUnavailable() {
+      this.elements.deleteAccountButton.disabled = false;
+      this.use.showNotice(this.use.tr("account.delete.recoveryUnavailable", {},
+        "Account was not deleted because recovery information could not be saved. Your local data was kept. Check browser storage and retry."));
+      return false;
     }
 
     pendingOperationCount() {

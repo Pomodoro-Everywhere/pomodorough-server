@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/me", s.requireAuth(s.handleMe))
 	mux.Handle("POST /api/v1/auth/logout", s.requireMutation(s.handleLogout))
 	mux.Handle("DELETE /api/v1/account", s.requireAccountDeletion())
+	mux.HandleFunc("POST /api/v1/account/deletion-receipt", s.handleAccountDeletionReceipt)
 	mux.Handle("POST /api/v1/auth/revoke-device", s.requireMutation(s.handleRevokeDevice))
 	mux.Handle("POST /api/v1/sync", s.requireMutation(s.handleSync))
 	mux.Handle("GET /api/v1/bootstrap", s.requireAuth(s.handleBootstrap))

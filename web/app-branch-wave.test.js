@@ -160,6 +160,7 @@ function sessionFixture(overrides = {}) {
   const calls = [];
   const localStorage = overrides.localStorage || memoryStorage();
   const host = {
+    crypto: require("node:crypto").webcrypto,
     navigator: { onLine: true }, localStorage, location: { assign: (value) => calls.push(["assign", value]) },
     console: { warn: (...args) => calls.push(["warn", ...args]) },
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ user: incarnationFixture.accountUser("user-1"), csrfToken: "csrf-2" }) }),

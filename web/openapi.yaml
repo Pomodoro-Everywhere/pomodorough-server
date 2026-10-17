@@ -372,7 +372,7 @@ paths:
         originally authorized access token or web session and confirmation.
         A private durable receipt confirms only that deleted account generation,
         even after credential expiry or server restart; it never deletes a
-        recreated account or authenticates another endpoint. Web retries require
+        recreated account or authenticates ordinary account endpoints. Web retries require
         the original CSRF token, matching cookie/header, and same-site Origin.
         A 204 is sent only after the old generation's remaining live files are
         purged. A 401 without a receipt is not evidence of successful deletion.
@@ -401,6 +401,43 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/account/deletion-receipt:
+    post:
+      tags: [Account]
+      operationId: getAccountDeletionReceipt
+      summary: Confirm an existing committed account deletion without deleting a live account
+      description: |
+        Read-only recovery for legacy browser markers that cannot prove issuance.
+        Uses the original deletion credential and, for web sessions, original CSRF
+        cookie/header and same-site Origin. A present account incarnation header
+        must match the deleted generation. Never starts deletion or purges files.
+        A 204 confirms a committed receipt only after storage lifecycle validation.
+        A 404 is not evidence of deletion; retain local work and require renewed
+        confirmation before issuing DELETE.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      responses:
+        "204":
+          description: The credential's deletion receipt is committed and storage cleanup is complete.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No committed deletion receipt exists for this credential.
+        "409":
+          description: The supplied account incarnation does not match the deleted generation.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: Storage cleanup is not confirmed. Retain local state and retry later.
 
   /api/v1/auth/revoke-device:
     post:

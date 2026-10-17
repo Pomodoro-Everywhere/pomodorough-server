@@ -95,6 +95,118 @@ async function checkHorizontal(page, cdp, width, height, offset, mask, label) {
   }
 }
 
+async function timerControls(page, scrollVertically) {
+  return page.evaluate((scrollVertically) => {
+    for (const el of document.querySelectorAll("*")) if (el.scrollLeft) el.scrollLeft = 0;
+    window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+    const controls = [...document.querySelectorAll(
+      "#timerScreen :is(button, input, select, textarea, a[href], summary, [tabindex]):not([tabindex='-1'])"
+    )].filter((el) => el.checkVisibility());
+    const bounds = controls.map((el) => {
+      if (scrollVertically) {
+        const r = el.getBoundingClientRect();
+        window.scrollTo({ left: 0, top: scrollY + r.top + r.height / 2 - innerHeight / 2, behavior: "instant" });
+      }
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      const clipped = [];
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        if (!/hidden|clip|auto|scroll/.test(getComputedStyle(parent).overflowX)) continue;
+        const p = parent.getBoundingClientRect();
+        if (parent.scrollLeft || r.left < p.left - 1 || r.right > p.right + 1) clipped.push(parent.className);
+      }
+      const textFits = el.tagName !== "BUTTON" || (() => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        return [...range.getClientRects()].every((t) => t.left >= r.left - 1 && t.right <= r.right + 1);
+      })();
+      return { key: el.id || el.getAttribute("aria-label"), left: r.left, right: r.right, top: r.top,
+        bottom: r.bottom, width: r.width, height: r.height, disabled: el.disabled, textFits, clipped,
+        scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, hit: hit === el || el.contains(hit) };
+    });
+    const bank = document.querySelector(".action-bank");
+    return { bounds, scrollX, scrollWidth: document.documentElement.scrollWidth,
+      bankWidth: bank.clientWidth, bankScrollWidth: bank.scrollWidth };
+  }, scrollVertically);
+}
+
+async function assertTimerControls(page, width, height, left, right) {
+  for (const vertical of [false, true]) {
+    const frame = await timerControls(page, vertical);
+    assert.equal(frame.bounds.length, 18, "all Timer interactive descendants measured");
+    assert.equal(frame.scrollX, 0, "no horizontal window scroll");
+    assert.ok(frame.scrollWidth <= width + 1, `${width}px ${left}..${right} document width ${frame.scrollWidth}`);
+    assert.ok(frame.bankScrollWidth <= frame.bankWidth + 1, "no action-bank overflow");
+    for (const control of frame.bounds) {
+      const label = `${width}px ${left}..${right} ${control.key}`;
+      assert.ok(control.left >= left - 1 && control.right <= right + 1, `${label} horizontal bounds`);
+      assert.ok(control.width >= 24 && control.height >= 24, `${label} target minimum`);
+      assert.ok(control.textFits && control.scrollWidth <= control.clientWidth + 1, `${label} readable label`);
+      assert.deepEqual(control.clipped, [], `${label} no clipping or hidden horizontal scroll`);
+      if (vertical) {
+        assert.ok(control.top >= -1 && control.bottom <= height + 1, `${label} vertically reachable`);
+        assert.ok(control.hit, `${label} center hit test`);
+      }
+    }
+  }
+}
+
+async function timerKey(page, id, key, status) {
+  await page.evaluate((id) => {
+    const el = document.getElementById(id);
+    const r = el.getBoundingClientRect();
+    window.scrollTo({ left: 0, top: scrollY + r.top + r.height / 2 - innerHeight / 2, behavior: "instant" });
+    el.focus({ preventScroll: true });
+  }, id);
+  assert.ok(await page.locator(`#${id}`).isEnabled(), `${id} enabled`);
+  await page.keyboard.press(key);
+  await page.waitForFunction((status) => PomodoroughAppTest.state.timer.status === status, status);
+}
+
+test("R49-S07 all Timer actions fit enabled, enlarged, segmented, and inset layouts",
+  { timeout: 180_000 }, async (t) => {
+    const browser = await chromium.launch({ headless: true, args: ["--ignore-certificate-errors"],
+      executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined });
+    t.after(() => browser.close());
+    const context = await authenticatedContext(browser);
+    t.after(() => context.close());
+    const page = await context.newPage();
+    assert.equal((await page.goto(`${fixture.url}/app`)).status(), 200);
+    await waitForReady(page);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller && window.PomodoroughAppTest?.state?.ready);
+    await page.route("**/api/v1/sync", (route) => route.abort("internetdisconnected"));
+    const cdp = await context.newCDPSession(page);
+    for (const font of [100, 200]) {
+      await page.evaluate((font) => { document.documentElement.style.fontSize = `${font}%`; }, font);
+      for (const offset of [470, 300, 360, 640, 0]) {
+        const width = offset ? 960 : 320, height = offset ? 720 : 568;
+        await emulate(page, cdp, width, height, offset ? { orientation: "vertical", offset, maskLength: 20 } : null);
+        if (!offset) await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width, height, screenWidth: width, screenHeight: height, deviceScaleFactor: 1, mobile: false });
+        await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: offset
+          ? { top: 0, left: 0, right: 0, bottom: 0 } : { top: 47, left: 44, right: 44, bottom: 34 } });
+        await page.waitForTimeout(200);
+        console.log(`R49-S07 font=${font} offset=${offset} actualWidth=${await page.evaluate(() => innerWidth)}`);
+        const left = offset ? 0 : 44, right = offset || width - 44;
+        assert.equal(await page.evaluate(() => innerWidth), width, "actual layout viewport width");
+        assert.equal(await page.evaluate(() => matchMedia("(horizontal-viewport-segments:2)").matches), !!offset);
+        assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize), `${font * 0.16}px`);
+        await assertTimerControls(page, width, height, left, right);
+        await timerKey(page, "timerToggle", "Enter", "running");
+        await assertTimerControls(page, width, height, left, right);
+        await timerKey(page, "timerToggle", "Space", "paused");
+        await timerKey(page, "timerToggle", "Space", "running");
+        await timerKey(page, "finishButton", "Enter", "completed");
+        await page.waitForFunction(() => !document.querySelector("#clearButton").disabled);
+        await assertTimerControls(page, width, height, left, right);
+        await timerKey(page, "clearButton", "Space", "completed");
+        assert.ok(await page.locator("#clearButton").isDisabled(), "Clear stops the completion sound");
+        await timerKey(page, "timerToggle", "Enter", "running");
+        await timerKey(page, "cancelButton", "Enter", "idle");
+      }
+    }
+  });
+
 test("R48-S09 segments bound task editor and groups",
   { timeout: 180_000 }, async (t) => {
     const browser = await chromium.launch({ headless: true, args: ["--ignore-certificate-errors"],

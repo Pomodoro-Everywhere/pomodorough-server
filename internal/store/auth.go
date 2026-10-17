@@ -39,6 +39,16 @@ type TokenRecord struct {
 	ExpiresAt time.Time
 }
 
+// RefreshReuseError identifies the session family whose revocation committed.
+type RefreshReuseError struct {
+	SessionID  string
+	Generation int64
+}
+
+func (e *RefreshReuseError) Error() string { return ErrRefreshReuse.Error() }
+
+func (e *RefreshReuseError) Unwrap() error { return ErrRefreshReuse }
+
 type AuthInfo struct {
 	Profile    Profile
 	SessionID  string
@@ -514,7 +524,7 @@ func RotateRefresh(ctx context.Context, db *sql.DB, oldHash [sha256.Size]byte, a
 		return ErrUnauthorized
 	}
 	if stored.usedAt.Valid {
-		return revokeReusedRefresh(ctx, tx, stored.sessionID, now)
+		return revokeReusedRefresh(ctx, tx, stored, now)
 	}
 	nowMS := now.UnixMilli()
 	if stored.revokedAt.Valid || stored.sessionRevoked.Valid || stored.expiresAt <= nowMS || stored.sessionExpires <= nowMS {
@@ -535,15 +545,17 @@ type storedRefreshToken struct {
 	expiresAt, sessionExpires int64
 	usedAt, revokedAt         sql.NullInt64
 	sessionRevoked            sql.NullInt64
+	generation                int64
 }
 
 func refreshTokenForRotation(ctx context.Context, tx *sql.Tx, oldHash [sha256.Size]byte) (storedRefreshToken, error) {
 	var stored storedRefreshToken
 	err := tx.QueryRowContext(ctx, `SELECT t.token_hash, t.session_id, t.kind, t.expires_at_ms, t.used_at_ms, t.revoked_at_ms,
-		s.expires_at_ms, s.revoked_at_ms
-	FROM auth_tokens t JOIN auth_sessions s ON s.id = t.session_id WHERE t.token_hash = ?`, oldHash[:]).Scan(
+		s.expires_at_ms, s.revoked_at_ms, m.generation
+	FROM auth_tokens t JOIN auth_sessions s ON s.id = t.session_id
+	JOIN account_metadata m ON m.singleton = 1 WHERE t.token_hash = ?`, oldHash[:]).Scan(
 		&stored.hash, &stored.sessionID, &stored.kind, &stored.expiresAt, &stored.usedAt, &stored.revokedAt,
-		&stored.sessionExpires, &stored.sessionRevoked,
+		&stored.sessionExpires, &stored.sessionRevoked, &stored.generation,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedRefreshToken{}, ErrUnauthorized
@@ -554,17 +566,17 @@ func refreshTokenForRotation(ctx context.Context, tx *sql.Tx, oldHash [sha256.Si
 	return stored, nil
 }
 
-func revokeReusedRefresh(ctx context.Context, tx *sql.Tx, sessionID string, now time.Time) error {
-	if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?), reuse_detected_at_ms = ? WHERE id = ?`, now.UnixMilli(), now.UnixMilli(), sessionID); err != nil {
+func revokeReusedRefresh(ctx context.Context, tx *sql.Tx, stored storedRefreshToken, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?), reuse_detected_at_ms = ? WHERE id = ?`, now.UnixMilli(), now.UnixMilli(), stored.sessionID); err != nil {
 		return fmt.Errorf("revoke reused session: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE auth_tokens SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE session_id = ?`, now.UnixMilli(), sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_tokens SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE session_id = ?`, now.UnixMilli(), stored.sessionID); err != nil {
 		return fmt.Errorf("revoke reused token family: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit reuse revocation: %w", err)
 	}
-	return ErrRefreshReuse
+	return &RefreshReuseError{SessionID: stored.sessionID, Generation: stored.generation}
 }
 
 func writeRefreshRotation(ctx context.Context, tx *sql.Tx, oldHash [sha256.Size]byte, sessionID string, access, refresh TokenRecord, nowMS int64) error {

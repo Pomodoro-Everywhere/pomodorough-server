@@ -22,6 +22,7 @@
   "account.delete.invalid": "‏⟦Åccöûnt wàs nöt dëlëtëd. Typë DËLËTË ëxàctly tö cönfïrm.⟧‏",
   "account.delete.offline": "‏⟦Cönnëct tö thë àccöûnt sërvër bëförë dëlëtïng yöûr àccöûnt.⟧‏",
   "account.delete.failed": "‏⟦Åccöûnt dëlëtïön fàïlëd. Yöûr löcàl dàtà wàs këpt.⟧‏",
+  "account.delete.recoveryUnavailable": "‏⟦Åccöûnt wàs nöt dëlëtëd bëcàûsë rëcövëry ïnförmàtïön cöûld nöt bë sàvëd. Yöûr löcàl dàtà wàs këpt. Chëck bröwsër störàgë ànd rëtry.⟧‏",
   "account.logout.pending": {
     "one": "‏⟦{count} chàngë ïs wàïtïng tö sync. Sïgnïng öût wïll dïscàrd ït. Cöntïnûë?⟧‏",
     "other": "‏⟦{count} chàngës àrë wàïtïng tö sync. Sïgnïng öût wïll dïscàrd thëm. Cöntïnûë?⟧‏"

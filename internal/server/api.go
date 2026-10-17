@@ -15,6 +15,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if isRequestCancellation(err, r.Context()) {
+			s.writeCanceledInternalError(w, r, "validate account generation", err)
+			return
+		}
 		s.internalAPIError(w, r, "validate account generation", err)
 		return
 	}
@@ -60,6 +64,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity p
 	if err != nil {
 		if isUnauthorized(err) {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if isRequestCancellation(err, r.Context()) {
+			s.writeCanceledInternalError(w, r, "revoke session", err)
 			return
 		}
 		s.internalAPIError(w, r, "revoke session", err)
@@ -110,6 +118,10 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request, iden
 	if err != nil {
 		if isUnauthorized(err) {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if isRequestCancellation(err, r.Context()) {
+			s.writeCanceledInternalError(w, r, "revoke device", err)
 			return
 		}
 		s.internalAPIError(w, r, "revoke device", err)
@@ -171,6 +183,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request, identit
 		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "read bootstrap snapshot", err)
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, r, "read bootstrap snapshot", err)
 		return
@@ -213,6 +229,10 @@ func (s *Server) handleBootstrapResolve(w http.ResponseWriter, r *http.Request, 
 		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
 		return
 	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "resolve bootstrap history", err)
+		return
+	}
 	if err != nil {
 		s.internalAPIError(w, r, "resolve bootstrap history", err)
 		return
@@ -231,6 +251,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, identity 
 	}
 	if errors.Is(err, store.ErrRevisionExhausted) {
 		writeAPIError(w, r, http.StatusConflict, "revision exhausted")
+		return
+	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "read timer history", err)
 		return
 	}
 	if err != nil {

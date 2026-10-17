@@ -31,6 +31,7 @@ function sessionFixture(overrides = {}) {
   const calls = [];
   const localStorage = overrides.localStorage || memoryStorage();
   const host = {
+    crypto: require("node:crypto").webcrypto,
     navigator: { onLine: true }, localStorage,
     location: { assign: (value) => calls.push(["assign", value]) },
     console: { warn: (...args) => calls.push(["warn", ...args]) },

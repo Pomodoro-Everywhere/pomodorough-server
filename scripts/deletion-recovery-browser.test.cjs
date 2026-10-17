@@ -49,6 +49,8 @@ test("R48-S03 lost DELETE recovers after restart with original receipt and atomi
     const response = await page.goto(`${fixture.url}/app`);
     assert.equal(response.status(), 200);
     await waitForReady(page);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    await waitForReady(page);
 
     let committed = 0;
     await page.route("**/api/v1/account", async (route) => {
@@ -68,6 +70,13 @@ test("R48-S03 lost DELETE recovers after restart with original receipt and atomi
     assert.equal(lost.ready, true);
     assert.ok(lost.pendingDeletion && lost.pendingDeletion.includes("account:v1:"));
     assert.equal(lost.pendingLogout, null);
+    if (fixture.errorName === "legacy") {
+      await page.evaluate(() => {
+        const attempt = JSON.parse(localStorage.getItem("pomodoroughPendingDeletion"));
+        delete attempt.stage;
+        localStorage.setItem("pomodoroughPendingDeletion", JSON.stringify(attempt));
+      });
+    }
     console.log("Lost committed DELETE keeps account-bound pending attempt without cleanup");
 
     await page.unroute("**/api/v1/account");
@@ -86,7 +95,7 @@ test("R48-S03 lost DELETE recovers after restart with original receipt and atomi
     });
     restarted.on("response", (reply) => {
       try {
-        if (new URL(reply.url()).pathname === "/api/v1/account" && reply.request().method() === "DELETE") {
+        if (["/api/v1/account", "/api/v1/account/deletion-receipt"].includes(new URL(reply.url()).pathname)) {
           deletes.push(reply.status());
           console.log(`RESTART DELETE response ${reply.status()}`);
         }

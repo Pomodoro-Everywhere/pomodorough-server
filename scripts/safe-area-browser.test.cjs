@@ -80,6 +80,31 @@ function assertControls(frame, width, height, screen) {
   }
 }
 
+// R49-S06: scroll every preference control before asserting safe bounds.
+async function assertScrolledPreferences(page, width, height) {
+  const count = await page.evaluate(() => document.querySelectorAll("#durationForm button, #durationForm input, #durationForm select").length);
+  assert.ok(count >= 12, `scrolled ${width}x${height} expected preference controls, got ${count}`);
+  const frame = await page.evaluate(async () => {
+    const controls = [...document.querySelectorAll("#durationForm button, #durationForm input, #durationForm select")];
+    const bounds = [];
+    for (const el of controls) {
+      el.scrollIntoView({ block: "center", behavior: "instant" });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const rect = el.getBoundingClientRect();
+      bounds.push({ id: el.id || el.getAttribute("data-for") || el.textContent.trim().slice(0, 24),
+        left: rect.left, right: rect.right });
+    }
+    return { scrollWidth: document.documentElement.scrollWidth, bounds };
+  });
+  assert.ok(frame.scrollWidth <= width + 1, `scrolled ${width}x${height} scrollWidth ${frame.scrollWidth} > ${width}`);
+  for (const control of frame.bounds) {
+    assert.ok(control.left + 1 >= INSETS.left, `scrolled ${width}x${height} ${control.id} left ${control.left} < ${INSETS.left}`);
+    assert.ok(control.right - 1 <= width - INSETS.right, `scrolled ${width}x${height} ${control.id} right ${control.right} > ${width - INSETS.right}`);
+  }
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.waitForTimeout(120);
+}
+
 async function checkViewport(page, cdp, width, height) {
   await page.setViewportSize({ width, height });
   await page.waitForTimeout(250);
@@ -90,6 +115,7 @@ async function checkViewport(page, cdp, width, height) {
     const frame = await readFrame(page);
     assertFrame(frame, width, height, screen);
     assertControls(frame, width, height, screen);
+    if (screen === "timer") await assertScrolledPreferences(page, width, height);
     console.log(`${screen} ${width}x${height} ok wordmark=${frame.wordmarkTop.toFixed(1)} controls=${frame.controls.length}`);
   }
 }

@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.48.0"
+	readinessCoreVersion   = "0.49.0"
 )
 
 type readinessAsset struct {
@@ -42,17 +42,17 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "0edd95ac83fd6cff952748a08d5a4fd809364af29323a85e238c213994aadbbf", false},
+	{"index.html", "64e2937f600909c0a201a5472874b9f85cdbcf29bff0b4da3b26a9a1c32d97b3", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
 	{"landing.css", "510c82512246cfb2bb4db1660cfe70b33bd27e8826433ed5d60c947f79904b11", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
 	{"sentry-client.js", "e7fac5ffee247eb1c18103d07915ab0f919dafbef761b9cf616df2e5f8370843", false},
-	{"app.html", "43f454fbdb78b35e941c135a63fd0e464e4dc9dece6bb2261973b20621d03535", false},
-	{"app.css", "05104900bcb4bc370c60090a1c220974203f111f392db871faadefef5d06a26f", false},
+	{"app.html", "21aeb33e608445ca33f6f06bb85051a54d541853d65c5ab115b00d6680a557b7", false},
+	{"app.css", "ab9d4cdae78a4add27e99b9fb9121117d8796dd1fbbfb8e5664c93372aa0bbe1", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "775d3d85cc4f6ced2243fd8b831e0057d6264e2202fdc2bf28d83b62e311e05a", true},
+	{"pomodorough_core.wasm", "6605f844e7464d8f6f7e9f3be641ffc7dfbc8733ba78c93efd6bc0188799f8ba", true},
 	{"sync-core.js", "cb2e919e9552db0e61ce5f29612d5fa112a8e8212a03ddca4771b70a51188a37", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
@@ -60,8 +60,8 @@ var readinessAssets = []readinessAsset{
 	{"workspace-transaction.js", "ef38040371afe408691d8e6d485dc233ed581a6eb53bdbafbfa037236c73d574", false},
 	{"sync-storage.js", "d6f492f4a9f69ce625061f546cc81cdc02c0b9842440aa1dadb1d7c43f974e35", false},
 	{"i18n.js", "ca2dbece1883165f5297382d24ca94456ebb92e68abf113c8789e74eb0f6c676", false},
-	{"locales/en.json", "44eeb4ecbf1b2a4cc685e7022de49e8d78aa734ab92821e573755a28a1e89427", false},
-	{"locales/ar-XB.json", "b79f80785805f18168ad8f8562f97eb36e2f318264e44b746b87eaeec886e2a0", false},
+	{"locales/en.json", "462d99b0de5e0440266d1d473552b4ee8c844762fc90344f4c2048a4066dda4c", false},
+	{"locales/ar-XB.json", "2f39ebe0a2bdc311c28df1ff96c671536393a9df632fdc3242d4cc840c492006", false},
 	{"app-runtime.js", "76352fdbc3872145e236fa0e1a9a652cf00d6966116f9a8e16737aaee29d0c9d", false},
 	{"account-operation.js", "10b7912df48b013b5ea0adc5dd71ac889f00f50a85c27039a15c6b065ec4ab33", false},
 	{"app-state.js", "f5484a4fc5b299931f178eeed713679fe58293e1f3ed0668c54562fcb14bde20", false},
@@ -69,13 +69,13 @@ var readinessAssets = []readinessAsset{
 	{"app-actions.js", "5d64eadcfd074746a48b5220c1706186b23e1b8f4481677ff24be05b904adab6", false},
 	{"app-sync.js", "486bcf79ebd081c695db1c212be54425cd3144cdbdb055b6ee6b9c0a78cf63ae", false},
 	{"app-bootstrap.js", "d9a1a54ef3aff014ff8ac250738fbe23b18e4d29dcddc0116edae37a71298e80", false},
-	{"app-session.js", "f5eab2c0e91eb417651e84cd3d7183fd05def5eec9206f017867d824ae8d5613", false},
+	{"app-session.js", "0087be3381276a9325981b1884fc348163a35198fad333dfa7cfd7aa83f70536", false},
 	{"app-view.js", "d95be174324606a22dd61a3d1d0573470563fcd4105a644cdc5f8b4fb709e0b6", false},
 	{"app.js", "65ad1e4684eb740ec3509baa1777fdb75de75c360694baf677aeb35a925320a3", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "40d2b6037ac15b178ca0ebfe577d6ad3c2bb7e19ed34daf8d7bccdc4d0b06d7e", false},
-	{"openapi.yaml", "3703a7be7d28d03ba52397b48a522fb0844a5e803517a1eb0361c448a9aed523", false},
+	{"sw.js", "b88e1eb7b3d65d3f217eac6966ca7df62e85718ecaa94085a9a18d2c30a643a7", false},
+	{"openapi.yaml", "a3e13e788039ac2de6288e10b3baff0a70b6c3e1f673654aadae44e8073895a8", false},
 }
 
 func readinessKeyDigest(secret []byte) [sha256.Size]byte {
