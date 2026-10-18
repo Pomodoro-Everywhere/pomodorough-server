@@ -288,7 +288,7 @@ func TestEmbeddedCoreArtifactHasPinnedProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(commit)); got != "2b66cfe1d83910ae085407d9fe7b76f2d485347d" {
+	if got := strings.TrimSpace(string(commit)); got != "371f2b20fc2f1d9933610be6ad0d11ca561ffd9d" {
 		t.Fatalf("embedded core commit = %q", got)
 	}
 	checksum, err := os.ReadFile("pomodorough_core.wasm.sha256")
@@ -331,7 +331,7 @@ func TestEmbeddedCoreVersion(t *testing.T) {
 	if err := json.Unmarshal(result, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.49.0" {
+	if !envelope.OK || envelope.Value.SchemaVersion != 1 || envelope.Value.CoreVersion != "0.50.0" {
 		t.Fatalf("unexpected core version envelope: %s", result)
 	}
 }

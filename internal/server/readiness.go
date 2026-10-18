@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.49.0"
+	readinessCoreVersion   = "0.50.0"
 )
 
 type readinessAsset struct {
@@ -42,17 +42,17 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "64e2937f600909c0a201a5472874b9f85cdbcf29bff0b4da3b26a9a1c32d97b3", false},
+	{"index.html", "405190c94120e18cb2125e2f789ea8255e9bdc8eb767bf9fe76aae588c726b5f", false},
 	{"privacy.html", "37331b4b5c4bbbc8d78535b519885e3556f4db00e9eb31f5a6eb6b2b5abd3643", false},
-	{"landing.css", "510c82512246cfb2bb4db1660cfe70b33bd27e8826433ed5d60c947f79904b11", false},
+	{"landing.css", "cca8dd5059b525c05b553f49f5288f462136180faec2f366c4ebb361727edeaf", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
 	{"sentry-client.js", "e7fac5ffee247eb1c18103d07915ab0f919dafbef761b9cf616df2e5f8370843", false},
-	{"app.html", "21aeb33e608445ca33f6f06bb85051a54d541853d65c5ab115b00d6680a557b7", false},
-	{"app.css", "ab9d4cdae78a4add27e99b9fb9121117d8796dd1fbbfb8e5664c93372aa0bbe1", false},
+	{"app.html", "27b5d67a99abb73c9e96129de7e5386fc02732541fcc27ca65e2316408e48c19", false},
+	{"app.css", "3ae6320da25a2881caf9e247426868c4c0c8d89e6d38f3ed5db334f598e3da14", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "6605f844e7464d8f6f7e9f3be641ffc7dfbc8733ba78c93efd6bc0188799f8ba", true},
+	{"pomodorough_core.wasm", "a5eeca32c464ca46ac6b61bc3ad2a1331dcf37696478a614037039e54ba5ce7f", true},
 	{"sync-core.js", "cb2e919e9552db0e61ce5f29612d5fa112a8e8212a03ddca4771b70a51188a37", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
