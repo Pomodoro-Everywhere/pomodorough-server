@@ -31,23 +31,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 			}
 		}
 		if csrfToken == "" {
-			var err error
-			csrfToken, err = authn.RandomString(32)
-			if err != nil {
-				s.internalAPIError(w, r, "generate replacement CSRF token", err)
+			var ok bool
+			csrfToken, ok = s.replaceCSRFToken(w, r, identity)
+			if !ok {
 				return
 			}
-			hash := authn.HashString(csrfToken)
-			err = s.store.UpdateCSRFForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, hash)
-			if err != nil {
-				if isUnauthorized(err) {
-					writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
-					return
-				}
-				s.internalAPIError(w, r, "replace CSRF token", err)
-				return
-			}
-			setCSRFCookie(w, csrfToken, time.Now().Add(webSessionLifetime))
 		}
 	}
 	writeJSON(w, r, http.StatusOK, map[string]any{
@@ -57,6 +45,34 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, identity princ
 		},
 		"csrfToken": csrfToken,
 	})
+}
+
+// replaceCSRFToken mints, persists, and sets a replacement browser CSRF
+// token. It reports whether the caller may continue; the cancellable store
+// write routes through the same typed cancellation boundary as the other
+// authenticated mutations instead of reporting client disconnects to Sentry.
+func (s *Server) replaceCSRFToken(w http.ResponseWriter, r *http.Request, identity principal) (string, bool) {
+	csrfToken, err := authn.RandomString(32)
+	if err != nil {
+		s.internalAPIError(w, r, "generate replacement CSRF token", err)
+		return "", false
+	}
+	hash := authn.HashString(csrfToken)
+	err = s.store.UpdateCSRFForGeneration(r.Context(), identity.UserID, identity.Generation, identity.SessionID, hash)
+	if err != nil {
+		if isUnauthorized(err) {
+			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
+			return "", false
+		}
+		if isRequestCancellation(err, r.Context()) {
+			s.writeCanceledInternalError(w, r, "replace CSRF token", err)
+			return "", false
+		}
+		s.internalAPIError(w, r, "replace CSRF token", err)
+		return "", false
+	}
+	setCSRFCookie(w, csrfToken, time.Now().Add(webSessionLifetime))
+	return csrfToken, true
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, identity principal) {
@@ -92,6 +108,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ide
 	if err := s.store.DeleteUserWithReceipt(r.Context(), identity.UserID, identity.Generation, identity.Credential, identity.CSRFHash); err != nil {
 		if isUnauthorized(err) {
 			writeAPIError(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if isRequestCancellation(err, r.Context()) {
+			s.writeCanceledInternalError(w, r, "delete account", err)
 			return
 		}
 		s.internalAPIError(w, r, "delete account", err)

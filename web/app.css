@@ -353,16 +353,25 @@ main {
 .screen-nav {
   margin-bottom: 1.5rem;
   border-bottom: 3px solid var(--track);
+  /* R50-S05: usable nav width drives tab arrangement, not viewport width.
+     The folded first segment is the container, so 960px viewports still
+     stack when the segment is narrow or text is enlarged. */
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .screen-nav [role="tablist"] {
   display: flex;
   align-items: end;
+  flex-wrap: wrap;
   gap: 0.4rem;
 }
 
 .screen-nav button {
-  min-width: 8.5rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
   min-height: 2.75rem;
   padding: 0.7rem 1rem 0.6rem;
   color: var(--muted);
@@ -370,11 +379,15 @@ main {
   border: 0;
   border-left: 0.35rem solid var(--steel);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .screen-nav button span,
 .screen-nav button strong {
   display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .screen-nav button span {
@@ -728,9 +741,15 @@ main {
     row-gap: calc(env(viewport-segment-top 0 1, 1rem) - env(viewport-segment-bottom 0 0, 0px));
   }
 
-  /* R49-S09: keep a horizontally folded dialog inside the first usable segment height. */
+  /* R49-S09: keep a horizontally folded dialog inside the first usable segment height.
+     R50-S03: anchor the complete scrollable dialog to the first segment's top
+     bound so viewport centering cannot straddle the horizontal fold strip.
+     Placement and height both derive from indexed segment top/bottom plus
+     safe insets; the dialog scrolls internally instead of crossing the hinge. */
   .bootstrap-dialog {
-    max-height: calc(env(viewport-segment-height 0 0, 100vh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 2rem);
+    margin-top: calc(env(viewport-segment-top 0 0, 0px) + env(safe-area-inset-top, 0px) + 1rem);
+    margin-bottom: auto;
+    max-height: calc(env(viewport-segment-bottom 0 0, 100vh) - env(viewport-segment-top 0 0, 0px) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 2rem);
   }
 }
 
@@ -1318,6 +1337,73 @@ main {
   box-shadow: 0 0 0 0.55rem var(--platform), 0.75rem 0.75rem 0 var(--ticket);
 }
 
+/* R50-S06: let dial-center typography reflow inside the clipping machine at
+   enlarged text, narrow widths, safe insets, folds, and RTL. The machine keeps
+   overflow:hidden for its corner decoration; time and label descendants use
+   zero minimums, wrap in place, and stay centered instead of clipping the
+   Core-derived time or shrinking the user's text scale. */
+.machine-plate {
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.machine-plate > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.dial {
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.dial-center {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.dial-phase,
+.long-break-progress {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: center;
+}
+
+.timer-display {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  text-align: center;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.timer-detail {
+  max-width: 100%;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.timer-instruction,
+.completion-limit {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .timer-instruction {
   position: relative;
   z-index: 2;
@@ -1373,6 +1459,33 @@ main {
   opacity: 0.38;
 }
 
+/* R50-S02: keep timer-action focus visible inside the clipped corner cut.
+   The button clip-path clips the global outset outline away, so focused
+   clipped actions draw two inset rings instead. Porcelain stays visible on
+   the navy danger fill; track stays visible on the ticket and sky fills.
+   The primary action keeps its outer signal offset ahead of both rings.
+   Clear keeps the global outline because its clip-path is none. */
+.action-bank button:focus-visible:not(.action-clear) {
+  outline: none;
+  box-shadow: inset 0 0 0 3px var(--porcelain), inset 0 0 0 6px var(--track);
+}
+
+.action-bank .action-primary:focus-visible {
+  box-shadow: 5px 5px 0 var(--signal), inset 0 0 0 3px var(--porcelain), inset 0 0 0 6px var(--track);
+}
+
+@media (forced-colors: active) {
+  .action-bank button:focus-visible:not(.action-clear) {
+    outline: 3px solid CanvasText;
+    outline-offset: -6px;
+    box-shadow: none;
+  }
+
+  .action-bank .action-primary:focus-visible {
+    box-shadow: none;
+  }
+}
+
 .action-primary {
   color: var(--track);
   background: var(--ticket);
@@ -1406,6 +1519,12 @@ main {
 .history-strip {
   margin-top: clamp(3.5rem, 7vw, 7rem);
   border-top: 3px solid var(--track);
+  /* R50-S07: usable history width drives row arrangement, not viewport
+     width. The folded first segment is the container, so tablet viewports
+     still stack when enlarged rem minimums exceed available row width. */
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .history-heading {
@@ -1462,6 +1581,8 @@ main {
   position: relative;
   margin: 0;
   padding: 0;
+  min-width: 0;
+  max-width: 100%;
   list-style: none;
 }
 
@@ -1471,16 +1592,22 @@ main {
   width: 3px;
   top: 0;
   bottom: 0;
-  left: 1.42rem;
+  inset-inline-start: 1.42rem;
   background: var(--platform);
 }
 
+/* R50-S07: zero-minimum tracks let phase/date/duration shrink inside the
+   usable row instead of forcing document width past the viewport. Date and
+   duration move to extra rows via container queries before minimums
+   overflow; entry identity, order, dates, and status stay in app-view.js. */
 .history-item {
   position: relative;
   display: grid;
-  grid-template-columns: 3rem minmax(8rem, 1fr) minmax(8rem, 0.85fr) auto;
+  grid-template-columns: 3rem minmax(0, 1fr) minmax(0, 0.85fr) auto;
   align-items: center;
   gap: 1rem;
+  min-width: 0;
+  max-width: 100%;
   min-height: 4.75rem;
   padding: 0.75rem 0;
   border-bottom: 1px solid var(--steel);
@@ -1504,6 +1631,9 @@ main {
 }
 
 .history-phase {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-family: var(--display);
   font-size: 1.1rem;
   letter-spacing: 0.035em;
@@ -1514,6 +1644,8 @@ main {
   display: block;
   margin-top: 0.25rem;
   overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
   color: var(--muted);
   font-family: var(--utility);
   font-size: 0.6rem;
@@ -1527,6 +1659,10 @@ main {
 .history-duration,
 .history-pending,
 .history-status {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
   font-family: var(--utility);
   font-size: 0.68rem;
   font-weight: 700;
@@ -1534,6 +1670,8 @@ main {
 }
 
 .history-duration {
+  justify-self: start;
+  max-width: 100%;
   padding: 0.45rem 0.6rem;
   color: var(--porcelain);
   background: var(--platform);
@@ -1541,12 +1679,18 @@ main {
 }
 
 .history-pending {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--danger);
 }
 
 .history-empty {
   position: relative;
-  padding: 2rem 4rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 2rem clamp(1rem, 4vw, 4rem);
   color: var(--muted);
   font-family: var(--utility);
   font-size: 0.73rem;
@@ -1574,7 +1718,7 @@ main {
   width: 0.75rem;
   height: 0.75rem;
   top: 2.05rem;
-  left: 1.06rem;
+  inset-inline-start: 1.06rem;
   background: var(--signal);
   border: 2px solid var(--platform);
   border-radius: 50%;
@@ -2270,6 +2414,28 @@ main {
   }
 }
 
+/* R50-S06: expand the board to the full dial when the usable machine is narrow
+   or text is enlarged. The rem threshold grows with root text, so 200% triggers
+   earlier on the same pixel width. The dial keeps its square at default width;
+   once wrapped, height grows intrinsically instead of clipping time. Cadence,
+   Core time, labels, and the action-bank arrangement stay untouched. */
+@container timer-actions (max-width: 32rem) {
+  .dial {
+    width: 100%;
+  }
+
+  .dial-center {
+    width: 100%;
+    padding-inline: 0.6rem;
+  }
+}
+
+@container timer-actions (max-width: 20rem) {
+  .dial-center {
+    padding-inline: 0.5rem;
+  }
+}
+
 /* R49-S10: collapse duration fieldset from rail inline size so enlarged text
    stacks durations vertically instead of squeezing stepper inputs. */
 @container (max-width: 40rem) {
@@ -2330,6 +2496,64 @@ main {
     grid-column: 1 / -1;
     justify-self: start;
     margin: 0 0 0 0.8rem;
+  }
+}
+
+/* R50-S05: stack tabs from usable nav width so folded segments and enlarged
+   text get full-width rows. Flex-wrap already lets tabs wrap intrinsically;
+   this forces single-column once the nav cannot fit two labels side by
+   side. Selection, roving tabindex, arrows/Home/End, and skip-link stay in
+   app-view.js and app.html. */
+@container (max-width: 24rem) {
+  .screen-nav [role="tablist"] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .screen-nav button {
+    width: 100%;
+  }
+}
+
+/* R50-S07: reflow history rows from usable history width so date/duration
+   take extra rows before minimum tracks overflow. The rem threshold grows
+   with root text, so tablet enlarged text stacks while default text keeps
+   four columns. Order, identity, dates, and status stay in app-view.js. */
+@container (max-width: 40rem) {
+  .history-item {
+    grid-template-columns: 3rem minmax(0, 1fr) auto;
+  }
+
+  .history-date {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+
+  .history-stamp {
+    grid-row: 1 / 3;
+  }
+}
+
+/* R50-S07: narrowest history rows stack duration below the date so tablet
+   enlarged text, narrow enlarged text with insets, small folds, and RTL
+   never push the row past the viewport or to negative inline coordinates. */
+@container (max-width: 26rem) {
+  .history-item {
+    grid-template-columns: 3rem minmax(0, 1fr);
+  }
+
+  .history-date {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .history-duration {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .history-stamp {
+    grid-row: 1 / 4;
   }
 }
 

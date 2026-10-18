@@ -74,9 +74,11 @@ a:focus-visible {
   transform: translateY(0);
 }
 
+/* R50-S04: masthead wraps instead of squeezing the wordmark at 200% text. */
 .masthead {
   min-height: 7.25rem;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 1.5rem;
@@ -89,12 +91,25 @@ a:focus-visible {
   border-bottom: 1px solid rgba(247, 248, 242, 0.35);
 }
 
+/* R50-S04: wordmark shrinks and wraps within available inline size. */
 .wordmark {
   display: inline-flex;
   align-items: center;
   gap: 0.9rem;
+  min-width: 0;
+  max-width: 100%;
   color: inherit;
   text-decoration: none;
+}
+
+.wordmark > span {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.wordmark strong,
+.wordmark small {
+  overflow-wrap: break-word;
 }
 
 .wordmark-symbol {
@@ -153,8 +168,10 @@ footer {
   font-size: 0.72rem;
 }
 
+/* R50-S04: main never masks overflowing controls; descendants reflow.
+   The decorative watermark stays inside via right: 0 on .hero::before. */
 main {
-  overflow: hidden;
+  min-width: 0;
 }
 
 .hero {
@@ -162,7 +179,9 @@ main {
   width: min(92rem, 100%);
   min-height: calc(100vh - 7.25rem);
   display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(32rem, 1.2fr);
+  /* R50-S04: 32rem floors the departure track to 1024px at 200% text.
+     Zero-minimum tracks let both columns shrink and reflow instead. */
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   align-items: center;
   gap: clamp(2rem, 7vw, 8rem);
   margin: 0 auto;
@@ -172,7 +191,7 @@ main {
 .hero::before {
   content: "25";
   position: absolute;
-  right: -0.03em;
+  right: 0;
   bottom: -0.22em;
   z-index: 0;
   color: var(--watermark);
@@ -186,6 +205,8 @@ main {
 .departure {
   position: relative;
   z-index: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .eyebrow {
@@ -202,7 +223,8 @@ p {
 }
 
 h1 {
-  max-width: 7ch;
+  max-width: min(7ch, 100%);
+  overflow-wrap: break-word;
   margin-bottom: 1.5rem;
   color: var(--platform-deep);
   font-family: var(--display);
@@ -248,6 +270,7 @@ h1 {
 
 .departure-board {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   justify-content: space-between;
   gap: 1.5rem;
@@ -266,8 +289,13 @@ h1 {
   font-size: 0.65rem;
 }
 
+.departure-board > * {
+  min-width: 0;
+}
+
 .departure-board h2 {
   margin-bottom: 0;
+  overflow-wrap: break-word;
   font-family: var(--display);
   font-size: clamp(2.7rem, 7vw, 5.5rem);
   letter-spacing: 0.025em;
@@ -291,17 +319,24 @@ h1 {
 
 .primary-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.8rem;
   padding: clamp(1.5rem, 4vw, 3rem);
+}
+
+.primary-actions > * {
+  min-width: 0;
 }
 
 .button {
   display: inline-flex;
   min-height: 3.75rem;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   justify-content: center;
   padding: 0.9rem 1rem;
+  overflow-wrap: break-word;
   border: 3px solid var(--track);
   font-weight: 900;
   text-align: center;
@@ -349,9 +384,13 @@ h1 {
 
 .section-heading {
   display: grid;
-  grid-template-columns: 0.65fr 1fr;
+  grid-template-columns: minmax(0, 0.65fr) minmax(0, 1fr);
   column-gap: 2rem;
   margin-bottom: 2.5rem;
+}
+
+.section-heading > * {
+  min-width: 0;
 }
 
 .section-heading .eyebrow {
@@ -361,6 +400,7 @@ h1 {
 
 .section-heading h2 {
   margin-bottom: 0;
+  overflow-wrap: break-word;
   font-family: var(--display);
   font-size: clamp(3rem, 7vw, 6rem);
   line-height: 0.9;
@@ -375,9 +415,10 @@ h1 {
   line-height: 1.6;
 }
 
+/* R50-S04: zero-minimum tracks let cards shrink; copy wraps in place. */
 .route-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
   background: var(--steel);
   border: 1px solid var(--steel);
@@ -386,7 +427,8 @@ h1 {
 .route-card {
   min-height: 14rem;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
   align-items: end;
   gap: 1rem;
   padding: clamp(1.25rem, 3vw, 2.2rem);
@@ -412,9 +454,14 @@ h1 {
   color: var(--platform);
 }
 
+.route-card > * {
+  min-width: 0;
+}
+
 .route-copy strong,
 .route-copy small {
   display: block;
+  overflow-wrap: break-word;
 }
 
 .route-copy strong {
@@ -439,7 +486,7 @@ h1 {
 
 .release-note {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 1rem;
   margin-top: 2rem;
   padding: 1.25rem 1.5rem;
@@ -473,6 +520,7 @@ h1 {
 
 footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1.5rem;
   padding: 1.4rem max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-right, 0px)) calc(1.4rem + env(safe-area-inset-bottom, 0px)) max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-left, 0px));
@@ -506,7 +554,7 @@ footer {
   }
 
   .route-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .route-card {
@@ -553,7 +601,7 @@ footer {
   }
 
   .primary-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .choice-note {
@@ -570,7 +618,7 @@ footer {
   }
 
   .release-note {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   footer {
