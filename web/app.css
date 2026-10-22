@@ -112,6 +112,11 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 2rem;
+  /* R51-S04: the folded first segment is the container, so 960px viewports
+     still arrange the account group from usable segment width at 200% text. */
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
   padding-top: calc(1.35rem + env(safe-area-inset-top, 0px));
   padding-right: max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-right, 0px));
   padding-bottom: 1.35rem;
@@ -198,6 +203,16 @@ select:focus-visible {
   gap: 0.65rem;
   padding-inline-start: 1rem;
   border-inline-start: 1px solid rgba(247, 248, 242, 0.35);
+}
+
+/* R51-S04: account controls shrink and wrap inside the usable segment
+   instead of forcing the header row past the fold. Text scale untouched. */
+.masthead-tools > *,
+.profile > *,
+.masthead .text-button {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .profile-avatar {
@@ -708,6 +723,23 @@ main {
     margin: 0 auto 0 env(viewport-segment-left 0 0, 0px);
   }
 
+  /* R51-S04: anchor the header/account group to the first usable segment
+     so enlarged account text wraps inside safe insets instead of crossing
+     the reserved fold strip. Placement derives from indexed segment
+     left/width; side padding already adds safe-area insets. */
+  .masthead {
+    width: env(viewport-segment-width 0 0, 100%);
+    max-width: env(viewport-segment-width 0 0, 100%);
+    margin-left: env(viewport-segment-left 0 0, 0px);
+    margin-right: auto;
+  }
+
+  .masthead-tools,
+  .profile {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .workbench {
     column-gap: calc(env(viewport-segment-left 1 0, 1rem) - env(viewport-segment-right 0 0, 0px));
   }
@@ -750,6 +782,14 @@ main {
     margin-top: calc(env(viewport-segment-top 0 0, 0px) + env(safe-area-inset-top, 0px) + 1rem);
     margin-bottom: auto;
     max-height: calc(env(viewport-segment-bottom 0 0, 100vh) - env(viewport-segment-top 0 0, 0px) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 2rem);
+  }
+
+  /* R51-S04: keep the folded header inside the first usable segment top
+     bound plus safe insets so a horizontal strip never cuts account text.
+     The header keeps intrinsic height and wraps; it never hides overflow
+     or shrinks text. */
+  .masthead {
+    margin-top: env(viewport-segment-top 0 0, 0px);
   }
 }
 
@@ -2554,6 +2594,24 @@ main {
 
   .history-stamp {
     grid-row: 1 / 4;
+  }
+}
+
+/* R51-S04: stack the header/account group from usable masthead width so a
+   narrow folded segment gives account controls full-width rows. The rem
+   threshold grows with root text, so 960px default keeps the wide
+   space-between row while folded/enlarged segments wrap. DOM order, RTL
+   direction, keyboard tab order, and account callbacks stay untouched. */
+@container (max-width: 40rem) {
+  .masthead-tools {
+    justify-content: flex-start;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  .profile {
+    flex: 1 1 auto;
+    width: 100%;
   }
 }
 

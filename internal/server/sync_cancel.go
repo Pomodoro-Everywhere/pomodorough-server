@@ -47,7 +47,7 @@ func isSyncCancellation(err error, ctx context.Context) bool {
 // sampled Sentry report via internalAPIError.
 func (s *Server) writeSyncMutationError(w http.ResponseWriter, r *http.Request, err error) {
 	if isSyncCancellation(err, requestContext(r)) {
-		s.logger.Info("sync account mutations canceled", "error", err)
+		s.logger.Info("sync account mutations canceled", "cause", monitoringCause(err))
 		echoIdempotencyKey(w, r)
 		writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
 		return

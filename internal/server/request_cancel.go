@@ -33,7 +33,7 @@ func isRequestCancellation(err error, ctx context.Context) bool {
 // releases still run at the caller.
 func (s *Server) writeCanceledInternalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
 	if s != nil && s.logger != nil {
-		s.logger.Info(operation+" canceled", "error", err)
+		s.logger.Info(operation+" canceled", "cause", monitoringCause(err))
 	}
 	if s != nil && s.metrics != nil && r != nil {
 		s.metrics.observeCancellation(r.Method, r.Pattern)

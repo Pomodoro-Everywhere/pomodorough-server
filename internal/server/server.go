@@ -69,8 +69,9 @@ func New(cfg config.Config, userStore *store.Store, logger *slog.Logger) (*Serve
 	if !valid {
 		return nil, errors.New("trusted proxy configuration is incomplete or invalid")
 	}
-	keySetContext := oidc.ClientContext(context.Background(), &http.Client{Timeout: 10 * time.Second})
-	keySet := oidc.NewRemoteKeySet(keySetContext, "https://www.googleapis.com/oauth2/v3/certs")
+	keySetHTTP := &http.Client{Timeout: 10 * time.Second, Transport: &keyProviderTransport{}}
+	keySetContext := oidc.ClientContext(context.Background(), keySetHTTP)
+	keySet := &observingKeySet{inner: oidc.NewRemoteKeySet(keySetContext, "https://www.googleapis.com/oauth2/v3/certs")}
 	s := &Server{
 		cfg:                     cfg,
 		store:                   userStore,

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -148,19 +150,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	identity, googleFailure := s.exchangeAndVerifyGoogle(googleContext, code, state)
 	if googleFailure != nil {
-		if googleFailure.logMessage != "" {
-			s.logger.Warn(googleFailure.logMessage, "error", googleFailure.err)
-		}
-		if googleFailure.status == http.StatusBadGateway {
-			// Report exchange dependency failures only: 401 verification
-			// stays warn-only as client-driven. Pattern tags only, no PII.
-			reportErr := googleFailure.err
-			if reportErr == nil {
-				reportErr = errors.New("missing Google ID token")
-			}
-			reportInternalErrorToErrorMonitoring(reportErr, r, "Google OAuth exchange failed")
-		}
-		http.Error(w, "Authentication failed", googleFailure.status)
+		s.writeGoogleCallbackFailure(w, r, googleFailure)
 		return
 	}
 	session, failure := s.persistWebAccount(r.Context(), identity)
@@ -197,6 +187,66 @@ func (s *Server) exchangeAndVerifyGoogle(ctx context.Context, code string, state
 		}
 	}
 	return identity, nil
+}
+
+// writeGoogleCallbackFailure keeps the 401/502 wire but logs bounded
+// cause classes only. Raw OAuth exchange errors carry provider bodies
+// and token URLs up to 12KB; raw verify errors carry unverified claims.
+// Both stay out of logs. Exchange stays WARN plus one sampled Sentry
+// event; verify stays WARN with a static reason and no event.
+// Cancellation stays INFO with no event.
+func (s *Server) writeGoogleCallbackFailure(w http.ResponseWriter, r *http.Request, failure *googleAuthenticationFailure) {
+	if failure == nil {
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		return
+	}
+	if failure.err != nil && isRequestCancellation(failure.err, r.Context()) {
+		s.logger.Info("Google OAuth exchange canceled", "cause", monitoringCause(failure.err))
+		http.Error(w, "Authentication failed", failure.status)
+		return
+	}
+	if failure.status == http.StatusBadGateway {
+		cause := "missing_token"
+		reportErr := failure.err
+		if reportErr != nil {
+			cause = monitoringCause(reportErr)
+		} else {
+			reportErr = errors.New("missing Google ID token")
+		}
+		s.logger.Warn("Google OAuth exchange failed", "cause", cause)
+		reportInternalErrorToErrorMonitoring(reportErr, r, "Google OAuth exchange failed")
+		http.Error(w, "Authentication failed", failure.status)
+		return
+	}
+	reason := googleVerifyFailureReason(failure.err)
+	if reason == nativeTokenReasonAudience {
+		s.logger.Debug("Google ID token audience classified", "cause", reason)
+	}
+	s.logger.Warn("Google ID token verification failed", "reason", reason)
+	http.Error(w, "Authentication failed", failure.status)
+}
+
+// googleVerifyFailureReason extracts the bounded taxonomy from a web
+// verify error. Typed client rejections return their static reason;
+// provider outages return provider_unavailable; anything else collapses
+// to monitoringCause so logs stay bounded and PII-free.
+func googleVerifyFailureReason(err error) string {
+	if err == nil {
+		return "invalid_token"
+	}
+	var clientErr *googleTokenClientError
+	if errors.As(err, &clientErr) && clientErr.reason != "" {
+		return clientErr.reason
+	}
+	var providerErr *googleKeyProviderError
+	if errors.As(err, &providerErr) {
+		return nativeTokenReasonProvider
+	}
+	cause := monitoringCause(err)
+	if cause == "" || cause == "internal" {
+		return "invalid_token"
+	}
+	return cause
 }
 
 func (s *Server) persistWebAccount(ctx context.Context, identity googleIdentity) (webSessionResult, *authOperationFailure) {
@@ -289,10 +339,7 @@ func (s *Server) handleNativeExchange(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	identity, err := s.verifyGoogleIDToken(googleContext, request.IDToken, s.nativeVerifier, challenge.Nonce, s.cfg.GoogleNativeClientIDSet)
 	if err != nil {
-		s.logger.Warn("native Google ID token verification failed", "error", err)
-		// Pattern tags only: request body holds the raw ID token and challenge.
-		reportInternalErrorToErrorMonitoring(err, r, "native Google ID token verification failed")
-		writeAPIError(w, r, http.StatusUnauthorized, "invalid Google token")
+		s.writeNativeVerifyFailure(w, r, err)
 		return
 	}
 	digest := store.HashNativeChallenge(nativeChallengeDomain, request.Challenge)
@@ -382,9 +429,14 @@ func (s *Server) writeRefreshRotationError(w http.ResponseWriter, r *http.Reques
 		s.hub.disconnectSession(userID, revoked.Generation, revoked.SessionID)
 		// Reuse is an expected client-driven 401. Do not report credentials or session identities.
 		s.logger.Warn("refresh token reuse revoked session family")
+		s.logger.Debug("refresh rotation classified", "cause", "reuse_detected")
 	}
 	if isUnauthorized(err) || errors.Is(err, store.ErrRefreshReuse) {
 		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "rotate refresh token", err)
 		return
 	}
 	s.internalAPIError(w, r, "rotate refresh token", err)
@@ -395,44 +447,65 @@ func (s *Server) writeRefreshOpenError(w http.ResponseWriter, r *http.Request, e
 		writeAPIError(w, r, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
+	if isRequestCancellation(err, r.Context()) {
+		s.writeCanceledInternalError(w, r, "open user account for refresh", err)
+		return
+	}
 	s.internalAPIError(w, r, "open user account for refresh", err)
 }
 
 func (s *Server) verifyGoogleIDToken(ctx context.Context, rawToken string, verifier *oidc.IDTokenVerifier, expectedNonce string, allowedAudiences map[string]struct{}) (googleIdentity, error) {
-	idToken, err := verifier.Verify(ctx, rawToken)
+	if err := checkGoogleTokenFormat(rawToken); err != nil {
+		return googleIdentity{}, &googleTokenClientError{reason: nativeTokenReasonMalformed, err: err}
+	}
+	// oidc flattens key-set errors with %v, which drops the wrap chain.
+	// The observing key set records a provider failure in the per-request
+	// slot before that flattening, so classification stays typed.
+	verifyCtx, outcome := withGoogleVerifyOutcome(ctx)
+	idToken, err := verifier.Verify(verifyCtx, rawToken)
 	if err != nil {
-		return googleIdentity{}, err
+		if outcome.providerFailure != nil {
+			return googleIdentity{}, outcome.providerFailure
+		}
+		return googleIdentity{}, classifyGoogleVerifyError(err)
+	}
+	return checkGoogleTokenClaims(idToken, expectedNonce, allowedAudiences)
+}
+
+func checkGoogleTokenClaims(idToken *oidc.IDToken, expectedNonce string, allowedAudiences map[string]struct{}) (googleIdentity, error) {
+	client := func(reason string, err error) (googleIdentity, error) {
+		return googleIdentity{}, &googleTokenClientError{reason: reason, err: err}
 	}
 	if idToken.Issuer != googleIssuer && idToken.Issuer != "accounts.google.com" {
-		return googleIdentity{}, errors.New("unexpected Google issuer")
+		return client(nativeTokenReasonIssuer, errors.New("unexpected Google issuer"))
 	}
 	if idToken.Expiry.Before(time.Now()) {
-		return googleIdentity{}, errors.New("expired Google token")
+		return client(nativeTokenReasonExpired, errors.New("expired Google token"))
 	}
 	if len(idToken.Audience) == 0 {
-		return googleIdentity{}, errors.New("missing Google audience")
+		return client(nativeTokenReasonAudience, errors.New("missing Google audience"))
 	}
 	for _, audience := range idToken.Audience {
 		if _, allowed := allowedAudiences[audience]; !allowed {
-			return googleIdentity{}, errors.New("unexpected Google audience")
+			return client(nativeTokenReasonAudience, errors.New("unexpected Google audience"))
 		}
 	}
 	var claims googleClaims
 	if err := idToken.Claims(&claims); err != nil {
-		return googleIdentity{}, fmt.Errorf("decode Google claims: %w", err)
+		return client(nativeTokenReasonClaims, err)
 	}
 	if claims.AuthorizedParty != "" {
 		if _, allowed := allowedAudiences[claims.AuthorizedParty]; !allowed {
-			return googleIdentity{}, errors.New("unexpected Google authorized party")
+			return client(nativeTokenReasonAudience, errors.New("unexpected Google authorized party"))
 		}
 	} else if len(idToken.Audience) > 1 {
-		return googleIdentity{}, errors.New("missing Google authorized party")
+		return client(nativeTokenReasonAudience, errors.New("missing Google authorized party"))
 	}
 	if expectedNonce == "" || !authn.EqualString(claims.Nonce, expectedNonce) {
-		return googleIdentity{}, errors.New("Google nonce mismatch")
+		return client(nativeTokenReasonNonce, errors.New("Google nonce mismatch"))
 	}
 	if !claims.EmailVerified || idToken.Subject == "" || claims.Email == "" {
-		return googleIdentity{}, errors.New("unverified Google identity")
+		return client(nativeTokenReasonIdentity, errors.New("unverified Google identity"))
 	}
 	return googleIdentity{
 		Issuer: googleIssuer, Subject: idToken.Subject, Email: claims.Email, Name: claims.Name, AvatarURL: claims.Picture,
@@ -469,6 +542,201 @@ func nativeTokenResponse(accessToken, refreshToken string, accessExpires, refres
 		"refreshToken":          refreshToken,
 		"refreshTokenExpiresAt": refreshExpires.UTC().Format(time.RFC3339),
 	}
+}
+
+// Native token rejection taxonomy. Every reason is a static allowlist
+// value: raw tokens, challenges, emails, and provider bodies never enter
+// logs or monitoring through this path. R51-S02 narrows the earlier S22
+// outage reporting to genuine key-provider failures.
+const (
+	nativeTokenReasonMalformed = "malformed_token"
+	nativeTokenReasonSignature = "invalid_signature"
+	nativeTokenReasonExpired   = "expired_token"
+	nativeTokenReasonIssuer    = "invalid_issuer"
+	nativeTokenReasonAudience  = "invalid_audience"
+	nativeTokenReasonClaims    = "invalid_claims"
+	nativeTokenReasonNonce     = "invalid_nonce"
+	nativeTokenReasonIdentity  = "unverified_identity"
+	nativeTokenReasonProvider  = "provider_unavailable"
+	nativeTokenReasonCanceled  = "request_canceled"
+)
+
+// googleTokenClientError marks an expected client-driven token rejection:
+// malformed syntax, bad signature, or failed claims. It carries no Sentry
+// report; the bounded reason is the whole diagnostic.
+type googleTokenClientError struct {
+	reason string
+	err    error
+}
+
+func (e *googleTokenClientError) Error() string { return "invalid Google ID token: " + e.reason }
+func (e *googleTokenClientError) Unwrap() error { return e.err }
+
+// googleKeyProviderError marks a genuine Google key-set outage: the JWKS
+// transport failed or returned a non-200 status. It keeps the existing
+// Sentry report and lets the client retry with an unconsumed challenge.
+type googleKeyProviderError struct {
+	status int
+	err    error
+}
+
+func (e *googleKeyProviderError) Error() string {
+	if e.status != 0 {
+		return fmt.Sprintf("Google key set unavailable: HTTP %d", e.status)
+	}
+	return "Google key set unavailable"
+}
+
+func (e *googleKeyProviderError) Unwrap() error { return e.err }
+
+// keyProviderTransport converts JWKS fetch failures into the typed
+// provider error at the HTTP boundary, before oidc flattens the status
+// and body into an untyped string. Non-200 bodies are discarded here and
+// never logged or reported. Key verification itself stays with oidc.
+type keyProviderTransport struct {
+	base http.RoundTripper
+}
+
+func (t *keyProviderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	response, err := base.RoundTrip(request)
+	if err != nil {
+		return nil, &googleKeyProviderError{err: err}
+	}
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		return nil, &googleKeyProviderError{status: response.StatusCode, err: errors.New("key set request failed")}
+	}
+	return response, nil
+}
+
+// googleVerifyOutcome carries the key-set classification across the oidc
+// verify call, which stringifies key-set errors and drops their wrap
+// chain. One slot per verification request, so concurrent exchanges never
+// share classification state.
+type googleVerifyOutcome struct {
+	providerFailure error
+}
+
+type googleVerifyOutcomeKey struct{}
+
+func withGoogleVerifyOutcome(ctx context.Context) (context.Context, *googleVerifyOutcome) {
+	outcome := &googleVerifyOutcome{}
+	return context.WithValue(ctx, googleVerifyOutcomeKey{}, outcome), outcome
+}
+
+// observingKeySet delegates verification to the wrapped key set and
+// records genuine key-provider failures in the request slot while the
+// typed error chain is still intact. Signature and claim rejections leave
+// the slot empty and classify as expected client errors.
+type observingKeySet struct {
+	inner oidc.KeySet
+}
+
+func (k *observingKeySet) VerifySignature(ctx context.Context, jwt string) ([]byte, error) {
+	payload, err := k.inner.VerifySignature(ctx, jwt)
+	if err == nil {
+		return payload, nil
+	}
+	outcome, ok := ctx.Value(googleVerifyOutcomeKey{}).(*googleVerifyOutcome)
+	if ok && outcome != nil {
+		var providerErr *googleKeyProviderError
+		if errors.As(err, &providerErr) {
+			outcome.providerFailure = providerErr
+		}
+	}
+	return nil, err
+}
+
+// checkGoogleTokenFormat rejects structurally malformed tokens before any
+// key fetch, so garbage never triggers a provider round trip.
+func checkGoogleTokenFormat(rawToken string) error {
+	parts := strings.Split(rawToken, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return errors.New("token must have three segments")
+	}
+	if header, err := base64.RawURLEncoding.DecodeString(parts[0]); err != nil || len(header) == 0 {
+		return errors.New("token header is not base64url")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(payload) == 0 {
+		return errors.New("token payload is not base64url")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return errors.New("token payload is not JSON")
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(parts[2]); err != nil {
+		return errors.New("token signature is not base64url")
+	}
+	return nil
+}
+
+// classifyGoogleVerifyError separates expected token rejection from key
+// provider outage using only errors.Is and errors.As. Untyped verify
+// failures that survive format, provider, cancellation, and expiry checks
+// are signature-envelope rejections, fail closed as client errors.
+func classifyGoogleVerifyError(err error) error {
+	var providerErr *googleKeyProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	var expired *oidc.TokenExpiredError
+	if errors.As(err, &expired) {
+		return &googleTokenClientError{reason: nativeTokenReasonExpired, err: err}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &googleKeyProviderError{err: err}
+	}
+	return &googleTokenClientError{reason: nativeTokenReasonSignature, err: err}
+}
+
+// isNativeVerifyCanceled reports client-driven cancellation: a canceled
+// chain or a dead request context. A live-context verify timeout stays a
+// provider outage so slow key fetches keep their Sentry report.
+func isNativeVerifyCanceled(err error, r *http.Request) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	return errors.Is(r.Context().Err(), context.Canceled) || errors.Is(r.Context().Err(), context.DeadlineExceeded)
+}
+
+// writeNativeVerifyFailure keeps the 401 wire for every verification
+// outcome but splits the diagnostic: expected client rejection and
+// cancellation stay Sentry-free with static WARN/INFO reasons, while a
+// genuine provider outage keeps the ERROR log plus one sampled event.
+// The challenge stays unconsumed on all three paths, so the client can
+// retry without a new challenge.
+func (s *Server) writeNativeVerifyFailure(w http.ResponseWriter, r *http.Request, err error) {
+	if isNativeVerifyCanceled(err, r) {
+		s.logger.Info("native Google ID token verification canceled", "reason", nativeTokenReasonCanceled)
+		if s.metrics != nil && r != nil {
+			s.metrics.observeCancellation(r.Method, r.Pattern)
+		}
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid Google token")
+		return
+	}
+	var clientErr *googleTokenClientError
+	if errors.As(err, &clientErr) {
+		if clientErr.reason == nativeTokenReasonAudience {
+			s.logger.Debug("native verify audience classified", "cause", nativeTokenReasonAudience)
+		}
+		s.logger.Warn("native Google ID token verification failed", "reason", clientErr.reason)
+		writeAPIError(w, r, http.StatusUnauthorized, "invalid Google token")
+		return
+	}
+	s.logger.Error("native Google ID token verification failed", "reason", nativeTokenReasonProvider)
+	reportInternalErrorToErrorMonitoring(err, r, "native Google ID token verification failed")
+	writeAPIError(w, r, http.StatusUnauthorized, "invalid Google token")
 }
 
 func safeReturnPath(value string) string {
@@ -513,13 +781,13 @@ func clearSessionCookies(w http.ResponseWriter) {
 }
 
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
-	s.logger.Error(operation, "error", err)
+	s.logger.Error(operation, "cause", monitoringCause(err))
 	reportInternalErrorToErrorMonitoring(err, r, operation)
 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }
 
 func (s *Server) internalAPIError(w http.ResponseWriter, r *http.Request, operation string, err error) {
-	s.logger.Error(operation, "error", err)
+	s.logger.Error(operation, "cause", monitoringCause(err))
 	reportInternalErrorToErrorMonitoring(err, r, operation)
 	echoIdempotencyKey(w, r)
 	writeAPIError(w, r, http.StatusInternalServerError, "internal server error")

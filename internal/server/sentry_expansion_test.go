@@ -99,13 +99,17 @@ func TestGoogleVerification401DoesNotReport(t *testing.T) {
 	}
 }
 
-func TestNativeVerificationFailureReportsPatternOnly(t *testing.T) {
+// R51-S02: malformed native tokens fail closed as expected client
+// errors with zero Sentry events. The S22 outage report now fires only
+// for genuine key-provider failures, covered in native_verify_r51s02.
+func TestNativeVerificationClientRejectionDoesNotReport(t *testing.T) {
 	transport := initMockSentry(t)
 	fixture := newServerFixture(t)
 	fixture.application.cfg.GoogleNativeClientIDs = []string{"native-client"}
 	fixture.application.cfg.GoogleNativeClientIDSet = map[string]struct{}{"native-client": {}}
 	verifier, _ := testGoogleVerifier(t)
 	fixture.application.nativeVerifier = verifier
+	logs := r49S08CaptureLogs(fixture.application)
 	sealed, err := fixture.application.codec.Seal("native-challenge", authn.NativeChallenge{
 		Nonce: "bound-nonce", ExpiresAt: time.Now().Add(time.Minute).Unix(),
 	})
@@ -129,16 +133,18 @@ func TestNativeVerificationFailureReportsPatternOnly(t *testing.T) {
 		t.Fatalf("status = %d, want 401", response.Code)
 	}
 	sentry.Flush(2 * time.Second)
-	events := transport.Events()
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want exactly 1", len(events))
+	if events := transport.Events(); len(events) != 0 {
+		t.Fatalf("events = %d, want 0 for client-driven 401", len(events))
 	}
-	if events[0].Tags["error.operation"] != "native Google ID token verification failed" {
-		t.Fatalf("error.operation = %q", events[0].Tags["error.operation"])
+	output := logs.String()
+	if !strings.Contains(output, `reason=malformed_token`) {
+		t.Fatalf("WARN log missing static malformed_token reason: %s", output)
 	}
-	assertExchangePattern(t, events[0])
-	secrets := []string{"not-a-jwt-secret-xyz", sealed, "token-secret-xyz", "bearer-secret-123", "session-secret-456"}
-	assertEventHasNoPII(t, events[0], secrets)
+	for _, secret := range []string{"not-a-jwt-secret-xyz", sealed, "token-secret-xyz", "bearer-secret-123", "session-secret-456"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("WARN log contains secret %q", secret)
+		}
+	}
 }
 
 func TestWriteRateLimitLogsPatternNotRawPath(t *testing.T) {
