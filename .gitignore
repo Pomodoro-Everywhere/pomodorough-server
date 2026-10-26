@@ -31,6 +31,7 @@ pomodorough.env
 *.pem
 *.p12
 *.pfx
+*.p8
 .DS_Store
 .cache_ggshield
 .ruff_cache/

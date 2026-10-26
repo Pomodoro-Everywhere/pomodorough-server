@@ -18,7 +18,8 @@ test("timing config is frozen with one value per timeout", () => {
     remoteSyncInterval: 15_000,
     bootstrapLease: 300_000,
     timerOwnerLease: 60_000,
-    timerOwnerHeartbeat: 15_000
+    timerOwnerHeartbeat: 15_000,
+    logoutRevocation: 10_000
   });
   assert.equal(runtime.timingMs("retryMax", 1), 60_000);
   assert.equal(runtime.timingMs("missing", 7), 7);

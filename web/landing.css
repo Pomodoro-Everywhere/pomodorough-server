@@ -705,3 +705,35 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* R52-S04: public header and policy stay inside the measured first segment
+   so enlarged link text wraps within usable bounds instead of crossing
+   the reserved vertical fold strip. Placement derives from indexed segment
+   left/width; side padding already adds safe-area insets. */
+@media (horizontal-viewport-segments: 2) {
+  .masthead {
+    width: env(viewport-segment-width 0 0, 100%);
+    max-width: env(viewport-segment-width 0 0, 100%);
+    margin-left: env(viewport-segment-left 0 0, 0px);
+    margin-right: auto;
+  }
+
+  .landing-shell {
+    width: env(viewport-segment-width 0 0, 100%);
+    max-width: env(viewport-segment-width 0 0, 100%);
+    margin-left: env(viewport-segment-left 0 0, 0px);
+    margin-right: auto;
+  }
+}
+
+/* R52-S04: keep folded public pages inside the first segment top bound
+   plus safe insets on a horizontal strip. Height stays intrinsic. */
+@media (vertical-viewport-segments: 2) {
+  .masthead {
+    margin-top: env(viewport-segment-top 0 0, 0px);
+  }
+
+  .landing-shell {
+    margin-top: env(viewport-segment-top 0 0, 0px);
+  }
+}

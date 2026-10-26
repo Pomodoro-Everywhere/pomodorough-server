@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +108,16 @@ func (s *Store) writeDeletionReceipt(userID string, credential DeletionCredentia
 }
 
 func (s *Store) DeleteUserWithReceipt(ctx context.Context, userID string, generation int64, credential DeletionCredential, csrfHash []byte) error {
+	return s.deleteUserWithReceipt(ctx, userID, generation, credential, csrfHash, nil)
+}
+
+// DeleteUserWithReceiptForSession serializes live session revocation with new
+// deletion commitments. Committed receipts retain their independent replay path.
+func (s *Store) DeleteUserWithReceiptForSession(ctx context.Context, userID string, generation int64, credential DeletionCredential, csrfHash []byte, sessionID string) error {
+	return s.deleteUserWithReceipt(ctx, userID, generation, credential, csrfHash, &sessionID)
+}
+
+func (s *Store) deleteUserWithReceipt(ctx context.Context, userID string, generation int64, credential DeletionCredential, csrfHash []byte, sessionID *string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -127,15 +138,18 @@ func (s *Store) DeleteUserWithReceipt(ctx context.Context, userID string, genera
 		return err
 	}
 	currentGeneration, generationErr := accountGeneration(ctx, db)
+	if generationErr == nil && currentGeneration != generation {
+		generationErr = ErrAccountGenerationChanged
+	}
+	if generationErr == nil && sessionID != nil {
+		generationErr = validateDeletionSession(ctx, db, credential, *sessionID)
+	}
 	closeErr := db.Close()
 	if generationErr != nil {
 		return generationErr
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close account before deletion receipt: %w", closeErr)
-	}
-	if currentGeneration != generation {
-		return ErrAccountGenerationChanged
 	}
 	receipt = DeletionReceipt{Version: 1, Generation: generation, CSRFHash: csrfHash}
 	if err := s.writeDeletionReceipt(userID, credential, receipt); err != nil {
@@ -145,6 +159,28 @@ func (s *Store) DeleteUserWithReceipt(ctx context.Context, userID string, genera
 		return err
 	}
 	return s.finishReceiptedDeletion(ctx, userID, generation)
+}
+
+func validateDeletionSession(ctx context.Context, db *sql.DB, credential DeletionCredential, sessionID string) error {
+	expectedKind := "web"
+	if credential.Method == "bearer" {
+		expectedKind = "access"
+	}
+	// Admission already checked expiration. Recheck revocation and credential
+	// ownership under the account lock without changing in-flight expiry rules.
+	var live bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM auth_tokens t JOIN auth_sessions s ON s.id = t.session_id
+		WHERE t.token_hash = ? AND t.kind = ? AND s.id = ?
+		AND t.revoked_at_ms IS NULL AND s.revoked_at_ms IS NULL
+	)`, credential.TokenHash[:], expectedKind, sessionID).Scan(&live)
+	if err != nil {
+		return fmt.Errorf("validate deletion session: %w", err)
+	}
+	if !live {
+		return ErrUnauthorized
+	}
+	return nil
 }
 
 func (s *Store) finishReceiptedDeletion(ctx context.Context, userID string, generation int64) error {

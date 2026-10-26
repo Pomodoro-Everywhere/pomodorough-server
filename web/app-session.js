@@ -833,7 +833,10 @@
         if (!accountOperation.isCurrent(completed)) return false;
         effectsContext = completed;
         this.use.assertCleanupIdentity(identity);
-        if (completion.clearMarker) completed.publishIdentity(() => this.clearPendingLogout());
+        if (completion.clearMarker) completed.publishIdentity(() => {
+          this.state.logoutRecoveryRequired = false;
+          this.clearPendingLogout();
+        });
       } catch (error) {
         if (!accountOperation.isCurrent(context)) return false;
         completion.reportFailure(error);
@@ -890,6 +893,42 @@
       return false;
     }
 
+    observeDetachedRevocation(request, context) {
+      const settlement = { settled: false, revoked: false, timedOut: false };
+      request.then((revoked) => {
+        settlement.settled = true;
+        settlement.revoked = revoked;
+      }, (error) => {
+        settlement.settled = true;
+        if (settlement.timedOut || error?.name === "AccountOwnershipError"
+          || !accountOperation.isCurrent(context)) return;
+        this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
+        reportFrontendError(error, "session.logout.revocation-deferred");
+      });
+      return settlement;
+    }
+
+    async settleDetachedRevocation(request, settlement, context) {
+      let timer = null;
+      const timeout = new Promise((resolve) => {
+        timer = this.host.setTimeout(() => resolve(false), timingMs("logoutRevocation", 10_000));
+      });
+      const revoked = await Promise.race([request.then(() => true, () => false), timeout]);
+      if (timer !== null) this.host.clearTimeout?.(timer);
+      if (!revoked && !settlement.settled) {
+        // Bounded wait elapsed with revocation still pending: keep durable
+        // recovery and report once. A late failure stays silent below.
+        settlement.timedOut = true;
+        if (accountOperation.isCurrent(context)) {
+          const pending = new Error(this.use.tr("account.logout.revocationPending", {},
+            "Pending sign-out could not be revoked yet."));
+          this.host.console.warn("Pomodorough server revocation deferred until reconnect:", pending);
+          reportFrontendError(pending, "session.logout.revocation-deferred");
+        }
+      }
+      return revoked;
+    }
+
     pendingOperationCount() {
       return this.state.pending.length + this.state.pendingTaskOperations.length
         + this.state.pendingDurationOperations.length + this.state.pendingAutoStartOperations.length
@@ -922,17 +961,22 @@
       this.markPendingLogout();
       const cleanupContext = this.use.captureAccountContext();
       const identity = this.use.cleanupIdentity();
-      let serverRevoked = false;
-      try {
-        serverRevoked = await this.requestSessionRevocation(this.state.csrfToken, context.ownerId, cleanupContext);
-      } catch (error) {
-        if (!accountOperation.isCurrent(cleanupContext)) return;
-        this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
-        reportFrontendError(error, "session.logout.revocation-deferred");
+      this.stream.closeRevisionStream();
+      // Fence mutations before any network wait: the durable marker is set,
+      // the profile hides, and every mutation entry point fails closed while
+      // local cleanup runs independently of remote revocation.
+      if (accountOperation.isCurrent(cleanupContext)) {
+        this.state.logoutRecoveryRequired = true;
+        this.use.renderProfile();
+        this.use.renderSyncStatus();
       }
+      const revocationRequest = this.requestSessionRevocation(this.state.csrfToken, context.ownerId, cleanupContext);
+      const revocation = this.observeDetachedRevocation(revocationRequest, cleanupContext);
       if (!accountOperation.isCurrent(cleanupContext)) return;
       this.use.assertCleanupIdentity(identity);
-      this.stream.closeRevisionStream();
+      const serverRevoked = await this.settleDetachedRevocation(revocationRequest, revocation, cleanupContext);
+      if (!accountOperation.isCurrent(cleanupContext)) return;
+      this.use.assertCleanupIdentity(identity);
       await this.completeAccountCleanup(identity, cleanupContext, {
         clearMarker: serverRevoked, reportFailure: (error) => {
           this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);

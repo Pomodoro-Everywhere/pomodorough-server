@@ -1,17 +1,20 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 
 	"pomodorough/internal/authn"
@@ -597,6 +600,10 @@ type keyProviderTransport struct {
 	base http.RoundTripper
 }
 
+// keyProviderMaxDocumentBytes bounds the HTTP-200 key document retained
+// for structural validation. The production Google set is a few KB.
+const keyProviderMaxDocumentBytes = 1 << 20
+
 func (t *keyProviderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	base := t.base
 	if base == nil {
@@ -610,6 +617,25 @@ func (t *keyProviderTransport) RoundTrip(request *http.Request) (*http.Response,
 		_ = response.Body.Close()
 		return nil, &googleKeyProviderError{status: response.StatusCode, err: errors.New("key set request failed")}
 	}
+	// oidc flattens HTTP-200 decode failures, including the raw body,
+	// into untyped signature errors. Validate the document here, while
+	// provider identity is intact, so breakage reports as infrastructure
+	// with a static diagnostic. Decodable documents with unknown keys
+	// still flow to oidc and stay client signature rejections.
+	body, err := io.ReadAll(io.LimitReader(response.Body, keyProviderMaxDocumentBytes+1))
+	_ = response.Body.Close()
+	if err != nil {
+		return nil, &googleKeyProviderError{err: err}
+	}
+	if len(body) > keyProviderMaxDocumentBytes {
+		return nil, &googleKeyProviderError{err: errors.New("key set response too large")}
+	}
+	var keySet jose.JSONWebKeySet
+	if err := json.Unmarshal(body, &keySet); err != nil {
+		return nil, &googleKeyProviderError{err: errors.New("key set response invalid")}
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
 	return response, nil
 }
 

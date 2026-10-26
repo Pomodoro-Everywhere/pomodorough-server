@@ -13,7 +13,8 @@
     remoteSyncInterval: 15_000,
     bootstrapLease: 5 * 60_000,
     timerOwnerLease: 60_000,
-    timerOwnerHeartbeat: 15_000
+    timerOwnerHeartbeat: 15_000,
+    logoutRevocation: 10_000
   });
 
   function timingMs(name, fallback) {
