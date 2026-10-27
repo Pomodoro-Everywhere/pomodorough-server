@@ -16,6 +16,31 @@
   const FRONTEND_ERROR_MESSAGE_MAX = 500;
   const FRONTEND_ERROR_DEDUP_MS = 30_000;
   const FRONTEND_ERROR_DEDUP_MAX_MS = 300_000;
+  const SAFE_ERROR_NAMES = new Set([
+    "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError",
+    "EvalError", "AggregateError", "AbortError", "TimeoutError", "AccountOwnershipError",
+    "QuotaExceededError", "SecurityError", "StorageError"
+  ]);
+  const SAFE_OPERATIONS = new Set([
+    "sync.preflight.bootstrap-gate", "sync.preflight.pending-queues", "sync.deferred",
+    "sync.immutable.recovery", "session.stream.error", "session.restore.offline",
+    "session.logout.marker-write-failed", "session.delete-account.marker-write-failed",
+    "session.delete-account.cleanup-retry", "session.logout-recovery.cleanup-failed",
+    "session.initialize.deferred", "session.delete-account.request-failed",
+    "session.logout.revocation-deferred", "session.logout.pending-queues",
+    "session.logout.cleanup-incomplete", "bootstrap.restart.deferred",
+    "bootstrap.resolution.deferred", "bootstrap.retry.deferred", "bootstrap.choice.deferred",
+    "view.cross-tab-logout.cleanup-incomplete", "view.timer-ownership.release-failed",
+    "view.phase.save-failed", "actions.timer-ownership.renewal-failed",
+    "actions.duration.save-failed", "actions.auto-start.save-failed",
+    "actions.selected-task.save-failed", "actions.selected-task.retarget-missing",
+    "actions.task.save-failed", "actions.task.identity-failed", "actions.timer.save-failed",
+    "actions.timer.clear-failed", "actions.timer.finish-failed",
+    "actions.completion.notification-failed", "actions.completion.audio-init-failed",
+    "actions.completion.audio-resume-failed", "actions.completion.permission-failed",
+    "storage.failure", "i18n.locale.fallback", "startup.localization.unavailable",
+    "startup.storage.unavailable", "startup.offline-shell.unavailable"
+  ]);
 
   const frontendErrorTimestamps = [];
   const frontendErrorSamples = new Map();
@@ -86,6 +111,8 @@
       dsn: settings.dsn,
       release: settings.release,
       environment: ENVIRONMENT,
+      beforeSend: (event) => scrubFinalEvent(event, settings.release),
+      beforeBreadcrumb: scrubBreadcrumb,
       replaysSessionSampleRate: SESSION_SAMPLE_RATE,
       replaysOnErrorSampleRate: ERROR_SAMPLE_RATE,
       integrations: [
@@ -93,6 +120,47 @@
       ]
     });
     return true;
+  }
+
+  function safeErrorName(value) {
+    return SAFE_ERROR_NAMES.has(value) ? value : "Error";
+  }
+
+  function scrubBreadcrumb(crumb) {
+    try {
+      const category = ["fetch", "xhr", "navigation", "console", "error.repeat"].includes(crumb.category)
+        ? crumb.category : "diagnostic";
+      const operation = category === "error.repeat" && SAFE_OPERATIONS.has(crumb.message)
+        ? crumb.message : "[redacted]";
+      return { category, message: operation };
+    } catch {
+      return null;
+    }
+  }
+
+  // Rebuild rather than blacklist: SDK processors can attach new private fields at any depth.
+  function scrubFinalEvent(event, release) {
+    try {
+      const operation = SAFE_OPERATIONS.has(event.tags?.["error.operation"])
+        ? event.tags["error.operation"] : "browser.automatic";
+      const values = event.exception?.values;
+      const clean = {
+        platform: "javascript", environment: ENVIRONMENT, release,
+        level: ["fatal", "error", "warning", "info", "debug"].includes(event.level) ? event.level : "error",
+        tags: { "error.operation": operation },
+        exception: { values: (Array.isArray(values) && values.length ? values.slice(0, 5) : [{}])
+          .map((value) => ({ type: safeErrorName(value.type), value: operation })) },
+        breadcrumbs: Array.isArray(event.breadcrumbs)
+          ? event.breadcrumbs.slice(-100).map(scrubBreadcrumb).filter(Boolean) : []
+      };
+      if (typeof event.event_id === "string" && /^[a-f0-9]{32}$/.test(event.event_id)) {
+        clean.event_id = event.event_id;
+      }
+      if (Number.isFinite(event.timestamp)) clean.timestamp = event.timestamp;
+      return clean;
+    } catch {
+      return null;
+    }
   }
 
   function injectSdk(document, settings, onload) {
@@ -210,7 +278,7 @@
       if (!canReportFrontendError()) return false;
       const scope = typeof globalThis === "undefined" ? null : globalThis;
       if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
-      const name = (error && typeof error.name === "string" && error.name) || "Error";
+      const name = safeErrorName(error.name);
       const nowMs = Date.now();
       if (frontendErrorSuppressed(`${operation}\n${String(name).slice(0, 100)}`, nowMs)) {
         noteFrontendErrorRepeat(operation);
@@ -218,7 +286,7 @@
       }
       if (frontendErrorRateLimited(nowMs)) return false;
       const wrapped = new Error(operation);
-      wrapped.name = String(name).slice(0, 100) || "Error";
+      wrapped.name = name;
       scope.Sentry.captureException(wrapped, {
         level: "warning",
         tags: { "error.operation": operation }

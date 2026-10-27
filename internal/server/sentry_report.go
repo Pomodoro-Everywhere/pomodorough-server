@@ -28,13 +28,13 @@ var (
 	errorSampleJitter = func() float64 { return rand.Float64() }
 )
 
-// sanitizedMonitoringError replaces a reported error with a static
+// SanitizedMonitoringError replaces a reported error with a static
 // operation-scoped value. Request handling already logs the full error, so
 // monitoring only needs the pattern: raw messages can carry task titles,
 // tokens, emails, or URLs. The Go type name is static code identity, never
 // user content. The bounded cause class distinguishes unrelated root
 // causes that share one wrapper type.
-func sanitizedMonitoringError(operation string, err error) error {
+func SanitizedMonitoringError(operation string, err error) error {
 	if operation == "" {
 		return errors.New("internal error")
 	}
@@ -52,7 +52,7 @@ func reportPanicToErrorMonitoring(recovered any, request *http.Request) {
 		setRoutePatternTags(hub, request)
 	}
 	if err, ok := recovered.(error); ok {
-		hub.CaptureException(sanitizedMonitoringError("panic serving request", err))
+		hub.CaptureException(SanitizedMonitoringError("panic serving request", err))
 		return
 	}
 	hub.CaptureException(errors.New("panic serving request"))
@@ -84,7 +84,7 @@ func reportInternalErrorToErrorMonitoring(err error, request *http.Request, oper
 		noteInternalErrorRepeat(hub, operation, repeats)
 		return
 	}
-	hub.CaptureException(sanitizedMonitoringError(operation, err))
+	hub.CaptureException(SanitizedMonitoringError(operation, err))
 }
 
 // internalErrorKey groups repeats by static operation, route pattern, and

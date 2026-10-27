@@ -12,7 +12,10 @@ import (
 	"pomodorough/internal/authn"
 )
 
-// Run with POMODOROUGH_FOOTER_BROWSER=1 and an installed Playwright Chromium browser.
+// From the server root, run npm ci and npx playwright install chromium first.
+// Run with POMODOROUGH_FOOTER_BROWSER=1; package-lock.json pins Playwright and axe-core.
+// POMODOROUGH_PLAYWRIGHT_MODULE and POMODOROUGH_AXE_PATH override their modules independently;
+// CHROMIUM_EXECUTABLE_PATH can select an existing Chromium binary instead of the installed browser.
 func TestBrowserFooterContrast(t *testing.T) {
 	if os.Getenv("POMODOROUGH_FOOTER_BROWSER") != "1" {
 		t.Skip("set POMODOROUGH_FOOTER_BROWSER=1 to run the real-browser footer regression")

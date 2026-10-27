@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -9,6 +8,8 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+
+	"pomodorough/internal/server"
 )
 
 const defaultErrorMonitoringEnvironment = "production"
@@ -65,6 +66,11 @@ func sentryBeforeSend(event *sentry.Event, hint *sentry.EventHint) *sentry.Event
 	if event == nil {
 		return nil
 	}
+	if hint != nil {
+		if failure, ok := hint.OriginalException.(*processMonitoringError); ok {
+			return sanitizedProcessEvent(event, failure)
+		}
+	}
 	event.Request = nil
 	event.User = sentry.User{}
 	event.Breadcrumbs = keepLastBreadcrumb(event.Breadcrumbs)
@@ -95,12 +101,11 @@ func captureMainPanic(logger *slog.Logger) {
 	if recovered == nil {
 		return
 	}
+	err, _ := recovered.(error)
+	failure := newProcessMonitoringError("panic in main", err)
+	// Local operational logs retain the failure; only static diagnostics go to Sentry.
 	logger.Error("panic in main", "error", recovered)
-	if err, ok := recovered.(error); ok {
-		sentry.CaptureException(err)
-	} else {
-		sentry.CaptureException(fmt.Errorf("panic in main: %v", recovered))
-	}
+	sentry.CaptureException(failure)
 	sentry.Flush(2 * time.Second)
 	panic(recovered)
 }
@@ -108,8 +113,48 @@ func captureMainPanic(logger *slog.Logger) {
 // failStartup reports a fatal startup error to monitoring (no-op when
 // disabled), logs it, and exits. Buffered monitoring events flush before exit.
 func failStartup(logger *slog.Logger, message string, err error) {
+	failure := newProcessMonitoringError(startupMonitoringOperation(message), err)
+	// Local operational logs retain the failure; only static diagnostics go to Sentry.
 	logger.Error(message, "error", err)
-	sentry.CaptureException(err)
+	sentry.CaptureException(failure)
 	sentry.Flush(2 * time.Second)
 	os.Exit(1)
+}
+
+// processMonitoringError never wraps the original failure: SDK unwrapping must
+// not recover raw operational errors containing credentials or filesystem paths.
+type processMonitoringError struct {
+	operation string
+	value     string
+}
+
+func (failure *processMonitoringError) Error() string { return failure.value }
+
+func newProcessMonitoringError(operation string, err error) *processMonitoringError {
+	return &processMonitoringError{
+		operation: operation,
+		value:     server.SanitizedMonitoringError(operation, err).Error(),
+	}
+}
+
+func startupMonitoringOperation(message string) string {
+	switch message {
+	case "invalid build identity", "write build identity", "invalid configuration",
+		"initialize shared core", "lock storage", "initialize storage",
+		"initialize server", "server stopped":
+		return message
+	default:
+		return "startup failure"
+	}
+}
+
+// Rebuild process events after scope and SDK processors run. A drop-list would
+// miss raw values in exception chains, stack frames, or future SDK fields.
+func sanitizedProcessEvent(event *sentry.Event, failure *processMonitoringError) *sentry.Event {
+	return &sentry.Event{
+		EventID: event.EventID, Timestamp: event.Timestamp, Level: event.Level,
+		Release: event.Release, Environment: event.Environment, Platform: "go",
+		Tags:      map[string]string{"error.operation": failure.operation},
+		Exception: []sentry.Exception{{Type: "process failure", Value: failure.value}},
+	}
 }

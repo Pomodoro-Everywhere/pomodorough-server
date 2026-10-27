@@ -35,6 +35,8 @@ pomodorough.env
 .DS_Store
 .cache_ggshield
 .ruff_cache/
+.complexipy_cache/
+/.release-gates/
 /.coverage
 /.coverage.*
 /coverage.json

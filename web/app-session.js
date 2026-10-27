@@ -176,6 +176,8 @@
       this.authenticatedContexts = new WeakMap();
       this.sessionCompletionContexts = new WeakMap();
       this.deletionMarkerFailureNames = new Set();
+      this.logoutMarkerFailureNames = new Set();
+      this.logoutCleanupRetryRequired = false;
       this.deletionAttemptRecords = new WeakMap();
     }
 
@@ -491,9 +493,24 @@
           userId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null
         }));
         this.host.localStorage.setItem(PENDING_LOGOUT_KEY, "1");
-      } catch {
+        this.logoutMarkerFailureNames.clear();
+        return true;
+      } catch (error) {
         // IndexedDB is still cleared below when durable marker storage is unavailable.
+        this.reportLogoutMarkerFailure(error);
+        return false;
       }
+    }
+
+    reportLogoutMarkerFailure(error) {
+      const name = ["QuotaExceededError", "SecurityError"].includes(error?.name) ? error.name : "StorageError";
+      if (this.logoutMarkerFailureNames.has(name)) return;
+      this.logoutMarkerFailureNames.add(name);
+      // Storage exceptions can contain account credentials or marker contents.
+      const failure = new Error("Sign-out recovery marker storage failed.");
+      failure.name = name;
+      this.host.console.warn("Pomodorough sign-out recovery marker storage failed:", failure);
+      reportFrontendError(failure, "session.logout.marker-write-failed");
     }
 
     clearPendingLogout() {
@@ -653,6 +670,16 @@
     }
 
     async retryPendingLogout() {
+      if (this.logoutCleanupRetryRequired) {
+        if (this.state.logoutRecoveryBusy) return false;
+        this.state.logoutRecoveryBusy = true;
+        this.use.render();
+        let cleaned = false;
+        try { cleaned = await this.logout(); }
+        finally { this.state.logoutRecoveryBusy = false; this.use.render(); }
+        if (cleaned) this.redirectToLogin();
+        return cleaned;
+      }
       return this.resumePendingStartup(this.use.captureDatabaseContext());
     }
 
@@ -663,6 +690,7 @@
       this.use.render();
       let completed = context;
       try {
+        if (this.logoutCleanupRetryRequired) return false;
         const outcome = await this.use.resumeStartup(context);
         completed = outcome?.context || context;
         return outcome?.result ?? outcome;
@@ -840,8 +868,17 @@
       } catch (error) {
         if (!accountOperation.isCurrent(context)) return false;
         completion.reportFailure(error);
+        if (completion.durableRecovery === false) {
+          this.logoutCleanupRetryRequired = true;
+          this.state.logoutRecoveryRequired = true;
+          this.use.showNotice(this.use.tr("account.logout.cleanupFailed", { error: error.message },
+            `Signed-out local data could not be cleared: ${error.message}`));
+          this.use.render();
+          return false;
+        }
       }
       if (!accountOperation.isCurrent(effectsContext)) return false;
+      this.logoutCleanupRetryRequired = false;
       this.redirectToLogin();
       return true;
     }
@@ -958,7 +995,7 @@
       }
       context.assertCurrent();
       this.elements.logoutButton.disabled = true;
-      this.markPendingLogout();
+      const durableRecovery = this.markPendingLogout();
       const cleanupContext = this.use.captureAccountContext();
       const identity = this.use.cleanupIdentity();
       this.stream.closeRevisionStream();
@@ -977,8 +1014,8 @@
       const serverRevoked = await this.settleDetachedRevocation(revocationRequest, revocation, cleanupContext);
       if (!accountOperation.isCurrent(cleanupContext)) return;
       this.use.assertCleanupIdentity(identity);
-      await this.completeAccountCleanup(identity, cleanupContext, {
-        clearMarker: serverRevoked, reportFailure: (error) => {
+      return this.completeAccountCleanup(identity, cleanupContext, {
+        clearMarker: serverRevoked, durableRecovery, reportFailure: (error) => {
           this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
           reportFrontendError(error, "session.logout.cleanup-incomplete");
         }

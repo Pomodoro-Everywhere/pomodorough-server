@@ -293,15 +293,36 @@ async function clickToStatus(page, id, status) {
   assert.equal(await page.evaluate(() => window.scrollX), 0, `${id} pointer keeps scrollX zero`);
 }
 
-async function tabReachesActions(page, scenario) {
+function assertActionFocus(active, label, forcedColors) {
+  assert.equal(active.focusVisible, true, `${label} matches focus-visible`);
+  if (forcedColors) {
+    assert.equal(active.outline, "solid", `${label} forced-colors outline`);
+    assert.equal(active.width, 3, `${label} forced-colors outline width`);
+    assert.equal(active.offset, -6, `${label} forced-colors outline stays inside clip`);
+    assert.notEqual(active.color, "rgba(0, 0, 0, 0)", `${label} forced-colors outline is opaque`);
+    assert.equal(active.shadow, "none", `${label} forced-colors replaces shadows`);
+    return;
+  }
+  assert.equal(active.outline, "none", `${label} clipped outline replaced`);
+  for (const [color, spread] of [["247, 248, 242", 3], ["17, 25, 35", 6]]) {
+    assert.ok(active.shadow.includes(`rgb(${color}) 0px 0px 0px ${spread}px inset`),
+      `${label} visible focus inset ${spread}px: ${active.shadow}`);
+  }
+}
+
+async function tabReachesActions(page, scenario, forcedColors = false) {
   await page.evaluate(() => { document.getElementById("timerToggle").focus({ preventScroll: true }); });
   const seen = [];
   for (let i = 0; i < 8; i += 1) {
     await page.keyboard.press("Tab");
-    const active = await page.evaluate(() => ({ id: document.activeElement.id,
-      outline: getComputedStyle(document.activeElement).outlineStyle,
-      width: parseFloat(getComputedStyle(document.activeElement).outlineWidth),
-      x: window.scrollX }));
+    const active = await page.evaluate(() => {
+      const el = document.activeElement;
+      const style = getComputedStyle(el);
+      return { id: el.id, focusVisible: el.matches(":focus-visible"),
+        outline: style.outlineStyle, width: parseFloat(style.outlineWidth),
+        offset: parseFloat(style.outlineOffset), color: style.outlineColor,
+        shadow: style.boxShadow, x: window.scrollX };
+    });
     assert.equal(active.x, 0, `${scenario.name} tab keeps scrollX zero`);
     seen.push(active);
     if (seen.some((s) => s.id === "finishButton") && seen.some((s) => s.id === "cancelButton")) break;
@@ -311,8 +332,24 @@ async function tabReachesActions(page, scenario) {
     const at = seen.findIndex((s) => s.id === id);
     assert.ok(at > order, `${scenario.name} tab reaches ${id} in order`);
     order = at;
-    assert.notEqual(seen[at].outline, "none", `${scenario.name} ${id} visible focus`);
-    assert.ok(seen[at].width >= 2, `${scenario.name} ${id} outline width`);
+    assertActionFocus(seen[at], `${scenario.name} ${id}`, forcedColors);
+  }
+}
+
+async function withTimerCleanup(page, run) {
+  try {
+    await run();
+  } finally {
+    await page.waitForFunction(() => !window.PomodoroughAppTest.state.actionLocked,
+      null, { timeout: 15000 });
+    await page.evaluate(() => {
+      const app = window.PomodoroughAppTest;
+      app.stopCompletionAlert();
+      if (app.state.timer.status !== "idle") document.getElementById("cancelButton").click();
+    });
+    await page.waitForFunction(() => window.PomodoroughAppTest.state.timer.status === "idle",
+      null, { timeout: 15000 });
+    assert.deepEqual(await timerInfo(page), { status: "idle", id: null }, "scenario cleanup restores idle");
   }
 }
 
@@ -326,6 +363,12 @@ async function runScenario(page, cdp, scenario) {
   assert.ok(runningId, `${scenario.name} running has an identity`);
   await assertBothPasses(page, scenario);
   await tabReachesActions(page, scenario);
+  try {
+    await page.emulateMedia({ forcedColors: "active" });
+    await tabReachesActions(page, scenario, true);
+  } finally {
+    await page.emulateMedia({ forcedColors: "none" });
+  }
   await keyToStatus(page, "timerToggle", "Space", "paused");
   assert.equal((await timerInfo(page)).id, runningId, `${scenario.name} pause retains identity`);
   await keyToStatus(page, "timerToggle", "Space", "running");
@@ -363,13 +406,44 @@ test("R49-S07 Timer action bank fits every enabled descendant", { timeout: 300_0
     const { context, page, cdp, errors } = await openLocale(browser, locale);
     try {
       for (const scenario of scenarios().filter((s) => s.locale === locale)) {
-        await t.test(scenario.name, () => runScenario(page, cdp, scenario));
+        await t.test(scenario.name, () => withTimerCleanup(page, () => runScenario(page, cdp, scenario)));
       }
     } finally {
-      assert.deepEqual(errors, [], `${locale} no page errors`);
       try { await cdp.detach(); } catch {}
       await context.close();
+      assert.deepEqual(errors, [], `${locale} no page errors`);
     }
+  }
+});
+
+test("R53-S02 invisible focus fails without contaminating the next scenario", { timeout: 120_000 }, async (t) => {
+  const browser = await launchBrowser(t);
+  const { context, page, cdp, errors } = await openLocale(browser, "en");
+  const scenario = scenarios()[0];
+  try {
+    await emulate(page, cdp, scenario);
+    for (const shadow of ["none", "inset 0 0 0 3px transparent, inset 0 0 0 6px transparent"]) {
+      await assert.rejects(withTimerCleanup(page, async () => {
+        await keyToStatus(page, "timerToggle", "Enter", "running");
+        await page.evaluate((shadow) => {
+          for (const id of ["finishButton", "cancelButton"]) {
+            document.getElementById(id).style.setProperty("box-shadow", shadow, "important");
+          }
+        }, shadow);
+        await tabReachesActions(page, scenario);
+      }), /finishButton visible focus inset 3px/);
+      assert.deepEqual(await timerInfo(page), { status: "idle", id: null }, "failed focus check leaves idle");
+    }
+    await page.evaluate(() => {
+      for (const id of ["finishButton", "cancelButton"]) {
+        document.getElementById(id).style.removeProperty("box-shadow");
+      }
+    });
+    await withTimerCleanup(page, () => runScenario(page, cdp, scenario));
+  } finally {
+    try { await cdp.detach(); } catch {}
+    await context.close();
+    assert.deepEqual(errors, [], "negative focus controls have no page errors");
   }
 });
 

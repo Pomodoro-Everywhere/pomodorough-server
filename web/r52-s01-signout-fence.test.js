@@ -58,6 +58,7 @@ function sessionFixture(overrides = {}) {
   const cleanup = require("./app-storage.js").create({ state, external: { host, syncCore, syncStorage }, use: {} });
   const use = {
     captureAccountContext: () => incarnationFixture.captureAccountContext(state, host, () => database),
+    captureDatabaseContext: () => incarnationFixture.captureAccountContext(state, host, () => database),
     cleanupIdentity: cleanup.cleanupIdentity, assertCleanupIdentity: cleanup.assertCleanupIdentity,
     database: () => database, tabId: () => "tab-1", needsBootstrapResolution: () => false,
     clearLocalData: async () => {
@@ -155,4 +156,66 @@ test("R52-S01 late edit after confirmed sign-out fails closed at the control gat
   assert.equal(markerOf(fixture), "1");
   assert.equal(controlsBlocked(fixture), true);
   assert.throws(() => inFlight.assertCurrent(), { name: "AccountOwnershipError" });
+});
+
+test("R53-S01 combined storage, revocation, and cleanup failures stay fenced until retry commits", async () => {
+  const storage = memoryStorage();
+  storage.setItem = () => { throw Object.assign(new Error("private marker contents"), { name: "SecurityError" }); };
+  const fixture = sessionFixture({ localStorage: storage,
+    host: { fetch: async () => { throw new Error("offline"); } } });
+  const clearLocalData = fixture.use.clearLocalData;
+  const database = fixture.use.database();
+  fixture.use.clearLocalData = async () => { throw new Error("transaction abort"); };
+  await fixture.actions.logout();
+  assert.equal(markerOf(fixture), null);
+  assert.equal(storage.getItem("pomodoroughPendingLogoutOwner"), null);
+  assert.equal(fixture.use.database(), database);
+  assert.equal(controlsBlocked(fixture), true);
+  assert.equal(fixture.state.logoutRecoveryBusy, false);
+  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /transaction abort/.test(entry[1])));
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 0);
+  fixture.use.resumeStartup = async () => { assert.fail("volatile recovery must not resume ordinary startup"); };
+  fixture.use.resetSyncRetry = () => {};
+  await fixture.actions.handleOnline();
+  assert.equal(controlsBlocked(fixture), true);
+  await fixture.actions.retryPendingLogout();
+  assert.equal(fixture.use.database(), database);
+  assert.equal(controlsBlocked(fixture), true);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 0);
+  const warnings = fixture.calls.filter((entry) => entry[0] === "warn" && /marker storage failed/.test(entry[1]));
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][2].name, "SecurityError");
+  assert.equal(warnings[0][2].message, "Sign-out recovery marker storage failed.");
+  fixture.use.clearLocalData = clearLocalData;
+  await fixture.actions.retryPendingLogout();
+  assert.equal(fixture.use.database(), null);
+  assert.equal(fixture.state.logoutRecoveryBusy, false);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 1);
+});
+
+test("R53-S01 durable recovery still permits navigation after cleanup aborts", async () => {
+  const fixture = sessionFixture({ host: { fetch: async () => { throw new Error("offline"); } },
+    use: { clearLocalData: async () => { throw new Error("transaction abort"); } } });
+  const database = fixture.use.database();
+  await fixture.actions.logout();
+  assert.equal(markerOf(fixture), "1");
+  assert.equal(fixture.use.database(), database);
+  assert.equal(controlsBlocked(fixture), true);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 1);
+});
+
+test("R53-S01 marker diagnostics classify errors and never report storage exception contents", (t) => {
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => { globalThis.PomodoroughSentryClient = previous; });
+  const fixture = sessionFixture();
+  for (const name of ["SecurityError", "QuotaExceededError", "UntrustedCredentialName"]) {
+    fixture.localStorage.setItem = () => { throw Object.assign(new Error("secret credentials"), { name }); };
+    assert.equal(fixture.actions.markPendingLogout(), false);
+    assert.equal(fixture.actions.markPendingLogout(), false);
+  }
+  assert.deepEqual(reports.map(([error, operation]) => [error.name, error.message, operation]),
+    ["SecurityError", "QuotaExceededError", "StorageError"].map((name) =>
+      [name, "Sign-out recovery marker storage failed.", "session.logout.marker-write-failed"]));
 });

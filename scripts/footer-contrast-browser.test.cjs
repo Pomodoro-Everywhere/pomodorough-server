@@ -2,16 +2,12 @@
 
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
 const { chromium } = require(process.env.POMODOROUGH_PLAYWRIGHT_MODULE || "playwright");
 const fixture = JSON.parse(readFileSync(0, "utf8"));
 
 function axeFile() {
-  const mod = process.env.POMODOROUGH_PLAYWRIGHT_MODULE || "";
-  if (process.env.POMODOROUGH_AXE_PATH) return process.env.POMODOROUGH_AXE_PATH;
-  if (mod.includes("server-browser-tools")) return path.join(path.dirname(mod), "axe-core", "axe.min.js");
-  return path.join(path.dirname(require.resolve(mod)), "axe-core", "axe.min.js");
+  return process.env.POMODOROUGH_AXE_PATH || require.resolve("axe-core/axe.min.js");
 }
 
 function luminance(r, g, b) {
