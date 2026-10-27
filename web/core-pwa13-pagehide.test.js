@@ -84,9 +84,9 @@ function installRelease(current, timing) {
 async function prepared(t, timing = "before transaction") {
   const current = await fixture(t, "running");
   const bytes = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
-  assert.equal(current.core.call("core.version", {}).coreVersion, "0.52.0");
-  assert.equal(bytes.length, 3022796);
-  assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), "cb2d552c7b016905e6bee6a74f4f1830188d09c2d37966f951c430b8efa0584c");
+  assert.equal(current.core.call("core.version", {}).coreVersion, "0.53.0");
+  assert.equal(bytes.length, 2883081);
+  assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), "1e72c2bbc178b077fdcc98210f06f66f4bc5332b77be5de83be19792376f4bd4");
   Object.assign(current, { entered: deferred(), release: deferred(), completed: deferred(), releases: [], events: [], scopes: [],
     originalDatabase: current.stale.use.database() });
   const capture = current.stale.use.captureDatabaseContext;
