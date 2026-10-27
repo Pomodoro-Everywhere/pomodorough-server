@@ -263,6 +263,8 @@ jobs:
           cache: npm
       - name: Install PWA dependencies
         run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium-headless-shell
       - name: Test PWA
         run: npm run test:web
       - name: Check PWA syntax
