@@ -27,6 +27,7 @@
     "one": "‏⟦{count} chàngë ïs wàïtïng tö sync. Sïgnïng öût wïll dïscàrd ït. Cöntïnûë?⟧‏",
     "other": "‏⟦{count} chàngës àrë wàïtïng tö sync. Sïgnïng öût wïll dïscàrd thëm. Cöntïnûë?⟧‏"
   },
+  "account.logout.pendingUnavailable": "‏⟦Sïgn öût dïd nöt fïnïsh bëcàûsë pëndïng chàngës cöûld nöt bë rëàd. Yöûr löcàl dàtà wàs këpt. Chëck bröwsër störàgë ànd rëtry.⟧‏",
   "account.logout.cleanupFailed": "‏⟦Sïgnëd-öût löcàl dàtà cöûld nöt bë clëàrëd: {error}⟧‏",
   "account.logout.failed": "‏⟦Sïgn öût fàïlëd ({status}).⟧‏",
   "account.logout.revocationPending": "‏⟦Pëndïng sïgn-öût cöûld nöt bë rëvökëd yët.⟧‏",

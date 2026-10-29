@@ -37,7 +37,7 @@ function viewState(overrides = {}) {
 function viewFixture({ state: stateOverrides = {}, tr, plan = null } = {}) {
   const state = viewState({ bootstrapPlan: plan, ...stateOverrides });
   const names = ["bootstrapTitle", "bootstrapSummary", "bootstrapDialog", "bootstrapChoices",
-    "bootstrapConfirmation", "bootstrapError", "bootstrapRetry", "bootstrapSignOut",
+    "bootstrapConfirmation", "bootstrapError", "bootstrapSignOutError", "bootstrapRetry", "bootstrapSignOut",
     "bootstrapConfirm", "bootstrapCancel", "logoutButton", "deleteAccountButton",
     "conflictDismiss", "notice", "noticeText", "noticeDismiss"];
   const elements = Object.fromEntries(names.map((name) => [name, stubElement()]));
@@ -85,6 +85,31 @@ test("bootstrap limit recovery localizes title and summary", () => {
   assert.equal(fixture.elements.bootstrapTitle.textContent, "Local queue too large");
   assert.equal(fixture.elements.bootstrapSummary.textContent,
     "Upload stopped before any local or remote data changed.");
+});
+
+test("R54-S02 limit recovery repeats a refused sign-out inside the dialog", () => {
+  const refusal = english["account.logout.pendingUnavailable"];
+  const fixture = viewFixture({ state: { bootstrapLimitError: "too many operations", bootstrapSignOutError: refusal } });
+  fixture.view.renderBootstrapDialog();
+  assert.equal(fixture.elements.bootstrapSignOut.hidden, false);
+  assert.equal(fixture.elements.bootstrapSignOutError.hidden, false);
+  assert.equal(fixture.elements.bootstrapSignOutError.textContent, refusal);
+  assert.equal(fixture.elements.bootstrapError.textContent, "too many operations");
+  fixture.state.bootstrapSignOutError = null;
+  fixture.view.renderBootstrapDialog();
+  assert.equal(fixture.elements.bootstrapSignOutError.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.textContent, "");
+});
+
+test("R54-S02 dialog sign-out refusal stays hidden outside limit recovery", () => {
+  const refusal = english["account.logout.pendingUnavailable"];
+  const fixture = viewFixture({ state: { bootstrapSignOutError: refusal },
+    plan: { mode: "choose", localHistoryCount: 1, remoteHistoryCount: 2 } });
+  fixture.elements.bootstrapSignOutError.hidden = false;
+  fixture.view.renderBootstrapDialog();
+  assert.equal(fixture.elements.bootstrapSignOut.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.textContent, "");
 });
 
 test("bootstrap summary routes every fragment through i18n keys", () => {

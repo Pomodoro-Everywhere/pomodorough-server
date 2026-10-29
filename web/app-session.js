@@ -934,15 +934,21 @@
       const settlement = { settled: false, revoked: false, timedOut: false };
       request.then((revoked) => {
         settlement.settled = true;
-        settlement.revoked = revoked;
+        settlement.revoked = revoked === true;
+        // A fulfilled false means no CSRF token was available, so no revoke
+        // request was sent and the server session may still be valid.
+        if (!settlement.revoked) this.reportDeferredRevocation(new Error("missing_csrf"), settlement, context);
       }, (error) => {
         settlement.settled = true;
-        if (settlement.timedOut || error?.name === "AccountOwnershipError"
-          || !accountOperation.isCurrent(context)) return;
-        this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
-        reportFrontendError(error, "session.logout.revocation-deferred");
+        if (error?.name !== "AccountOwnershipError") this.reportDeferredRevocation(error, settlement, context);
       });
       return settlement;
+    }
+
+    reportDeferredRevocation(error, settlement, context) {
+      if (settlement.timedOut || !accountOperation.isCurrent(context)) return;
+      this.host.console.warn("Pomodorough server revocation deferred until reconnect:", error);
+      reportFrontendError(error, "session.logout.revocation-deferred");
     }
 
     async settleDetachedRevocation(request, settlement, context) {
@@ -950,7 +956,7 @@
       const timeout = new Promise((resolve) => {
         timer = this.host.setTimeout(() => resolve(false), timingMs("logoutRevocation", 10_000));
       });
-      const revoked = await Promise.race([request.then(() => true, () => false), timeout]);
+      const revoked = await Promise.race([request.then((revoked) => revoked === true, () => false), timeout]);
       if (timer !== null) this.host.clearTimeout?.(timer);
       if (!revoked && !settlement.settled) {
         // Bounded wait elapsed with revocation still pending: keep durable
@@ -972,18 +978,37 @@
         + this.state.pendingSelectedTaskOperations.length;
     }
 
-    async logout() {
-      const context = this.use.captureAccountContext();
+    async readPendingQueuesBeforeLogout(context) {
       try {
         await this.use.refreshAllPendingOperations(context);
         context.assertCurrent();
         await this.syncStorage.guardedMutation(this.use.database(), [], () => {}, { ...context, allowBootstrap: true });
       } catch (error) {
-        if (!accountOperation.isCurrent(context)) return;
+        if (!accountOperation.isCurrent(context)) return false;
         this.host.console.warn("Pomodorough pending queues unavailable before logout:", error);
         reportFrontendError(error, "session.logout.pending-queues");
-        return;
+        // Unread queues could hide changes the pending-count prompt must
+        // offer, so sign-out stays refused. The notice makes the refusal
+        // visible; the control that started it stays enabled for retry.
+        // The modal recovery dialog covers the notice, so the dialog
+        // repeats the message beside its own Sign out control.
+        const message = this.use.tr("account.logout.pendingUnavailable", {},
+          "Sign out did not finish because pending changes could not be read. Your local data was kept. Check browser storage and retry.");
+        this.use.showNotice(message);
+        this.state.bootstrapSignOutError = message;
+        this.use.render();
+        return false;
       }
+      if (this.state.bootstrapSignOutError) {
+        this.state.bootstrapSignOutError = null;
+        this.use.render();
+      }
+      return true;
+    }
+
+    async logout() {
+      const context = this.use.captureAccountContext();
+      if (!await this.readPendingQueuesBeforeLogout(context)) return;
       context.assertCurrent();
       const pendingCount = this.pendingOperationCount();
       if (pendingCount > 0) {

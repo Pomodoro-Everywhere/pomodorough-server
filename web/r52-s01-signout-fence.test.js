@@ -5,6 +5,9 @@ const assert = require("node:assert/strict");
 const incarnationFixture = require("./test/incarnation-fixture.js");
 const stateModule = require("./app-state.js");
 const sessionModule = require("./app-session.js");
+const { createI18n } = require("./i18n.js");
+
+const catalogs = { en: require("./locales/en.json"), "ar-XB": require("./locales/ar-XB.json") };
 
 function sessionState(overrides = {}) {
   return {
@@ -136,6 +139,146 @@ test("R52-S01 successful revocation clears marker and recovery fence", async () 
   assert.equal(fixture.state.logoutRecoveryRequired, false);
   assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 1);
 });
+
+function captureReports(t) {
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) =>
+    reports.push([error.message, operation]) };
+  t.after(() => { globalThis.PomodoroughSentryClient = previous; });
+  return reports;
+}
+
+function missingCsrfFixture(online) {
+  return sessionFixture({ state: { csrfToken: null, authenticated: false,
+    sessionIdentityValidated: false, offlineOwnerMode: true }, host: { navigator: { onLine: online } } });
+}
+
+function serveSession(fixture, csrfToken) {
+  fixture.host.navigator.onLine = true;
+  fixture.host.fetch = async (url, options) => {
+    fixture.fetchCalls.push([url, options]);
+    return { ok: true, status: 200, json: async () => ({
+      user: incarnationFixture.accountUser("user-1"), csrfToken
+    }) };
+  };
+}
+
+function assertRecoveryRetained(fixture) {
+  assert.equal(markerOf(fixture), "1");
+  assert.deepEqual(JSON.parse(fixture.localStorage.getItem("pomodoroughPendingLogoutOwner")),
+    { userId: incarnationFixture.ownerId("user-1") });
+  assert.equal(fixture.state.logoutRecoveryRequired, true);
+  assert.equal(controlsBlocked(fixture), true);
+}
+
+for (const online of [true, false]) {
+  test(`R54-S01 missing CSRF retains recovery until authenticated revoke (online=${online})`, async (t) => {
+    const reports = captureReports(t);
+    const fixture = missingCsrfFixture(online);
+    await fixture.actions.logout();
+    assert.equal(fixture.fetchCalls.length, 0);
+    assert.equal(fixture.calls.filter((entry) => entry === "clear").length, 1);
+    assertRecoveryRetained(fixture);
+    const warnings = fixture.calls.filter((entry) => entry[0] === "warn");
+    assert.deepEqual(warnings.map((entry) => [entry[1], entry[2].message]),
+      [["Pomodorough server revocation deferred until reconnect:", "missing_csrf"]]);
+    assert.deepEqual(reports, [["missing_csrf", "session.logout.revocation-deferred"]]);
+    assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, online ? 1 : 0);
+    serveSession(fixture, "fresh-csrf");
+    await fixture.actions.loadSession(fixture.use.captureAccountContext());
+    assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/me", "/api/v1/auth/logout"]);
+    assert.equal(fixture.fetchCalls[1][1].headers["X-CSRF-Token"], "fresh-csrf");
+    assert.equal(markerOf(fixture), null);
+    assert.equal(fixture.localStorage.getItem("pomodoroughPendingLogoutOwner"), null);
+    assert.equal(fixture.state.logoutRecoveryRequired, false);
+    assert.equal(reports.length, 1);
+  });
+}
+
+test("R54-S01 recovery without a fresh CSRF token keeps markers and reports once per attempt", async (t) => {
+  const reports = captureReports(t);
+  const fixture = missingCsrfFixture(false);
+  await fixture.actions.logout();
+  assertRecoveryRetained(fixture);
+  serveSession(fixture, "");
+  await assert.rejects(fixture.actions.loadSession(fixture.use.captureAccountContext()),
+    { message: "Pending sign-out could not be revoked yet." });
+  assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/me"]);
+  assertRecoveryRetained(fixture);
+  assert.deepEqual(reports, [["missing_csrf", "session.logout.revocation-deferred"]]);
+  serveSession(fixture, "fresh-csrf");
+  await fixture.actions.loadSession(fixture.use.captureAccountContext());
+  assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/me", "/api/v1/me", "/api/v1/auth/logout"]);
+  assert.equal(markerOf(fixture), null);
+  assert.equal(fixture.state.logoutRecoveryRequired, false);
+});
+
+function catalogTr(locale) {
+  const i18n = createI18n({ catalogs, locale });
+  return (key, values = {}, fallback = key) => {
+    const translated = i18n.t(key, values);
+    return translated && translated !== key ? translated : fallback;
+  };
+}
+
+function unreadableQueueFixture(boundary, locale) {
+  const failure = { active: true };
+  const unreadable = async () => {
+    if (failure.active) throw Object.assign(new Error("IndexedDB read failed"), { name: "UnknownError" });
+  };
+  const fixture = sessionFixture({ state: { pending: [{ id: "queued-1" }] },
+    host: { confirm: () => { fixture.calls.push("confirm"); return true; } },
+    syncStorage: boundary === "guardedMutation" ? { guardedMutation: unreadable } : {},
+    use: { tr: catalogTr(locale),
+      ...(boundary === "refreshAllPendingOperations" ? { refreshAllPendingOperations: unreadable } : {}) } });
+  return { failure, fixture };
+}
+
+function assertLogoutRefused(fixture, database) {
+  assert.equal(fixture.fetchCalls.length, 0);
+  assert.equal(fixture.calls.includes("confirm"), false);
+  assert.equal(fixture.calls.includes("clear"), false);
+  assert.equal(fixture.use.database(), database);
+  assert.deepEqual(fixture.state.pending, [{ id: "queued-1" }]);
+  assert.equal(markerOf(fixture), null);
+  assert.equal(fixture.localStorage.getItem("pomodoroughPendingLogoutOwner"), null);
+  assert.equal(fixture.state.logoutRecoveryRequired, false);
+  assert.equal(controlsBlocked(fixture), false);
+  assert.equal(fixture.elements.logoutButton.disabled, false);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 0);
+}
+
+for (const boundary of ["refreshAllPendingOperations", "guardedMutation"]) {
+  for (const locale of ["en", "ar-XB"]) {
+    test(`R54-S02 unreadable pending queues refuse sign-out with localized retry feedback (${boundary}, ${locale})`, async (t) => {
+      const reports = captureReports(t);
+      const { failure, fixture } = unreadableQueueFixture(boundary, locale);
+      const database = fixture.use.database();
+      const notice = catalogs[locale]["account.logout.pendingUnavailable"];
+      for (const attempts of [1, 2]) {
+        await fixture.actions.logout();
+        assertLogoutRefused(fixture, database);
+        assert.deepEqual(fixture.calls.filter((entry) => entry[0] === "notice"), Array(attempts).fill(["notice", notice]));
+        assert.equal(fixture.state.bootstrapSignOutError, notice);
+        assert.equal(fixture.calls.filter((entry) => entry === "render").length, attempts);
+        assert.deepEqual(fixture.calls.filter((entry) => entry[0] === "warn").map((entry) => entry[1]),
+          Array(attempts).fill("Pomodorough pending queues unavailable before logout:"));
+        assert.deepEqual(reports, Array(attempts).fill(["IndexedDB read failed", "session.logout.pending-queues"]));
+      }
+      failure.active = false;
+      await fixture.actions.logout();
+      assert.equal(fixture.calls.filter((entry) => entry === "confirm").length, 1);
+      assert.equal(fixture.calls.filter((entry) => entry === "clear").length, 1);
+      assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/auth/logout"]);
+      assert.equal(markerOf(fixture), null);
+      assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 1);
+      assert.equal(fixture.calls.filter((entry) => entry[0] === "notice").length, 2);
+      assert.equal(fixture.state.bootstrapSignOutError, null);
+      assert.equal(reports.length, 2);
+    });
+  }
+}
 
 test("R52-S01 cancelled sign-out sends no request and sets no fence", async () => {
   const fixture = sessionFixture({ state: { pending: [{}] }, host: { confirm: () => false } });

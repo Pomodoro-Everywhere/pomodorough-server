@@ -101,11 +101,11 @@ test("every shipped privacy link uses the contractual application URL", () => {
 
 test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["app.css"]) {
-    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
-    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=20`));
+    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=21`));
+    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=21`));
   }
-  assert.match(appSource, /\/app\.js\?v=44/);
-  assert.match(workerSource, /\/app\.js\?v=44/);
+  assert.match(appSource, /\/app\.js\?v=45/);
+  assert.match(workerSource, /\/app\.js\?v=45/);
   assert.match(appSource, /\/shared-core-metadata\.js\?v=4/);
   assert.match(appSource, /\/shared-core\.js\?v=7/);
   assert.match(workerSource, /\/shared-core-metadata\.js\?v=4/);
@@ -123,20 +123,20 @@ test("shell entry assets use cache-busting version URLs", () => {
   assert.match(workerSource, /\/sync-core\.js\?v=28/);
   assert.match(appSource, /\/sync-storage\.js\?v=34/);
   assert.match(workerSource, /\/sync-storage\.js\?v=34/);
-  assert.match(appSource, /\/i18n\.js\?v=3/);
-  for (const asset of ["/i18n.js?v=3", "/locales/en.json?v=2", "/locales/ar-XB.json?v=2"]) {
+  assert.match(appSource, /\/i18n\.js\?v=4/);
+  for (const asset of ["/i18n.js?v=4", "/locales/en.json?v=3", "/locales/ar-XB.json?v=3"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 8, "app-storage.js": 13, "app-actions.js": 10, "app-sync.js": 8,
-    "app-bootstrap.js": 6, "app-session.js": 7, "app-view.js": 10
+    "app-state.js": 9, "app-storage.js": 13, "app-actions.js": 10, "app-sync.js": 8,
+    "app-bootstrap.js": 7, "app-session.js": 8, "app-view.js": 11
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
     const asset = `/${file}?v=${scriptVersions[file] || 1}`;
     assert.match(appSource, new RegExp(asset.replace(/[.?]/g, "\\$&")));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v70-/);
+  assert.match(workerSource, /pomodorough-shell-v71-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

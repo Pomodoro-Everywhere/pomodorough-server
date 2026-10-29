@@ -209,6 +209,7 @@
       this.state.bootstrapSubmitting = false;
       this.state.bootstrapError = null;
       this.state.bootstrapLimitError = error.message;
+      this.state.bootstrapSignOutError = null;
       this.state.bootstrapStrategy = null;
       this.state.bootstrapFocusTarget = this.elements.bootstrapChoiceButtons.find(
         (button) => button.dataset.bootstrapStrategy === "keep_remote"

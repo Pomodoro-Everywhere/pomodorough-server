@@ -397,6 +397,11 @@ main {
   overflow-wrap: anywhere;
 }
 
+.screen-nav button:hover:not([aria-selected="true"]) {
+  color: var(--page-text);
+  border-left-color: var(--track);
+}
+
 .screen-nav button span,
 .screen-nav button strong {
   display: block;
@@ -1554,6 +1559,12 @@ main {
   font-family: var(--utility) !important;
   font-size: 0.63rem !important;
   clip-path: none !important;
+}
+
+/* Disabled clear keeps the dimmed text but drops the rule so it does not
+   read as struck through. */
+.action-clear:disabled {
+  border-bottom-color: transparent !important;
 }
 
 .history-strip {

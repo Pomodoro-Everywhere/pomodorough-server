@@ -94,6 +94,7 @@
       bootstrapOwnershipConfirmation: false, bootstrapOwnershipApproved: false,
       bootstrapStrategy: null, bootstrapPending: null, bootstrapSubmitting: false,
       bootstrapConflict: false, bootstrapError: null, bootstrapLimitError: null,
+      bootstrapSignOutError: null,
       bootstrapGatePersisted: false, bootstrapGateOwned: false, bootstrapFocusTarget: null
     };
   }

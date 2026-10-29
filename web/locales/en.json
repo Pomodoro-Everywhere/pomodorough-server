@@ -20,6 +20,7 @@
   "account.delete.failed": "Account deletion failed. Your local data was kept.",
   "account.delete.recoveryUnavailable": "Account was not deleted because recovery information could not be saved. Your local data was kept. Check browser storage and retry.",
   "account.logout.pending": { "one": "{count} change is waiting to sync. Signing out will discard it. Continue?", "other": "{count} changes are waiting to sync. Signing out will discard them. Continue?" },
+  "account.logout.pendingUnavailable": "Sign out did not finish because pending changes could not be read. Your local data was kept. Check browser storage and retry.",
   "account.logout.cleanupFailed": "Signed-out local data could not be cleared: {error}",
   "account.logout.failed": "Sign out failed ({status}).",
   "account.logout.revocationPending": "Pending sign-out could not be revoked yet.",

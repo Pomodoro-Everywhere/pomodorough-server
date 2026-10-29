@@ -729,6 +729,7 @@
       if (view.failed || limitRecovery) {
         elements.bootstrapError.textContent = state.bootstrapError || state.bootstrapLimitError;
       }
+      this.renderBootstrapSignOutError(limitRecovery);
       for (const button of elements.bootstrapChoiceButtons) {
         button.hidden = (limitRecovery || state.bootstrapOwnershipConfirmation)
           && button.dataset.bootstrapStrategy !== "keep_remote";
@@ -736,6 +737,16 @@
       }
       elements.bootstrapConfirm.disabled = state.bootstrapSubmitting;
       elements.bootstrapCancel.disabled = state.bootstrapSubmitting;
+    }
+
+    renderBootstrapSignOutError(limitRecovery) {
+      const { state, elements } = this;
+      const signOutError = elements.bootstrapSignOutError;
+      if (!signOutError) return;
+      // Rewriting an unchanged alert would announce it again on unrelated renders.
+      const message = limitRecovery && state.bootstrapSignOutError || "";
+      signOutError.hidden = !message;
+      if (signOutError.textContent !== message) signOutError.textContent = message;
     }
 
     renderBootstrapConfirmation(view) {
@@ -795,6 +806,7 @@
       );
       for (const name of ["bootstrapChoices", "bootstrapConfirmation", "bootstrapError",
         "bootstrapRetry", "bootstrapSignOut"]) elements[name].hidden = true;
+      this.renderBootstrapSignOutError(false);
       elements.bootstrapDialog.setAttribute("aria-busy", String(state.logoutRecoveryBusy));
       elements.logoutRecoveryRetry.disabled = state.logoutRecoveryBusy;
       elements.logoutRecoverySignIn.disabled = state.logoutRecoveryBusy || !host.navigator.onLine;

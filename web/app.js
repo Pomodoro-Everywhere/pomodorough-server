@@ -19,7 +19,7 @@
     "savedClaimCancel", "notice", "noticeText", "noticeDismiss", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
-    "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
+    "bootstrapSignOutError", "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
     "autoStartBreaks", "appVersion", "taskSelector", "dial", "dialTicks", "dialProgress", "phaseLabel",
     "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "timerToggle",
     "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",

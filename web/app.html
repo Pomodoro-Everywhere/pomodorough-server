@@ -11,7 +11,7 @@
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=20">
+  <link rel="stylesheet" href="/app.css?v=21">
   <script src="/sentry-client.js?v=2" defer></script>
   <script src="/shared-core-metadata.js?v=4" defer></script>
   <script src="/shared-core.js?v=7" defer></script>
@@ -21,17 +21,17 @@
   <script src="/workspace-core.js?v=2" defer></script>
   <script src="/workspace-transaction.js?v=4" defer></script>
   <script src="/sync-storage.js?v=34" defer></script>
-  <script src="/i18n.js?v=3" defer></script>
+  <script src="/i18n.js?v=4" defer></script>
   <script src="/app-runtime.js?v=1" defer></script>
   <script src="/account-operation.js?v=1" defer></script>
-  <script src="/app-state.js?v=8" defer></script>
+  <script src="/app-state.js?v=9" defer></script>
   <script src="/app-storage.js?v=13" defer></script>
   <script src="/app-actions.js?v=10" defer></script>
   <script src="/app-sync.js?v=8" defer></script>
-  <script src="/app-bootstrap.js?v=6" defer></script>
-  <script src="/app-session.js?v=7" defer></script>
-  <script src="/app-view.js?v=10" defer></script>
-  <script src="/app.js?v=44" defer></script>
+  <script src="/app-bootstrap.js?v=7" defer></script>
+  <script src="/app-session.js?v=8" defer></script>
+  <script src="/app-view.js?v=11" defer></script>
+  <script src="/app.js?v=45" defer></script>
 </head>
 <body>
   <a id="skipTimerLink" class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
@@ -105,6 +105,7 @@
       </section>
 
       <p id="bootstrapError" class="bootstrap-error" role="alert" hidden></p>
+      <p id="bootstrapSignOutError" class="bootstrap-error" role="alert" hidden></p>
       <button id="bootstrapRetry" class="bootstrap-retry" type="button" hidden data-i18n="bootstrap.retry">Retry saved choice</button>
       <button id="bootstrapSignOut" class="bootstrap-signout" type="button" hidden data-i18n="bootstrap.signOut">Sign out instead</button>
     </div>
