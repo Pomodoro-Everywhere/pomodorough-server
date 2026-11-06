@@ -6,32 +6,32 @@
   <meta name="theme-color" content="#142c5c" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c1b39" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A local-first focus timer that continues across your devices.">
-  <meta name="pomodorough-version" content="0.53.0">
+  <meta name="pomodorough-version" content="0.54.0">
   <meta name="sentry-dsn" content="%POMODOROUGH_SENTRY_DSN%">
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=21">
+  <link rel="stylesheet" href="/app.css?v=22">
   <script src="/sentry-client.js?v=2" defer></script>
-  <script src="/shared-core-metadata.js?v=4" defer></script>
+  <script src="/shared-core-metadata.js?v=5" defer></script>
   <script src="/shared-core.js?v=7" defer></script>
   <script src="/sync-core.js?v=28" defer></script>
   <script src="/sync-authority.js?v=1" defer></script>
   <script src="/sync-storage-uuid.js?v=1" defer></script>
   <script src="/workspace-core.js?v=2" defer></script>
   <script src="/workspace-transaction.js?v=4" defer></script>
-  <script src="/sync-storage.js?v=34" defer></script>
-  <script src="/i18n.js?v=4" defer></script>
+  <script src="/sync-storage.js?v=35" defer></script>
+  <script src="/i18n.js?v=5" defer></script>
   <script src="/app-runtime.js?v=1" defer></script>
   <script src="/account-operation.js?v=1" defer></script>
-  <script src="/app-state.js?v=9" defer></script>
-  <script src="/app-storage.js?v=13" defer></script>
-  <script src="/app-actions.js?v=10" defer></script>
-  <script src="/app-sync.js?v=8" defer></script>
+  <script src="/app-state.js?v=10" defer></script>
+  <script src="/app-storage.js?v=14" defer></script>
+  <script src="/app-actions.js?v=12" defer></script>
+  <script src="/app-sync.js?v=9" defer></script>
   <script src="/app-bootstrap.js?v=7" defer></script>
-  <script src="/app-session.js?v=8" defer></script>
-  <script src="/app-view.js?v=11" defer></script>
-  <script src="/app.js?v=45" defer></script>
+  <script src="/app-session.js?v=9" defer></script>
+  <script src="/app-view.js?v=12" defer></script>
+  <script src="/app.js?v=46" defer></script>
 </head>
 <body>
   <a id="skipTimerLink" class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
@@ -58,7 +58,6 @@
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
         <a class="text-button" href="https://pomodorough.egigoka.me/privacy" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
         <button id="logoutButton" class="text-button" type="button" data-i18n="account.signOut">Sign out</button>
-        <button id="deleteAccountButton" class="text-button action-danger" type="button" data-i18n="account.delete">Delete account</button>
       </div>
     </div>
   </header>
@@ -142,6 +141,10 @@
       <span id="noticeText"></span>
       <button id="noticeDismiss" class="text-button" type="button" data-i18n="action.dismiss">Dismiss</button>
     </div>
+    <div id="undoToast" class="notice undo-toast" role="status" aria-live="polite" hidden>
+      <span id="undoToastText"></span>
+      <button id="undoToastUndo" class="text-button" type="button" data-i18n="action.undo">Undo</button>
+    </div>
 
     <div id="timerScreen" role="tabpanel" aria-labelledby="timerTab">
       <section id="timer-workbench" class="workbench" aria-labelledby="workbench-title" tabindex="-1">
@@ -173,11 +176,12 @@
 
         <div class="action-bank" role="group" aria-label="Timer controls" data-i18n-aria-label="timer.controls">
           <button id="timerToggle" class="action-primary" type="button" data-i18n="timer.startFocus">Start focus</button>
-          <button id="finishButton" class="action-key" type="button" disabled data-i18n="action.finish">Finish</button>
-          <button id="cancelButton" class="action-key action-danger" type="button" disabled data-i18n="action.cancel">Cancel</button>
-          <button id="clearButton" class="action-clear" type="button" disabled data-i18n="action.stopSound">Stop sound</button>
+          <button id="skipButton" class="action-key action-skip" type="button" disabled hidden>Skip</button>
+          <button id="finishButton" class="action-key" type="button" disabled hidden data-i18n="action.finish">Finish</button>
+          <button id="cancelButton" class="action-key action-danger" type="button" disabled hidden data-i18n="action.cancel">Cancel</button>
+          <button id="clearButton" class="action-clear" type="button" disabled hidden data-i18n="action.stopSound">Stop sound</button>
         </div>
-        <p class="completion-limit" role="note" data-i18n="timer.completionLimit">Completion sound and notifications require an active browser or installed PWA. Overdue timers reconcile when you reopen it.</p>
+        <p id="completionLimit" class="completion-limit" role="note" data-i18n="timer.completionLimit">Completion sound and notifications require an active browser or installed PWA. Overdue timers reconcile when you reopen it.</p>
       </article>
 
       <div id="durationForm" class="recipe-rail" role="group" aria-label="Timer durations" data-i18n-aria-label="pattern.durations">
@@ -264,7 +268,13 @@
           </span>
         </label>
 
-        <p id="appVersion" class="app-version">Version 0.53.0</p>
+        <p id="appVersion" class="app-version">Version 0.54.0</p>
+
+        <section id="accountSection" class="account-rail" aria-labelledby="accountTitle" hidden>
+          <strong id="accountTitle" data-i18n="account.title">Account</strong>
+          <small data-i18n="account.delete.detail">Removes your account, timer history, tasks, settings, and sessions permanently. A confirmation step follows.</small>
+          <button id="deleteAccountButton" class="text-button action-danger" type="button" data-i18n="account.delete">Delete account</button>
+        </section>
       </div>
       </section>
 
@@ -295,7 +305,7 @@
       <form id="taskForm" class="task-form">
         <label for="taskInput" data-i18n="tasks.new">New task</label>
         <div>
-          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Write release notes" data-i18n-placeholder="tasks.placeholder">
+          <input id="taskInput" type="text" maxlength="512" autocomplete="off" placeholder="Task name" data-i18n-placeholder="tasks.placeholder">
           <button type="submit" data-i18n="tasks.add">Add task</button>
         </div>
       </form>

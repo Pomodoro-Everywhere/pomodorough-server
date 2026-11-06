@@ -47,10 +47,10 @@ function watchEffects(t, current) {
 
 async function prepared(t, timing = "before transaction") {
   const current = await fixture(t, "running");
-  assert.equal(current.core.call("core.version", {}).coreVersion, "0.53.0");
+  assert.equal(current.core.call("core.version", {}).coreVersion, "0.54.0");
   const artifact = fs.readFileSync(path.join(__dirname, "pomodorough_core.wasm"));
-  assert.equal(artifact.length, 2883081);
-  assert.equal(crypto.createHash("sha256").update(artifact).digest("hex"), "1e72c2bbc178b077fdcc98210f06f66f4bc5332b77be5de83be19792376f4bd4");
+  assert.equal(artifact.length, 2883106);
+  assert.equal(crypto.createHash("sha256").update(artifact).digest("hex"), "5942df8a91d28d2001889068cd173b6956b17765a01c046627a9050de732f8f1");
   const entered = deferred();
   const release = deferred();
   const completed = deferred();

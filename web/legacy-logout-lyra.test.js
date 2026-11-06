@@ -96,8 +96,11 @@ test("Lyra released marker: 401 preserves retained owner and exposes working sig
   assert.deepEqual(await dump(database), retained);
   assert.equal(current.calls.some((call) => call[0] === "redirect"), false);
   await click(current, "logoutRecoverySignIn");
+  // R54-S03: the sign-in carries the marker's landing token in its return path.
+  const signInToken = localStorage.getItem("pomodoroughPendingLogoutSignIn");
+  assert.match(signInToken ?? "", /^[0-9a-f]{32}$/);
   assert.ok(current.calls.some((call) => call[0] === "redirect"
-    && call[1] === "/auth/google/start?return=%2Fapp"));
+    && call[1] === `/auth/google/start?return=${encodeURIComponent(`/app?signin=${signInToken}`)}`));
   assert.equal(localStorage.getItem(marker), "1");
   assert.deepEqual(await dump(database), retained);
   const signedIn = await environment.openTab();

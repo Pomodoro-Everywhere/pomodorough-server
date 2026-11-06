@@ -110,12 +110,13 @@ test("R50-S02 action order, identity, and callbacks are preserved", () => {
   const bank = /<div class="action-bank"[^>]*>([\s\S]*?)<\/div>/.exec(appHtml);
   assert.ok(bank, "action bank exists");
   const ids = [...bank[1].matchAll(/<button[^>]*id="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(ids, ["timerToggle", "finishButton", "cancelButton", "clearButton"]);
-  for (const id of ["timerToggle", "finishButton", "cancelButton"]) {
+  assert.deepEqual(ids, ["timerToggle", "skipButton", "finishButton", "cancelButton", "clearButton"]);
+  for (const id of ["timerToggle", "skipButton", "finishButton", "cancelButton"]) {
     assert.match(bank[1], new RegExp(`<button[^>]*id="${id}"[^>]*type="button"`), `${id} stays a native button`);
     assert.ok(appMain.includes(`"${id}"`), `app.js still wires ${id}`);
   }
   assert.match(appView, /elements\.timerToggle\.addEventListener\("click"/);
+  assert.match(appView, /elements\.skipButton\.addEventListener\("click"/);
   assert.match(appView, /elements\.finishButton\.addEventListener\("click"/);
   assert.match(appView, /elements\.cancelButton\.addEventListener\("click"/);
 });

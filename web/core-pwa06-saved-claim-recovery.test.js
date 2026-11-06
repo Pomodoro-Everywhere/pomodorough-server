@@ -168,7 +168,7 @@ test("CORE-PWA06 recovery panel names queue and requires confirm then cancel", a
   const document = dom.window.document;
   const elements = Object.fromEntries(["conflictPanel", "conflictReason", "savedClaimRecovery",
     "savedClaimRecoveryText", "savedClaimDiscard", "savedClaimCancel", "conflictDismiss",
-    "logoutButton", "deleteAccountButton", "noticeDismiss"].map((id) => [id, document.getElementById(id)]));
+    "logoutButton", "profileAvatar", "deleteAccountButton", "noticeDismiss"].map((id) => [id, document.getElementById(id)]));
   Object.assign(stale.external, { elements,
     host: { ...stale.external.host, document, addEventListener: () => {} } });
   const view = require("./app-view.js").create({ state: stale.state, external: stale.external, use: stale.use });

@@ -190,16 +190,17 @@ test("HTML loads declared modules before composition and service worker caches e
   const worker = source("sw.js");
   let priorIndex = -1;
   const scriptVersions = {
-    "app.js": 45,
-    "app-state.js": 9,
-    "app-storage.js": 13,
-    "app-actions.js": 10, "app-sync.js": 8, "app-bootstrap.js": 7,
-    "app-session.js": 8, "app-view.js": 11
+    "app.js": 46,
+    "app-state.js": 10,
+    "app-storage.js": 14,
+    "app-actions.js": 12, "app-sync.js": 9, "app-bootstrap.js": 7,
+    "app-session.js": 9, "app-view.js": 12
   };
   for (const file of ["app-runtime.js", "account-operation.js", ...moduleFiles, "app.js"]) {
     const version = scriptVersions[file] || 1;
     const asset = `/${file}?v=${version}`;
-    const index = html.indexOf(asset);
+    // The closing quote keeps ?v=4 from also matching ?v=45.
+    const index = html.indexOf(`${asset}"`);
     assert.ok(index > priorIndex, `${asset} must load after its dependencies`);
     assert.match(worker, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
     priorIndex = index;

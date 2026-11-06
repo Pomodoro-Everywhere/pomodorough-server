@@ -272,12 +272,13 @@ function allViewElements() {
   const names = [
     "autoStartBreaks", "bootstrapCancel", "bootstrapChoices", "bootstrapConfirm", "bootstrapConfirmation",
     "bootstrapConfirmationMessage", "bootstrapConfirmationTitle", "bootstrapDialog", "bootstrapError", "bootstrapRetry",
-    "bootstrapSignOut", "bootstrapSummary", "bootstrapTitle", "cancelButton", "clearButton", "conflictDismiss",
-    "conflictPanel", "conflictReason", "deleteAccountButton", "deviceMark", "dial", "dialProgress", "dialTicks",
+    "accountSection", "bootstrapSignOut", "bootstrapSummary", "bootstrapTitle", "cancelButton", "clearButton",
+    "completionLimit", "conflictDismiss", "conflictPanel", "conflictReason", "deleteAccountButton", "deviceMark",
+    "dial", "dialProgress", "dialTicks",
     "durationForm", "finishButton", "historyCount", "historyList", "installButton", "longBreakProgress", "logoutButton",
     "notice", "phaseLabel", "profile", "profileAvatar", "syncStatus", "syncStatusText", "taskCount", "taskForm",
     "taskInput", "taskList", "taskSelector", "tasksScreen", "timerDetail", "timerDisplay", "timerInstruction",
-    "timerScreen", "timerToggle"
+    "skipButton", "timerScreen", "timerToggle"
   ];
   return Object.fromEntries(names.map((name) => [name, element()]));
 }
@@ -636,4 +637,25 @@ test("bootstrap conflict retry rotates requests and handles invalid or oversized
   assert.equal(chooser.state.bootstrapStrategy, "keep_local");
   await chooser.actions.chooseBootstrapStrategy("keep_remote");
   assert.equal(chooser.state.bootstrapStrategy, "keep_remote");
+});
+
+test("R54-S02 entering limit recovery clears a refusal left by an earlier sign-out", () => {
+  const fixture = bootstrapFixture({ state: { bootstrapSignOutError: "earlier refusal" } });
+  const limit = new fixture.syncStorage.ResolutionLimitError("4097 queued commands");
+  assert.equal(fixture.actions.handleResolutionLimit(limit), true);
+  assert.equal(fixture.state.bootstrapLimitError, "4097 queued commands");
+  assert.equal(fixture.state.bootstrapSignOutError, null);
+  assert.ok(fixture.calls.includes("render"));
+});
+
+test("R54-S02 a limit error on retry clears a refusal left by an earlier sign-out", async () => {
+  const pending = { userId: incarnationFixture.ownerId("user-1"), payload: { strategy: "keep_remote" } };
+  const fixture = bootstrapFixture({ state: { bootstrapPending: pending, bootstrapConflict: true,
+    bootstrapStrategy: "keep_remote", bootstrapSignOutError: "earlier refusal" } });
+  fixture.syncStorage.captureResolution = async () => {
+    throw new fixture.syncStorage.ResolutionLimitError("too many operations");
+  };
+  await fixture.actions.retryBootstrapResolution();
+  assert.equal(fixture.state.bootstrapLimitError, "too many operations");
+  assert.equal(fixture.state.bootstrapSignOutError, null);
 });

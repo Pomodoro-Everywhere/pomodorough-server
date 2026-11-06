@@ -225,16 +225,20 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 	if err != nil {
 		return principal{}, store.ErrUnauthorized
 	}
+	return s.authenticateCredential(r.Context(), userID, credential)
+}
+
+func (s *Server) authenticateCredential(ctx context.Context, userID string, credential store.DeletionCredential) (principal, error) {
 	expectedKind := "web"
 	if credential.Method == "bearer" {
 		expectedKind = "access"
 	}
-	db, err := s.store.OpenExistingUser(r.Context(), userID)
+	db, err := s.store.OpenExistingUser(ctx, userID)
 	if err != nil {
 		return principal{}, err
 	}
 	defer db.Close()
-	info, err := store.Authenticate(r.Context(), db, credential.TokenHash, expectedKind, time.Now())
+	info, err := store.Authenticate(ctx, db, credential.TokenHash, expectedKind, time.Now())
 	if err != nil {
 		return principal{}, err
 	}

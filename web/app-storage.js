@@ -191,9 +191,12 @@
     }
 
     confirmCleanupAlreadyComplete(identity, context) {
-      return this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction, _outcome, abort) => {
+      return this.syncStorage.guardedMutation(this.db, ALL_STORES, (transaction, _outcome, abort, results) => {
         this.assertAuthorizedCleanup(identity, context);
         const meta = transaction.objectStore(META_STORE);
+        // The full clear drops this tab's bootstrap gate too. Logout recovery
+        // waits with the database closed, so a gate kept here outlives the tab.
+        if (results.gate?.value?.token === this.use.tabId()) meta.delete(this.syncStorage.GATE_KEY);
         const requests = [
           meta.get("snapshot"), meta.get("bootstrapResolution"),
           ...ALL_STORES.slice(1).map((name) => transaction.objectStore(name).count())

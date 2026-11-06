@@ -38,7 +38,7 @@ function viewFixture({ state: stateOverrides = {}, tr, plan = null } = {}) {
   const state = viewState({ bootstrapPlan: plan, ...stateOverrides });
   const names = ["bootstrapTitle", "bootstrapSummary", "bootstrapDialog", "bootstrapChoices",
     "bootstrapConfirmation", "bootstrapError", "bootstrapSignOutError", "bootstrapRetry", "bootstrapSignOut",
-    "bootstrapConfirm", "bootstrapCancel", "logoutButton", "deleteAccountButton",
+    "bootstrapConfirm", "bootstrapCancel", "logoutButton", "profileAvatar", "deleteAccountButton",
     "conflictDismiss", "notice", "noticeText", "noticeDismiss"];
   const elements = Object.fromEntries(names.map((name) => [name, stubElement()]));
   elements.notice.hidden = true;
@@ -108,6 +108,46 @@ test("R54-S02 dialog sign-out refusal stays hidden outside limit recovery", () =
   fixture.elements.bootstrapSignOutError.hidden = false;
   fixture.view.renderBootstrapDialog();
   assert.equal(fixture.elements.bootstrapSignOut.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.textContent, "");
+});
+
+function countTextWrites(element) {
+  let text = element.textContent;
+  element.textWrites = 0;
+  Object.defineProperty(element, "textContent", {
+    get: () => text,
+    set: (value) => { element.textWrites += 1; text = value; }
+  });
+  return element;
+}
+
+test("R54-S02 unrelated renders do not rewrite the dialog refusal", () => {
+  const refusal = english["account.logout.pendingUnavailable"];
+  const fixture = viewFixture({ state: { bootstrapLimitError: "too many operations",
+    bootstrapSignOutError: refusal } });
+  const field = countTextWrites(fixture.elements.bootstrapSignOutError);
+  for (let render = 0; render < 3; render += 1) fixture.view.renderBootstrapDialog();
+  assert.equal(field.hidden, false);
+  assert.equal(field.textContent, refusal);
+  assert.equal(field.textWrites, 1);
+});
+
+test("R54-S02 logout recovery shows a refused Retry inside the dialog", () => {
+  const refusal = english["account.logout.pendingUnavailable"];
+  const fixture = viewFixture({ state: { logoutRecoveryRequired: true, logoutRecoveryBusy: false,
+    bootstrapSignOutError: refusal } });
+  for (const name of ["logoutRecovery", "logoutRecoveryRetry", "logoutRecoverySignIn"]) {
+    fixture.elements[name] = stubElement();
+  }
+  fixture.view.renderBootstrapDialog();
+  assert.equal(fixture.elements.logoutRecovery.hidden, false);
+  assert.equal(fixture.elements.logoutRecoveryRetry.disabled, false);
+  assert.equal(fixture.elements.bootstrapSignOut.hidden, true);
+  assert.equal(fixture.elements.bootstrapSignOutError.hidden, false);
+  assert.equal(fixture.elements.bootstrapSignOutError.textContent, refusal);
+  fixture.state.bootstrapSignOutError = null;
+  fixture.view.renderBootstrapDialog();
   assert.equal(fixture.elements.bootstrapSignOutError.hidden, true);
   assert.equal(fixture.elements.bootstrapSignOutError.textContent, "");
 });

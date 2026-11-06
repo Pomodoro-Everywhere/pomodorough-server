@@ -11,6 +11,8 @@
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
   const PENDING_DELETION_KEY = "pomodoroughPendingDeletion";
+  const PENDING_LOGOUT_SIGN_IN_KEY = "pomodoroughPendingLogoutSignIn";
+  const SIGN_IN_LANDING_FIELD = "signin=";
 
   function timingMs(name, fallback) {
     try {
@@ -55,8 +57,43 @@
     return "/app";
   }
 
-  function loginStartUrl(location) {
-    return `/auth/google/start?return=${encodeURIComponent(currentLoginReturnPath(location))}`;
+  // Splits a return path into its path, the query fields that are not a
+  // sign-in landing token, and that token. Other fields stay byte-exact.
+  function splitLandingToken(returnPath) {
+    const queryStart = returnPath.indexOf("?");
+    if (queryStart < 0) return { pathname: returnPath, fields: [], token: null };
+    const fields = [];
+    let token = null;
+    for (const field of returnPath.slice(queryStart + 1).split("&")) {
+      if (field.startsWith(SIGN_IN_LANDING_FIELD)) token = field.slice(SIGN_IN_LANDING_FIELD.length);
+      else fields.push(field);
+    }
+    return { pathname: returnPath.slice(0, queryStart), fields, token };
+  }
+
+  function joinReturnPath(pathname, fields) {
+    return fields.length > 0 ? `${pathname}?${fields.join("&")}` : pathname;
+  }
+
+  // 128 bits from the platform CSPRNG, hex encoded so the token needs no
+  // escaping in the return path.
+  function newLandingToken(crypto) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  // A pending sign-out sends its landing token through OAuth in the return
+  // path. The callback redirects there only after it has revoked the session
+  // behind the cookie it replaces, so the landing proves that revocation ran.
+  function loginStartUrl(location, landingToken = null) {
+    const { pathname, fields } = splitLandingToken(currentLoginReturnPath(location));
+    const landing = landingToken ? [`${SIGN_IN_LANDING_FIELD}${landingToken}`] : [];
+    const joined = joinReturnPath(pathname, [...fields, ...landing]);
+    // A path too long to carry the token returns to the app root with it. The
+    // fallback is validated too, so the return path stays same-origin.
+    const returnPath = safeLoginReturnPath(joined) === joined ? joined
+      : safeLoginReturnPath(joinReturnPath("/app", landing));
+    return `/auth/google/start?return=${encodeURIComponent(returnPath)}`;
   }
 
   function bindActions(owner, names) {
@@ -232,13 +269,8 @@
       if (response.status === 401) {
         let completed = context;
         if (identity) {
-          const cleanup = await this.clearPendingLogoutData(identity, context);
-          if (!cleanup.cleared) return null;
-          accountOperation.requireBound(cleanup.context);
-          completed = cleanup.context;
-          this.use.assertCleanupIdentity(identity);
-          completed.publishIdentity(() => this.clearPendingLogout());
-          this.sessionCompletionContexts.set(context, completed);
+          completed = await this.settlePendingLogoutLocally(identity, context);
+          if (!completed) return null;
         }
         accountOperation.requireBound(completed);
         this.redirectToLogin();
@@ -297,6 +329,7 @@
       const completed = this.sessionCompletionContexts.get(context) || context;
       completed.assertCurrent();
       if (!payload) return false;
+      if (identity && this.completedSignInLanding()) return this.finishSignInLanding(identity, context);
       if (identity || this.pendingLocalLogout()) return this.finishPendingLogout(payload, identity, context);
       const previousOwnerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId;
       if (previousOwnerId && this.syncCore.accountOwnerId(payload.user) !== previousOwnerId) {
@@ -417,7 +450,65 @@
         return;
       }
       this.redirecting = true;
-      this.host.location.assign(loginStartUrl(this.host.location));
+      this.host.location.assign(loginStartUrl(this.host.location, this.pendingSignInToken()));
+    }
+
+    // One token serves the marker until a landing consumes it, so every tab
+    // that signs in to recover lands with a token the shared marker accepts.
+    pendingSignInToken() {
+      if (!this.pendingLocalLogout() || typeof this.host.crypto?.getRandomValues !== "function") return null;
+      try {
+        const stored = this.host.localStorage.getItem(PENDING_LOGOUT_SIGN_IN_KEY);
+        if (stored) return stored;
+        const token = newLandingToken(this.host.crypto);
+        this.host.localStorage.setItem(PENDING_LOGOUT_SIGN_IN_KEY, token);
+        return token;
+      } catch (error) {
+        // Without a stored token the landing falls back to revoking the new session.
+        this.reportLogoutMarkerFailure(error);
+        return null;
+      }
+    }
+
+    // The token is single use. A matching landing consumes it before cleanup,
+    // so a retried or replayed landing revokes the new session as before. A
+    // mismatch leaves it, so a crafted landing URL cannot spend it.
+    completedSignInLanding() {
+      const { token } = splitLandingToken(currentLoginReturnPath(this.host.location));
+      if (!token) return false;
+      try {
+        if (this.host.localStorage.getItem(PENDING_LOGOUT_SIGN_IN_KEY) !== token) return false;
+        this.host.localStorage.removeItem(PENDING_LOGOUT_SIGN_IN_KEY);
+        return true;
+      } catch (error) {
+        // Unusable storage fails closed: the landing revokes the new session as before.
+        this.reportLogoutMarkerFailure(error);
+        return false;
+      }
+    }
+
+    // The server no longer accepts the signed-out session, so only local
+    // cleanup remains. A failed cleanup keeps the marker for the next retry.
+    async settlePendingLogoutLocally(identity, context) {
+      const cleanup = await this.clearPendingLogoutData(identity, context);
+      if (!cleanup.cleared) return null;
+      accountOperation.requireBound(cleanup.context);
+      this.use.assertCleanupIdentity(identity);
+      cleanup.context.publishIdentity(() => this.clearPendingLogout());
+      this.sessionCompletionContexts.set(context, cleanup.context);
+      return cleanup.context;
+    }
+
+    // The callback already revoked the signed-out session before it sent the
+    // browser to this landing. Local data clears before the marker, and the
+    // URL changes only after both, so a failed cleanup keeps the marker.
+    async finishSignInLanding(identity, issuer) {
+      this.stream.closeRevisionStream();
+      if (!await this.settlePendingLogoutLocally(identity, issuer)) return false;
+      const { pathname, fields } = splitLandingToken(currentLoginReturnPath(this.host.location));
+      this.redirecting = true;
+      this.host.location.replace(joinReturnPath(pathname, fields));
+      return false;
     }
 
     queueSessionRevalidation(context = this.use.captureAccountContext()) {
@@ -489,6 +580,7 @@
 
     markPendingLogout() {
       try {
+        this.host.localStorage.removeItem(PENDING_LOGOUT_SIGN_IN_KEY);
         this.host.localStorage.setItem(PENDING_LOGOUT_OWNER_KEY, JSON.stringify({
           userId: this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null
         }));
@@ -517,6 +609,7 @@
       try {
         this.host.localStorage.removeItem(PENDING_LOGOUT_KEY);
         this.host.localStorage.removeItem(PENDING_LOGOUT_OWNER_KEY);
+        this.host.localStorage.removeItem(PENDING_LOGOUT_SIGN_IN_KEY);
       } catch {
         // A successful server revocation makes a stale inaccessible marker harmless.
       }
@@ -715,7 +808,11 @@
       } catch (error) {
         context = this.logoutFailureContexts.get(error) || context;
         if (!accountOperation.isCurrent(context)) return null;
-        if (this.pendingLocalLogout()) this.state.logoutRecoveryRequired = true;
+        if (this.pendingLocalLogout()) {
+          this.state.logoutRecoveryRequired = true;
+          await this.releaseRecoveryGate(context);
+          if (!accountOperation.isCurrent(context)) return null;
+        }
         if (!this.state.sessionIdentityValidated) {
           this.state.authenticated = false;
           this.state.csrfToken = null;
@@ -729,6 +826,26 @@
         this.host.console.warn("Pomodorough session deferred:", error);
         reportFrontendError(error, "session.initialize.deferred");
         return context;
+      }
+    }
+
+    // A tab in logout recovery never resolves history, and its next attempt
+    // acquires the gate again. pagehide does not release the gate, so holding
+    // it through the retry wait blocks every other tab for the whole lease
+    // when this tab closes.
+    async releaseRecoveryGate(context) {
+      if (!this.state.bootstrapGateOwned || !this.use.database()) return;
+      try {
+        await this.syncStorage.clearBootstrapGate(this.use.database(), this.use.tabId(), context);
+        context.assertCurrent();
+        this.state.bootstrapGateOwned = false;
+      } catch (error) {
+        if (!accountOperation.isCurrent(context)) return;
+        // The gate then waits for its lease, as it did before this release.
+        // The release is part of the deferred session start, so it reports
+        // under that operation instead of adding a new one to the allowlist.
+        this.host.console.warn("Pomodorough recovery gate release failed:", error);
+        reportFrontendError(error, "session.initialize.deferred");
       }
     }
 
@@ -871,6 +988,9 @@
         if (completion.durableRecovery === false) {
           this.logoutCleanupRetryRequired = true;
           this.state.logoutRecoveryRequired = true;
+          // Retry in this dialog runs logout() again and shows its own refusal.
+          // A refusal left by an overlapping click must not open with the dialog.
+          this.state.bootstrapSignOutError = null;
           this.use.showNotice(this.use.tr("account.logout.cleanupFailed", { error: error.message },
             `Signed-out local data could not be cleared: ${error.message}`));
           this.use.render();

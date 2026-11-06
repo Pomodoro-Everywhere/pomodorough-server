@@ -17,7 +17,7 @@ func TestBrowserR54S02UnreadablePendingQueues(t *testing.T) {
 	if os.Getenv("POMODOROUGH_R54_S02_BROWSER") != "1" {
 		t.Skip("set POMODOROUGH_R54_S02_BROWSER=1 to run Chromium unreadable-queue sign-out")
 	}
-	for _, scenario := range []string{"refresh", "guarded", "bootstrap", "crosstab"} {
+	for _, scenario := range []string{"refresh", "guarded", "bootstrap", "limitentry", "cancel", "recoveryretry", "crosstab"} {
 		for _, locale := range []string{"en", "ar-XB"} {
 			name := scenario + "@" + locale
 			t.Run(name, func(t *testing.T) { runR54S02Browser(t, scenario, locale, name) })

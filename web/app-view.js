@@ -37,6 +37,10 @@
     }));
   }
 
+  // Undo window for a deferred task delete. The delete reaches core only
+  // after this delay, on the next task mutation, or when the page hides.
+  const TASK_DELETE_UNDO_MS = 5000;
+
   function dialTickCountForTimer(timer) {
     return Math.max(1, Math.ceil((timer?.plannedDurationMs || 0) / 60_000));
   }
@@ -76,20 +80,20 @@
       "clampNumber", "completedFocusCountForDay", "longBreakProgress", "historyDateMs",
       "activeCompletionAlertTimerId", "updateTimerCompletion", "startCompletionAlert",
       "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
-      "persistSettings", "addTask", "deleteTask", "primeCompletionAlerts", "issueCommand",
+      "persistSettings", "addTask", "deleteTask", "renameTask", "primeCompletionAlerts", "issueCommand",
       "finishTimer", "cancelAndClearTimer", "stopCompletionAlert", "logout", "deleteAccount",
       "closeRevisionStreamForIdentityChange", "clearLocalData", "redirectToLogin",
       "chooseBootstrapStrategy", "retryBootstrapResolution", "handleOnline", "handleOffline",
-      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState", "getWorkspaceReadModel", "issuePhaseSelection",
+      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState", "getWorkspaceReadModel", "issuePhaseSelection", "issueSkip",
       "quarantineAccountMismatch", "retryPendingLogout", "captureAccountContext", "captureDatabaseContext",
       "armSavedClaimRecovery", "cancelSavedClaimRecovery", "discardSavedClaimRecovery"
     ],
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
       "renderDurations", "renderVersion", "renderTaskSelector", "displayTimer", "timerDisplayView",
-      "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderDialTicks", "renderTimer",
+      "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderCompletionLimit", "renderDialTicks", "renderTimer", "resumeWakeLock",
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
-      "renderTasks", "formatTaskDuration", "formatHistoryDate", "renderProfile",
+      "renderTasks", "flushTaskDeletion", "undoTaskDeletion", "formatTaskDuration", "formatHistoryDate", "renderProfile", "hideUnreachableAvatar",
       "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice", "dismissNotice",
       "createDialTicks", "dialTickCountFor", "commitDurationInput", "setupPreferenceEvents", "setupTaskEvents",
       "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel",
@@ -241,10 +245,19 @@
   }
 
   class TimerView extends ViewPart {
+    constructor(state, external, use) {
+      super(state, external, use);
+      this.originalDocumentTitle = String(this.document?.title ?? "");
+      this.wakeLockSentinel = null;
+      this.wakeLockRequest = null;
+      this.wakeLockDenied = false;
+      this.wakeLockWarned = false;
+    }
+
     actions() {
       return super.actions([
         "displayTimer", "timerDisplayView", "renderTimerClock", "renderTimerInstruction",
-        "renderTimerControls", "renderDialTicks", "renderTimer"
+        "renderTimerControls", "renderCompletionLimit", "renderDialTicks", "renderTimer", "resumeWakeLock"
       ]);
     }
 
@@ -280,11 +293,7 @@
         `${view.minutes} minutes ${view.seconds} seconds remaining, ${use.phaseLabel(timer.phase)}, ${use.timerStatusLabel(view.status)}`
       ));
       elements.phaseLabel.textContent = use.phaseLabel(timer.phase).toUpperCase();
-      elements.timerDetail.textContent = use.tr(
-        "timer.detail",
-        { status: use.timerStatusLabel(view.status).toUpperCase(), minutes: Math.round(timer.plannedDurationMs / 60000) },
-        `${use.timerStatusLabel(view.status).toUpperCase()} / ${Math.round(timer.plannedDurationMs / 60000)} MIN`
-      );
+      elements.timerDetail.textContent = this.timerDetailText(timer, view.status);
       const breakProgress = state.readModel?.cadence.longBreakProgress ?? 0;
       elements.longBreakProgress.textContent = `${"●".repeat(breakProgress)}${"○".repeat(4 - breakProgress)}`;
       elements.longBreakProgress.setAttribute("aria-label", use.tr(
@@ -293,6 +302,87 @@
       ));
       elements.dial.dataset.status = view.status;
       elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE * (1 - view.progress));
+      this.renderDocumentTitle(timer, view);
+    }
+
+    // The tab title mirrors the clock while a run is underway and names the
+    // finished phase while the completion alert rings; otherwise it returns
+    // to the title the page loaded with. Assigning only on change keeps the
+    // 250 ms render loop from touching the DOM title every tick.
+    renderDocumentTitle(timer, view) {
+      const { state, use, document } = this;
+      if (!document) return;
+      let title = this.originalDocumentTitle;
+      if (use.activeCompletionAlertTimerId()) {
+        title = `Done · ${use.phaseLabel(state.timer.phase)} — ${this.originalDocumentTitle}`;
+      } else if (view.status === "running" || view.status === "paused") {
+        title = `${view.timeText} · ${use.phaseLabel(timer.phase)} — ${this.originalDocumentTitle}`;
+      }
+      if (document.title !== title) document.title = title;
+    }
+
+    // Screen Wake Lock is optional. Browsers refuse it while the page is
+    // hidden or under power saving; the timer keeps running regardless, so a
+    // refusal warns once per session and waits for the next visible tick.
+    syncWakeLock(status) {
+      const wakeLock = this.host.navigator?.wakeLock;
+      if (typeof wakeLock?.request !== "function") return;
+      if (status !== "running") {
+        this.wakeLockDenied = false;
+        this.releaseWakeLock();
+        return;
+      }
+      if (this.wakeLockSentinel || this.wakeLockRequest || this.wakeLockDenied) return;
+      this.wakeLockRequest = Promise.resolve().then(() => wakeLock.request("screen")).then(
+        (sentinel) => this.adoptWakeLock(sentinel),
+        (error) => {
+          this.wakeLockDenied = true;
+          this.warnWakeLock(error);
+        }
+      ).finally(() => { this.wakeLockRequest = null; });
+    }
+
+    adoptWakeLock(sentinel) {
+      const status = this.state.readModel?.display.status || this.state.timer.status;
+      if (status !== "running") {
+        // The run ended while the request was pending; do not keep the screen on.
+        Promise.resolve().then(() => sentinel.release()).catch((error) => this.warnWakeLock(error));
+        return;
+      }
+      this.wakeLockSentinel = sentinel;
+      sentinel.addEventListener?.("release", () => {
+        if (this.wakeLockSentinel === sentinel) this.wakeLockSentinel = null;
+      });
+    }
+
+    releaseWakeLock() {
+      const sentinel = this.wakeLockSentinel;
+      if (!sentinel) return;
+      this.wakeLockSentinel = null;
+      Promise.resolve().then(() => sentinel.release()).catch((error) => this.warnWakeLock(error));
+    }
+
+    resumeWakeLock() {
+      this.wakeLockDenied = false;
+    }
+
+    warnWakeLock(error) {
+      if (this.wakeLockWarned) return;
+      this.wakeLockWarned = true;
+      this.host.console.warn("Screen wake lock unavailable:", error);
+    }
+
+    // After a run completes the dial already shows the next phase and its
+    // length, so the detail line names what is next instead of pairing the
+    // finished status with a duration that was never run.
+    timerDetailText(timer, status) {
+      const { use } = this;
+      const minutes = Math.round(timer.plannedDurationMs / 60000);
+      if (status === "completed") {
+        return use.tr("timer.detailNext", { minutes }, `NEXT / ${minutes} MIN`);
+      }
+      const statusLabel = use.timerStatusLabel(status).toUpperCase();
+      return use.tr("timer.detail", { status: statusLabel, minutes }, `${statusLabel} / ${minutes} MIN`);
     }
 
     renderTimerInstruction(timer, status) {
@@ -332,15 +422,45 @@
       const { use, elements } = this;
       const intents = this.state.readModel?.availableIntents || [];
       const blocked = use.controlsBlocked() || this.state.workspaceBlocked;
+      const underway = intents.some((intent) => ["pause", "resume"].includes(intent));
       elements.timerToggle.disabled = blocked || !intents.some((intent) => ["start", "pause", "resume"].includes(intent));
+      // An underway timer offers Finish and Cancel; otherwise the bank offers
+      // Start and Skip. Inapplicable controls hide instead of dimming.
+      elements.finishButton.hidden = !underway;
       elements.finishButton.disabled = blocked || !intents.includes("finish");
+      elements.cancelButton.hidden = !underway;
       elements.cancelButton.disabled = blocked || !intents.includes("cancelAndClear");
+      this.renderSkipControl(underway, blocked);
       // Finished timers offer Start only: the clear control stops the
       // completion sound while it rings and never dismisses the terminal
       // timer. The next Start replaces it.
-      elements.clearButton.disabled = blocked || !use.activeCompletionAlertTimerId();
+      const ringing = Boolean(use.activeCompletionAlertTimerId());
+      elements.clearButton.hidden = !ringing;
+      elements.clearButton.disabled = blocked || !ringing;
       use.updateTimerCompletion(this.state.timer, this.state.timer.status,
         this.state.readModel?.canonical.remainingMs ?? view.remaining, blocked);
+    }
+
+    renderSkipControl(underway, blocked) {
+      const { use, elements } = this;
+      // Core names the skip destination; the PWA never derives it locally.
+      const destination = this.state.readModel?.cadence?.skipDestination ?? null;
+      elements.skipButton.hidden = underway || !destination;
+      elements.skipButton.disabled = blocked || !destination;
+      if (!destination) return;
+      const label = use.phaseLabel(destination).toLowerCase();
+      elements.skipButton.textContent = use.tr("timer.skipTo", { phase: label }, `Skip to ${label}`);
+    }
+
+    renderCompletionLimit() {
+      const { host, elements } = this;
+      const note = elements.completionLimit;
+      // The note only matters while alerts can still be lost: permission not
+      // granted, or the page running outside an installed PWA.
+      const granted = host.Notification?.permission === "granted";
+      const installed = host.matchMedia?.("(display-mode: standalone)")?.matches === true
+        || host.navigator?.standalone === true;
+      note.hidden = granted && installed;
     }
 
     renderTimer() {
@@ -353,14 +473,23 @@
       this.renderTimerClock(timer, view);
       this.renderTimerInstruction(timer, status);
       this.renderTimerControls(timer, view);
+      this.renderCompletionLimit();
+      this.syncWakeLock(status);
     }
   }
 
   class ActivityView extends ViewPart {
+    constructor(state, external, use) {
+      super(state, external, use);
+      this.pendingTaskDeletion = null;
+      this.taskRename = null;
+      this.taskFocusHint = null;
+    }
+
     actions() {
       return super.actions([
         "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
-        "renderTasks", "formatTaskDuration", "formatHistoryDate"
+        "renderTasks", "flushTaskDeletion", "undoTaskDeletion", "formatTaskDuration", "formatHistoryDate"
       ]);
     }
 
@@ -481,13 +610,20 @@
     }
 
     taskListItem(task, summary, blocked) {
-      const { use, document } = this;
+      const { document } = this;
       const row = document.createElement("article");
       row.className = "task-row";
       row.dataset.taskId = task.id;
-      const name = document.createElement("strong");
-      name.className = "task-name";
-      name.textContent = task.title;
+      const controls = document.createElement("span");
+      controls.className = "task-actions";
+      if (this.state.coreCapabilities?.renameTask === true) controls.append(this.taskRenameButton(task, blocked));
+      controls.append(this.taskDeleteButton(task, blocked));
+      row.append(this.taskTitleCell(task), ...this.taskStatCells(summary), controls);
+      return row;
+    }
+
+    taskStatCells(summary) {
+      const { use, document } = this;
       const count = document.createElement("span");
       count.className = "task-stat";
       count.textContent = String(summary.count);
@@ -504,6 +640,11 @@
         "tasks.spentToday", { duration: this.formatTaskDuration(summary.durationMs) },
         `${this.formatTaskDuration(summary.durationMs)} spent today`
       ));
+      return [count, duration];
+    }
+
+    taskDeleteButton(task, blocked) {
+      const { use, document } = this;
       const remove = document.createElement("button");
       remove.className = "task-delete";
       remove.type = "button";
@@ -512,55 +653,192 @@
         "tasks.deleteNamed", { title: task.title }, `Delete ${task.title}`
       ));
       remove.disabled = blocked;
-      remove.addEventListener("click", () => use.deleteTask(task));
-      row.append(name, count, duration, remove);
-      return row;
+      remove.addEventListener("click", () => this.deferTaskDeletion(task));
+      return remove;
     }
 
-    focusedTaskDeletion() {
+    taskRenameButton(task, blocked) {
+      const { use, document } = this;
+      const rename = document.createElement("button");
+      rename.className = "task-rename";
+      rename.type = "button";
+      rename.textContent = use.tr("action.rename", {}, "Rename");
+      rename.setAttribute("aria-label", use.tr(
+        "tasks.renameNamed", { title: task.title }, `Rename ${task.title}`
+      ));
+      rename.disabled = blocked;
+      rename.addEventListener("click", () => this.beginTaskRename(task));
+      return rename;
+    }
+
+    taskTitleCell(task) {
+      if (this.taskRename?.taskId === task.id) return this.taskRenameEditor(task);
+      const name = this.document.createElement("strong");
+      name.className = "task-name";
+      name.textContent = task.title;
+      return name;
+    }
+
+    taskRenameEditor(task) {
+      const { use, document } = this;
+      const input = document.createElement("input");
+      input.className = "task-name task-rename-input";
+      input.type = "text";
+      input.maxLength = 512;
+      input.autocomplete = "off";
+      input.value = this.taskRename.draft;
+      input.setAttribute("aria-label", use.tr("tasks.renameNamed", { title: task.title }, `Rename ${task.title}`));
+      input.addEventListener("input", () => { this.taskRename.draft = input.value; });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); this.commitTaskRename(task); }
+        else if (event.key === "Escape") { event.preventDefault(); this.cancelTaskRename(task); }
+      });
+      // A re-render replaces the editor; only a blur on a live editor commits.
+      input.addEventListener("blur", () => { if (input.isConnected) this.commitTaskRename(task); });
+      return input;
+    }
+
+    beginTaskRename(task) {
+      this.taskRename = { taskId: task.id, draft: task.title };
+      this.renderTasks();
+      const input = this.taskRowElement(task.id)?.querySelector(".task-rename-input");
+      input?.focus({ preventScroll: true });
+      input?.select?.();
+    }
+
+    cancelTaskRename(task) {
+      if (this.taskRename?.taskId !== task.id) return;
+      this.taskRename = null;
+      this.renderTasks();
+      this.taskRowElement(task.id)?.querySelector(".task-rename")?.focus({ preventScroll: true });
+    }
+
+    // Empty, whitespace-only, and unchanged titles cancel without an intent.
+    // Rename replaces the task identity, so the focus hint names the new
+    // identity for the render that follows the commit.
+    async commitTaskRename(task) {
+      const rename = this.taskRename;
+      if (!rename || rename.taskId !== task.id) return false;
+      const title = rename.draft.trim();
+      this.cancelTaskRename(task);
+      if (title === "" || title === task.title) return false;
+      await this.flushTaskDeletion();
+      this.taskFocusHint = await this.renamedTaskId(title);
+      return this.use.renameTask(task, title);
+    }
+
+    async renamedTaskId(title) {
+      try { return (await this.use.sharedTaskIdentity(title)).id; }
+      catch {
+        // An invalid title fails validation again inside the intent, which
+        // reports it; the hint only steers focus and may stay empty.
+        return null;
+      }
+    }
+
+    taskRowElement(taskId) {
+      return Array.from(this.elements.taskList.children).find((row) => row.dataset?.taskId === taskId) || null;
+    }
+
+    deferTaskDeletion(task) {
+      // A second delete flushes the first immediately; only one undo is open.
+      const flushed = this.flushTaskDeletion();
+      const pending = { taskId: task.id, title: task.title, timer: null };
+      pending.timer = this.host.setTimeout(() => this.flushTaskDeletion(pending), TASK_DELETE_UNDO_MS);
+      this.pendingTaskDeletion = pending;
+      this.renderTasks();
+      this.showUndoToast(task.title);
+      return flushed;
+    }
+
+    // Flushing is idempotent: the first caller sends the delete, later callers
+    // and an undone timer resolve false. Callers must not report the result as
+    // their own; it is the delete's outcome.
+    flushTaskDeletion(expected = this.pendingTaskDeletion) {
+      const pending = this.pendingTaskDeletion;
+      if (!pending || pending !== expected) return Promise.resolve(false);
+      this.pendingTaskDeletion = null;
+      this.host.clearTimeout(pending.timer);
+      this.hideUndoToast();
+      return this.use.deleteTask({ id: pending.taskId, title: pending.title });
+    }
+
+    undoTaskDeletion() {
+      const pending = this.pendingTaskDeletion;
+      if (!pending) return false;
+      this.pendingTaskDeletion = null;
+      this.host.clearTimeout(pending.timer);
+      this.hideUndoToast();
+      this.renderTasks();
+      this.taskRowElement(pending.taskId)?.querySelector(".task-delete")?.focus({ preventScroll: true });
+      return true;
+    }
+
+    showUndoToast(title) {
+      const { use, elements } = this;
+      if (!elements.undoToast || !elements.undoToastText) return;
+      elements.undoToastText.textContent = use.tr("tasks.deletedNamed", { title }, `Deleted \u201c${title}\u201d`);
+      elements.undoToast.hidden = false;
+    }
+
+    hideUndoToast() {
+      if (this.elements.undoToast) this.elements.undoToast.hidden = true;
+    }
+
+    visibleTasks() {
+      const pendingId = this.pendingTaskDeletion?.taskId;
+      return this.state.tasks.filter((task) => task.id !== pendingId);
+    }
+
+    focusedTaskControl() {
       const { document, elements } = this;
       const active = document.activeElement;
-      if (!active) return null;
+      const control = ["task-delete", "task-rename", "task-rename-input"].find((name) => active?.classList?.contains(name));
+      if (!control) return null;
       const rows = Array.from(elements.taskList.children);
-      const index = rows.findIndex((row) => row.querySelector(".task-delete") === active);
+      const index = rows.findIndex((row) => row.contains(active));
       if (index < 0) return null;
       // Prefer the same task, then surviving successors, then predecessors.
       const candidates = [...rows.slice(index), ...rows.slice(0, index).reverse()];
-      return { active, taskIds: candidates.map((row) => row.dataset.taskId) };
+      const hint = this.taskFocusHint;
+      this.taskFocusHint = null;
+      return { active, control, taskIds: [hint, ...candidates.map((row) => row.dataset.taskId)].filter(Boolean) };
     }
 
-    restoreTaskDeletionFocus(focus, blocked) {
+    restoreTaskControlFocus(focus, blocked) {
       const { document, elements } = this;
       if (!focus || blocked || elements.tasksScreen.hidden) return;
       // A synchronous focus handler may have moved focus elsewhere during rendering.
       if (document.activeElement !== document.body && document.activeElement !== focus.active) return;
       const rows = new Map(Array.from(elements.taskList.children).map((row) => [row.dataset.taskId, row]));
       const taskId = focus.taskIds.find((id) => rows.has(id));
-      const target = taskId ? rows.get(taskId).querySelector(".task-delete") : elements.taskInput;
+      const row = taskId ? rows.get(taskId) : null;
+      const target = row?.querySelector(`.${focus.control}`) || row?.querySelector(".task-delete") || elements.taskInput;
       if (target.disabled || target.closest("[hidden], [inert]")) return;
       target.focus({ preventScroll: true });
     }
 
     renderTasks() {
-      const { state, use, elements } = this;
-      const focus = this.focusedTaskDeletion();
+      const { use, elements } = this;
+      const focus = this.focusedTaskControl();
       const blocked = use.controlsBlocked();
-      elements.taskCount.textContent = String(state.tasks.length).padStart(2, "0");
+      const tasks = this.visibleTasks();
+      elements.taskCount.textContent = String(tasks.length).padStart(2, "0");
       elements.taskList.replaceChildren();
       elements.taskInput.disabled = blocked;
       elements.taskForm.querySelector("button[type='submit']").disabled = blocked;
-      if (state.tasks.length === 0) {
+      if (tasks.length === 0) {
         elements.taskList.append(this.emptyTaskListItem());
-        this.restoreTaskDeletionFocus(focus, blocked);
+        this.restoreTaskControlFocus(focus, blocked);
         return;
       }
       const summaries = this.taskSummariesToday();
-      for (const task of state.tasks) {
+      for (const task of tasks) {
         elements.taskList.append(this.taskListItem(
           task, summaries.get(task.id) || { count: 0, durationMs: 0 }, blocked
         ));
       }
-      this.restoreTaskDeletionFocus(focus, blocked);
+      this.restoreTaskControlFocus(focus, blocked);
     }
 
     taskSummariesToday() {
@@ -597,26 +875,39 @@
   class AccountView extends ViewPart {
     actions() {
       return super.actions([
-        "renderProfile", "renderSyncStatus", "renderConflict", "renderBootstrapDialog",
+        "renderProfile", "hideUnreachableAvatar", "renderSyncStatus", "renderConflict", "renderBootstrapDialog",
         "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel"
       ]);
     }
 
     renderProfile() {
       const { state, use, elements } = this;
-      if (!state.user || state.logoutRecoveryRequired) {
-        elements.profile.hidden = true;
-        return;
-      }
-      elements.profile.hidden = false;
-      if (state.user.avatarUrl) {
-        elements.profileAvatar.src = state.user.avatarUrl;
+      const signedIn = Boolean(state.user) && !state.logoutRecoveryRequired;
+      elements.profile.hidden = !signedIn;
+      // Delete account sits in the rail Account section and follows the
+      // masthead profile visibility.
+      elements.accountSection.hidden = !signedIn;
+      if (!signedIn) return;
+      const avatarUrl = state.user.avatarUrl;
+      if (avatarUrl && avatarUrl !== this.unreachableAvatarUrl) {
+        elements.profileAvatar.src = avatarUrl;
         elements.profileAvatar.alt = use.tr("account.profilePhoto", {}, "Account profile photo");
         elements.profileAvatar.hidden = false;
       } else {
         elements.profileAvatar.removeAttribute("src");
         elements.profileAvatar.hidden = true;
       }
+    }
+
+    // The provider photo link can fail offline or after the provider revokes
+    // it. Without this the masthead keeps a broken-image glyph until the next
+    // sign-in, so remember the failed URL and keep the avatar hidden until the
+    // session carries a different one.
+    hideUnreachableAvatar() {
+      const { state, elements } = this;
+      this.unreachableAvatarUrl = state.user?.avatarUrl ?? null;
+      elements.profileAvatar.removeAttribute("src");
+      elements.profileAvatar.hidden = true;
     }
 
     pendingCount() {
@@ -739,12 +1030,14 @@
       elements.bootstrapCancel.disabled = state.bootstrapSubmitting;
     }
 
-    renderBootstrapSignOutError(limitRecovery) {
+    // signOutOffered: the dialog shows a control that runs logout(). The modal
+    // covers the main notice, so a refused attempt is repeated here.
+    renderBootstrapSignOutError(signOutOffered) {
       const { state, elements } = this;
       const signOutError = elements.bootstrapSignOutError;
       if (!signOutError) return;
       // Rewriting an unchanged alert would announce it again on unrelated renders.
-      const message = limitRecovery && state.bootstrapSignOutError || "";
+      const message = signOutOffered && state.bootstrapSignOutError || "";
       signOutError.hidden = !message;
       if (signOutError.textContent !== message) signOutError.textContent = message;
     }
@@ -806,7 +1099,8 @@
       );
       for (const name of ["bootstrapChoices", "bootstrapConfirmation", "bootstrapError",
         "bootstrapRetry", "bootstrapSignOut"]) elements[name].hidden = true;
-      this.renderBootstrapSignOutError(false);
+      // Retry runs logout() again after a volatile cleanup failure.
+      this.renderBootstrapSignOutError(true);
       elements.bootstrapDialog.setAttribute("aria-busy", String(state.logoutRecoveryBusy));
       elements.logoutRecoveryRetry.disabled = state.logoutRecoveryBusy;
       elements.logoutRecoverySignIn.disabled = state.logoutRecoveryBusy || !host.navigator.onLine;
@@ -944,10 +1238,12 @@
 
     setupTaskEvents() {
       const { use, elements, view } = this;
+      elements.undoToastUndo?.addEventListener("click", () => view.undoTaskDeletion());
       elements.taskForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const value = elements.taskInput.value;
         try {
+          await view.flushTaskDeletion();
           if (await use.addTask(value)) elements.taskInput.value = "";
         } catch (error) {
           view.showNotice(error.message || use.tr("notice.taskAddFailed", {}, "Task could not be added."));
@@ -964,6 +1260,7 @@
         use.primeCompletionAlerts();
         use.issueCommand(kind);
       });
+      elements.skipButton.addEventListener("click", () => use.issueSkip());
       elements.finishButton.addEventListener("click", () => use.finishTimer(false));
       elements.cancelButton.addEventListener("click", use.cancelAndClearTimer);
       elements.clearButton.addEventListener("click", () => {
@@ -977,6 +1274,7 @@
     setupAccountEvents() {
       const { state, use, elements, host, view } = this;
       elements.logoutButton.addEventListener("click", use.logout);
+      elements.profileAvatar.addEventListener("error", view.hideUnreachableAvatar);
       elements.deleteAccountButton.addEventListener("click", use.deleteAccount);
       elements.logoutRecoveryRetry?.addEventListener("click", use.retryPendingLogout);
       elements.logoutRecoverySignIn?.addEventListener("click", use.redirectToLogin);
@@ -1037,6 +1335,7 @@
       host.addEventListener("online", use.handleOnline);
       host.addEventListener("offline", use.handleOffline);
       host.addEventListener("pagehide", () => {
+        view.flushTaskDeletion();
         if (!use.database() || !state.deviceId) return;
         const context = use.captureDatabaseContext();
         accountOperation.requireBound(context);
@@ -1054,7 +1353,11 @@
         });
       });
       document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState !== "visible") return;
+        if (document.visibilityState !== "visible") {
+          view.flushTaskDeletion();
+          return;
+        }
+        view.resumeWakeLock();
         view.renderTimer();
         if (host.navigator.onLine) {
           if (state.authenticated && state.csrfToken && !use.needsBootstrapResolution()) {

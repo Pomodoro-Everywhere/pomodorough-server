@@ -447,24 +447,7 @@
         });
         context.assertCurrent();
         if (!["planned", "replay_saved"].includes(result.plan.status) || !result.claim?.body) {
-          if (result.plan.status === "oversized_saved") {
-            this.state.savedClaimRecovery = null;
-            this.state.conflict = "Saved sync request exceeds Core limits. Possibly delivered work remains blocked and unchanged.";
-          } else if (result.plan.status === "blocked_dependency") {
-            this.state.savedClaimRecovery = null;
-            this.state.conflict = "Sync is waiting for a retained command acknowledgement.";
-          } else if (result.claim?.sent) {
-            const queues = this.recoveryQueues(result.claim);
-            const names = this.syncStorage.savedClaimRecoveryQueues
-              ? this.syncStorage.savedClaimRecoveryQueues(result.claim, queues) : [];
-            this.state.savedClaimRecovery = { queues: names, armed: false };
-            this.state.conflict = this.syncStorage.savedClaimRecoveryMessage
-              ? this.syncStorage.savedClaimRecoveryMessage(result.claim, this.use.tr.bind(this.use), queues)
-              : "Saved sync request lacks original request bytes. Retained work needs recovery.";
-          } else {
-            this.state.savedClaimRecovery = null;
-            this.state.conflict = "Saved sync request lacks original request bytes. Retained work needs recovery.";
-          }
+          this.recordUnsendableClaim(result);
           throw new Error(this.state.conflict);
         }
         const sent = result.claim.sent;
@@ -485,6 +468,27 @@
         this.use.setInFlightDurationOperationIds([]);
         this.state.syncing = false;
         if (this.isCurrent(context)) this.use.render();
+      }
+    }
+
+    recordUnsendableClaim(result) {
+      if (result.plan.status === "oversized_saved") {
+        this.state.savedClaimRecovery = null;
+        this.state.conflict = "Saved sync request exceeds Core limits. Possibly delivered work remains blocked and unchanged.";
+      } else if (result.plan.status === "blocked_dependency") {
+        this.state.savedClaimRecovery = null;
+        this.state.conflict = "Sync is waiting for a retained command acknowledgement.";
+      } else if (result.claim?.sent) {
+        const queues = this.recoveryQueues(result.claim);
+        const names = this.syncStorage.savedClaimRecoveryQueues
+          ? this.syncStorage.savedClaimRecoveryQueues(result.claim, queues) : [];
+        this.state.savedClaimRecovery = { queues: names, armed: false };
+        this.state.conflict = this.syncStorage.savedClaimRecoveryMessage
+          ? this.syncStorage.savedClaimRecoveryMessage(result.claim, this.use.tr.bind(this.use), queues)
+          : "Saved sync request lacks original request bytes. Retained work needs recovery.";
+      } else {
+        this.state.savedClaimRecovery = null;
+        this.state.conflict = "Saved sync request lacks original request bytes. Retained work needs recovery.";
       }
     }
 

@@ -14,15 +14,15 @@
 
   const SINGLE_ELEMENT_IDS = Object.freeze([
     "installButton", "syncStatus", "syncStatusText", "profile", "profileAvatar",
-    "logoutButton", "deleteAccountButton", "conflictPanel", "conflictReason",
+    "logoutButton", "deleteAccountButton", "accountSection", "conflictPanel", "conflictReason",
     "conflictDismiss", "savedClaimRecovery", "savedClaimRecoveryText", "savedClaimDiscard",
-    "savedClaimCancel", "notice", "noticeText", "noticeDismiss", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
+    "savedClaimCancel", "notice", "noticeText", "noticeDismiss", "undoToast", "undoToastText", "undoToastUndo", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
     "bootstrapSignOutError", "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
     "autoStartBreaks", "appVersion", "taskSelector", "dial", "dialTicks", "dialProgress", "phaseLabel",
-    "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "timerToggle",
-    "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",
+    "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "completionLimit", "timerToggle",
+    "skipButton", "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",
     "taskInput", "taskList", "taskCount", "deviceMark", "logoutRecovery",
     "logoutRecoveryRetry", "logoutRecoverySignIn"
   ]);

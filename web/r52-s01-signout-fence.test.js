@@ -196,7 +196,7 @@ for (const online of [true, false]) {
   });
 }
 
-test("R54-S01 recovery without a fresh CSRF token keeps markers and reports once per attempt", async (t) => {
+test("R54-S01 recovery without a fresh CSRF token keeps markers and reports once per sign-out", async (t) => {
   const reports = captureReports(t);
   const fixture = missingCsrfFixture(false);
   await fixture.actions.logout();
@@ -222,9 +222,10 @@ function catalogTr(locale) {
   };
 }
 
-function unreadableQueueFixture(boundary, locale) {
+function unreadableQueueFixture(boundary, locale, beforeFailure = () => {}) {
   const failure = { active: true };
   const unreadable = async () => {
+    beforeFailure(fixture);
     if (failure.active) throw Object.assign(new Error("IndexedDB read failed"), { name: "UnknownError" });
   };
   const fixture = sessionFixture({ state: { pending: [{ id: "queued-1" }] },
@@ -279,6 +280,122 @@ for (const boundary of ["refreshAllPendingOperations", "guardedMutation"]) {
     });
   }
 }
+
+test("R54-S02 a read that succeeds after a refusal clears the dialog refusal and renders before the confirm", async (t) => {
+  const reports = captureReports(t);
+  const { failure, fixture } = unreadableQueueFixture("refreshAllPendingOperations", "en");
+  const database = fixture.use.database();
+  fixture.host.confirm = () => {
+    fixture.calls.push(["confirm", fixture.state.bootstrapSignOutError]);
+    return false;
+  };
+  await fixture.actions.logout();
+  assert.equal(fixture.state.bootstrapSignOutError, catalogs.en["account.logout.pendingUnavailable"]);
+  failure.active = false;
+  const start = fixture.calls.length;
+  await fixture.actions.logout();
+  // Cancel returns with limit recovery still open, so the cleared refusal
+  // must be rendered before the confirm, not only dropped from state.
+  assert.deepEqual(fixture.calls.slice(start).filter((entry) => entry === "render" || entry[0] === "confirm"),
+    ["render", ["confirm", null]]);
+  assert.equal(fixture.state.bootstrapSignOutError, null);
+  assert.deepEqual(fixture.state.pending, [{ id: "queued-1" }]);
+  assert.equal(fixture.fetchCalls.length, 0);
+  assert.equal(fixture.calls.includes("clear"), false);
+  assert.equal(fixture.use.database(), database);
+  assert.equal(markerOf(fixture), null);
+  assert.equal(fixture.state.logoutRecoveryRequired, false);
+  assert.equal(fixture.elements.logoutButton.disabled, false);
+  assert.equal(reports.length, 1);
+});
+
+test("R54-S02 a read that fails after another tab started sign-out refuses silently", async (t) => {
+  const reports = captureReports(t);
+  const { fixture } = unreadableQueueFixture("refreshAllPendingOperations", "en",
+    (current) => current.localStorage.setItem("pomodoroughPendingLogout", "1"));
+  await fixture.actions.logout();
+  assert.deepEqual(reports, []);
+  assert.deepEqual(fixture.calls.filter((entry) => ["warn", "notice"].includes(entry[0])), []);
+  assert.equal(fixture.state.bootstrapSignOutError ?? null, null);
+  assert.equal(fixture.calls.includes("render"), false);
+  assert.equal(fixture.calls.includes("confirm"), false);
+  assert.equal(fixture.fetchCalls.length, 0);
+});
+
+test("R54-S02 the refusal is the reviewed English sentence and its RTL pseudolocale form", () => {
+  const english = "Sign out did not finish because pending changes could not be read. "
+    + "Your local data was kept. Check browser storage and retry.";
+  const accents = { a: "à", e: "ë", i: "ï", o: "ö", u: "û", A: "Å", E: "Ë", I: "Ï", O: "Ö", U: "Û" };
+  assert.equal(catalogs.en["account.logout.pendingUnavailable"], english);
+  assert.equal(catalogs["ar-XB"]["account.logout.pendingUnavailable"],
+    `\u200f⟦${english.replace(/[aeiouAEIOU]/g, (letter) => accents[letter])}⟧\u200f`);
+});
+
+function overlappingRefusalFixture() {
+  const storage = memoryStorage();
+  storage.setItem = () => { throw Object.assign(new Error("quota"), { name: "QuotaExceededError" }); };
+  const unreadable = Object.assign(new Error("IndexedDB read failed"), { name: "UnknownError" });
+  const flow = { refuseOverlap: null, overlapping: null };
+  const reads = [async () => {}, () => new Promise((_resolve, reject) => { flow.refuseOverlap = reject; })];
+  const fixture = sessionFixture({ localStorage: storage,
+    host: { fetch: async () => {
+      // A second click's queue read fails while the first attempt revokes.
+      flow.refuseOverlap(unreadable);
+      await flow.overlapping;
+      return { ok: true, status: 200 };
+    } },
+    use: { refreshAllPendingOperations: () => reads.shift()() } });
+  fixture.use.clearLocalData = async () => { throw new Error("transaction abort"); };
+  return { fixture, flow, reads, unreadable };
+}
+
+test("R54-S02 cleanup retry recovery opens without an overlapping refusal and shows the Retry refusal", async (t) => {
+  const reports = captureReports(t);
+  const { fixture, flow, reads, unreadable } = overlappingRefusalFixture();
+  const refusal = catalogs.en["account.logout.pendingUnavailable"];
+  const first = fixture.actions.logout();
+  flow.overlapping = fixture.actions.logout();
+  await first;
+  assert.equal(fixture.state.logoutRecoveryRequired, true);
+  assert.equal(fixture.state.bootstrapSignOutError, null);
+  const notices = fixture.calls.filter((entry) => entry[0] === "notice").map((entry) => entry[1]);
+  assert.equal(notices.length, 2);
+  assert.equal(notices[0], refusal);
+  assert.match(notices[1], /transaction abort/);
+  assert.deepEqual(reports.map(([, operation]) => operation), ["session.logout.marker-write-failed",
+    "session.logout.pending-queues", "session.logout.cleanup-incomplete"]);
+  reads.push(async () => { throw unreadable; });
+  await fixture.actions.retryPendingLogout();
+  assert.equal(fixture.state.bootstrapSignOutError, refusal);
+  assert.equal(fixture.state.logoutRecoveryRequired, true);
+  assert.equal(fixture.state.logoutRecoveryBusy, false);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 0);
+});
+
+test("R52-A01 double Retry after a failed cleanup marker write runs cleanup once", async (t) => {
+  captureReports(t);
+  const storage = memoryStorage();
+  storage.setItem = () => { throw Object.assign(new Error("quota"), { name: "QuotaExceededError" }); };
+  const fixture = sessionFixture({ localStorage: storage });
+  const clearLocalData = fixture.use.clearLocalData;
+  fixture.use.clearLocalData = async () => { throw new Error("transaction abort"); };
+  await fixture.actions.logout();
+  assert.equal(fixture.state.logoutRecoveryRequired, true);
+  let releaseCleanup;
+  const cleanupHeld = new Promise((resolve) => { releaseCleanup = resolve; });
+  fixture.use.clearLocalData = async (...args) => { await cleanupHeld; return clearLocalData(...args); };
+  const revokes = fixture.fetchCalls.length;
+  const first = fixture.actions.retryPendingLogout();
+  const second = fixture.actions.retryPendingLogout();
+  const stillRunning = new Promise((resolve) => setImmediate(resolve, "still running"));
+  assert.equal(await Promise.race([second, stillRunning]), false);
+  releaseCleanup();
+  assert.equal(await first, true);
+  assert.deepEqual(fixture.fetchCalls.slice(revokes).map(([url]) => url), ["/api/v1/auth/logout"]);
+  assert.equal(fixture.calls.filter((entry) => entry === "clear").length, 1);
+  assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 1);
+  assert.equal(fixture.state.logoutRecoveryRequired, false);
+});
 
 test("R52-S01 cancelled sign-out sends no request and sets no fence", async () => {
   const fixture = sessionFixture({ state: { pending: [{}] }, host: { confirm: () => false } });
@@ -361,4 +478,68 @@ test("R53-S01 marker diagnostics classify errors and never report storage except
   assert.deepEqual(reports.map(([error, operation]) => [error.name, error.message, operation]),
     ["SecurityError", "QuotaExceededError", "StorageError"].map((name) =>
       [name, "Sign-out recovery marker storage failed.", "session.logout.marker-write-failed"]));
+});
+
+// R54-S01 test-quality gaps: stale-context guard, diagnostic shape, and the
+// Retry busy guard on the missing-CSRF recovery path.
+
+test("R54-S01 late revocation failure after an account switch stays silent", async (t) => {
+  const reports = captureReports(t);
+  let rejectRevocation = null;
+  const fixture = sessionFixture({ host: { fetch: (...args) => {
+    fixture.fetchCalls.push(args);
+    return new Promise((_resolve, reject) => { rejectRevocation = reject; });
+  } } });
+  const logout = fixture.actions.logout();
+  for (let turn = 0; !rejectRevocation && turn < 200; turn += 1) await new Promise(setImmediate);
+  assert.ok(rejectRevocation, "revocation request must be in flight");
+  fixture.state.localOwnerId = incarnationFixture.ownerId("user-2");
+  rejectRevocation(new Error("offline"));
+  await logout;
+  assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/auth/logout"]);
+  assert.deepEqual(fixture.calls.filter((entry) => entry[0] === "warn"), []);
+  assert.deepEqual(reports, []);
+});
+
+function captureReportedErrors(t) {
+  const reports = [];
+  const previous = globalThis.PomodoroughSentryClient;
+  globalThis.PomodoroughSentryClient = { reportFrontendError: (error, operation) => reports.push([error, operation]) };
+  t.after(() => { globalThis.PomodoroughSentryClient = previous; });
+  return reports;
+}
+
+function errorShape(error) {
+  return { name: error.name, message: error.message, ownKeys: Object.keys(error) };
+}
+
+for (const online of [true, false]) {
+  test(`R54-S01 missing CSRF diagnostics carry only the fixed message (online=${online})`, async (t) => {
+    const reports = captureReportedErrors(t);
+    const fixture = missingCsrfFixture(online);
+    fixture.state.user = { ...fixture.state.user, email: "private@example.com", name: "Private Name" };
+    await fixture.actions.logout();
+    const expected = { name: "Error", message: "missing_csrf", ownKeys: [] };
+    const warnings = fixture.calls.filter((entry) => entry[0] === "warn");
+    assert.deepEqual(warnings.map(([, prefix, error, ...extra]) => [prefix, errorShape(error), extra]),
+      [["Pomodorough server revocation deferred until reconnect:", expected, []]]);
+    assert.deepEqual(reports.map(([error, operation]) => [errorShape(error), operation]),
+      [[expected, "session.logout.revocation-deferred"]]);
+  });
+}
+
+test("R54-S01 double Retry during missing-CSRF recovery sends one revoke", async (t) => {
+  captureReports(t);
+  const fixture = missingCsrfFixture(false);
+  await fixture.actions.logout();
+  assertRecoveryRetained(fixture);
+  serveSession(fixture, "fresh-csrf");
+  fixture.use.resumeStartup = async (context) => ({ result: await fixture.actions.loadSession(context), context });
+  const retries = await Promise.allSettled([fixture.actions.retryPendingLogout(), fixture.actions.retryPendingLogout()]);
+  assert.deepEqual(fixture.fetchCalls.map(([url]) => url), ["/api/v1/me", "/api/v1/auth/logout"]);
+  assert.deepEqual(retries.map((retry) => retry.status), ["fulfilled", "fulfilled"]);
+  assert.equal(retries[1].value, false);
+  assert.equal(markerOf(fixture), null);
+  assert.equal(fixture.state.logoutRecoveryRequired, false);
+  assert.equal(fixture.state.logoutRecoveryBusy, false);
 });

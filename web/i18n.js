@@ -137,7 +137,7 @@
       SUPPORTED_LOCALES
     );
     const load = async (candidate) => {
-      const response = await fetch(`/locales/${candidate}.json?v=3`, { cache: "no-cache" });
+      const response = await fetch(`/locales/${candidate}.json?v=4`, { cache: "no-cache" });
       if (!response.ok) throw new Error(`locale ${candidate} failed (${response.status})`);
       return response.json();
     };

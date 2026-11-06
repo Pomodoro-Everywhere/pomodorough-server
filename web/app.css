@@ -473,6 +473,15 @@ main {
   font-weight: 800;
 }
 
+.undo-toast {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  border-left-color: var(--track);
+}
+
 .bootstrap-dialog {
   box-sizing: border-box;
   width: min(43rem, calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 2rem));
@@ -1151,6 +1160,44 @@ main {
   opacity: 0.45;
 }
 
+/* Account controls leave the masthead: Delete account is the last rail
+   item so the destructive action never sits beside Sign out. */
+.account-rail {
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 1.35rem;
+  padding-top: 1rem;
+  border-top: 2px solid var(--track);
+}
+
+.account-rail strong,
+.account-rail small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.account-rail strong {
+  font-family: var(--display);
+  font-size: 1rem;
+  letter-spacing: 0.025em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.account-rail small {
+  margin-top: 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+/* Danger text on the light rail uses the deep danger tone for contrast;
+   the signal rule underneath keeps the warning colour. */
+.account-rail .action-danger {
+  margin-top: 0.9rem;
+  color: var(--danger);
+}
+
 .app-version {
   margin: 1rem 0 0;
   color: var(--subtle);
@@ -1548,6 +1595,12 @@ main {
   border-color: var(--signal) !important;
 }
 
+/* Skip shows only while no timer is underway, so it owns the columns that
+   Finish and Cancel use when one is. Both states keep one row. */
+.action-skip {
+  grid-column: 2 / -1;
+}
+
 .action-clear {
   grid-column: 1 / -1;
   min-height: 2.75rem !important;
@@ -1559,12 +1612,6 @@ main {
   font-family: var(--utility) !important;
   font-size: 0.63rem !important;
   clip-path: none !important;
-}
-
-/* Disabled clear keeps the dimmed text but drops the rule so it does not
-   read as struck through. */
-.action-clear:disabled {
-  border-bottom-color: transparent !important;
 }
 
 .history-strip {
@@ -1917,7 +1964,6 @@ main {
   font-family: var(--display);
   font-size: 1.2rem;
   letter-spacing: 0.025em;
-  text-transform: uppercase;
 }
 
 .task-stat {
@@ -1927,11 +1973,19 @@ main {
   font-weight: 800;
 }
 
+.task-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-inline-end: 0.8rem;
+}
+
 .task-delete {
   min-height: 2.75rem;
   display: inline-flex;
   align-items: center;
-  margin-inline-end: 0.8rem;
   padding: 0.55rem 0.9rem;
   color: var(--porcelain);
   background: #7c1d18;
@@ -1942,7 +1996,34 @@ main {
   text-transform: uppercase;
 }
 
-.task-delete:focus-visible {
+.task-rename {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 0.9rem;
+  color: var(--track);
+  background: var(--porcelain);
+  border: 2px solid var(--track);
+  font-family: var(--utility);
+  font-size: 0.65rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.task-rename-input {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.6rem;
+  color: var(--page-text);
+  background: var(--surface);
+  border: 2px solid var(--track);
+  font: inherit;
+  font-weight: 800;
+}
+
+.task-delete:focus-visible,
+.task-rename:focus-visible,
+.task-rename-input:focus-visible {
   outline: 3px solid var(--track);
   outline-offset: 2px;
 }
@@ -2258,7 +2339,8 @@ main {
     gap: 0.55rem;
   }
 
-  .action-bank .action-danger {
+  .action-bank .action-danger,
+  .action-bank .action-skip {
     grid-column: 1 / -1;
     min-height: 2.7rem;
   }
@@ -2350,9 +2432,10 @@ main {
     content: attr(data-stat-label);
   }
 
-  .task-delete {
+  .task-actions {
     grid-column: 1 / -1;
     justify-self: start;
+    justify-content: start;
     margin: 0 0 0 0.8rem;
   }
 
@@ -2454,7 +2537,8 @@ main {
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr);
   }
 
-  .action-bank .action-danger {
+  .action-bank .action-danger,
+  .action-bank .action-skip {
     grid-column: 1 / -1;
   }
 }
@@ -2543,9 +2627,10 @@ main {
     content: attr(data-stat-label);
   }
 
-  .task-delete {
+  .task-actions {
     grid-column: 1 / -1;
     justify-self: start;
+    justify-content: start;
     margin: 0 0 0 0.8rem;
   }
 }
@@ -2651,6 +2736,7 @@ main {
   .phase-index,
   .minute-unit,
   .auto-start-copy small,
+  .account-rail small,
   .rail-note,
   .history-task,
   .history-empty,
@@ -2687,6 +2773,7 @@ main {
   .task-selector-row,
   .duration-row,
   .auto-start-row,
+  .account-rail,
   .history-heading,
   .history-item,
   .tasks-heading,
@@ -2713,8 +2800,24 @@ main {
     border-color: var(--porcelain);
   }
 
-  .task-delete:focus-visible {
+  .task-rename {
+    color: var(--page-text);
+    background: var(--surface);
+    border-color: var(--surface-border);
+  }
+
+  .task-rename-input {
+    border-color: var(--surface-border);
+  }
+
+  .task-delete:focus-visible,
+  .task-rename:focus-visible,
+  .task-rename-input:focus-visible {
     outline-color: var(--porcelain);
+  }
+
+  .account-rail .action-danger {
+    color: var(--signal);
   }
 }
 

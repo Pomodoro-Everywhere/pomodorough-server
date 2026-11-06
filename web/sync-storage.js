@@ -172,6 +172,14 @@
     if (typeof input.deviceId !== "string" || !input.deviceId) throw new AccountOwnershipError();
   }
 
+  // Rename may queue an upsert, a delete, a selection move, and a retarget,
+  // so core asks for four identities. Other preferences keep three and timer
+  // intents keep two.
+  function workspaceIdentityCount(input) {
+    if (input.intent?.kind === "renameTask") return 4;
+    return input.preference ? 3 : 2;
+  }
+
   function workspaceMutationRequest(records, input) {
     const raw = workspaceRecords(records);
     const inFlight = new Set(input.inFlightDurationOperationIds || []);
@@ -181,7 +189,7 @@
       hlc: records.hlc ?? { wallMs: 0, counter: 0 }, lastUuid: records.uuidV7 ?? null };
     const tick = callWorkspaceCore("hlc.tick.v1", { local: allocation.hlc, physicalNowMs: nowMs }, input.sharedCore || sharedCore);
     const pendingIds = workspaceCore.DOMAINS.flatMap((domain) => (records[domain] || []).map((item) => item.id));
-    const identities = { commandUuids: reserveUuid7(tick.wallMs, input.preference ? 3 : 2, allocation.lastUuid, pendingIds, input.entropy),
+    const identities = { commandUuids: reserveUuid7(tick.wallMs, workspaceIdentityCount(input), allocation.lastUuid, pendingIds, input.entropy),
       timerUuid: input.timerUuid };
     const occurredAt = new Date(nowMs).toISOString();
     return {

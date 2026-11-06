@@ -497,7 +497,11 @@ test("CORE-PWA03 401 normal authorized close preserves recreated metadata and re
   const after = await dump(current.database);
   const state = observed(current);
   receipts.push({ case: t.name, recreated, after, state });
-  assert.deepEqual(after, recreated);
+  // The close releases only this tab's own bootstrap gate, which would
+  // otherwise block the next signed-in tab for the whole lease (R54-S04).
+  const ownGate = recreated.meta.find((entry) => entry.key === "bootstrapGate");
+  assert.equal(ownGate?.value.token, current.state.tabId);
+  assert.deepEqual(after, { ...recreated, meta: recreated.meta.filter((entry) => entry !== ownGate) });
   assert.equal(state.marker, null);
   assert.equal(state.companion, null);
   assert.equal(state.redirects.length, 1);

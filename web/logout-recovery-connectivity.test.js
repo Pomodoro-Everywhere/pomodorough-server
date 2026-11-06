@@ -129,10 +129,15 @@ test("connectivity: stale enabled sign-in cannot redirect offline and works once
   assertActions(current);
   await click(current, "logoutRecoverySignIn");
   await click(current, "logoutRecoverySignIn");
-  await assertPreserved(environment, [["redirect", "/auth/google/start?return=%2Fapp"]]);
+  // R54-S03: the sign-in carries the marker's landing token in its return path.
+  const signInToken = environment.localStorage.getItem("pomodoroughPendingLogoutSignIn");
+  assert.match(signInToken ?? "", /^[0-9a-f]{32}$/);
+  await assertPreserved(environment, [["redirect", `/auth/google/start?return=${encodeURIComponent(`/app?signin=${signInToken}`)}`]]);
 });
 
-test("connectivity: busy retry blocks stale sign-in and overlapping real events without touching B", async (context) => {
+// A second retry that ignores the busy guard awaits the held session forever,
+// because the hold is released only by an after hook; the timeout makes it fail.
+test("connectivity: busy retry blocks stale sign-in and overlapping real events without touching B", { timeout: 30000 }, async (context) => {
   const environment = await unknownOwnerRecovery(context);
   const { current } = environment;
   const entered = deferred();

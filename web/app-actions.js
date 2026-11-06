@@ -79,7 +79,7 @@
     ],
     provides: [
       "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
-      "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "executeWorkspaceEffects",
+      "issueTaskOperation", "addTask", "deleteTask", "renameTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "issueSkip", "executeWorkspaceEffects",
       "completedFocusCountForDay", "longBreakProgress", "nextBreakPhase", "nextPhaseAfterCompletion",
       "selectedPhaseAfterRejectedFinish", "selectedPhaseAfterCommandAcknowledgements", "finishTimer",
       "completionRetryDelay", "completionAlertTitle", "primeCompletionAlerts", "startCompletionAlert",
@@ -159,7 +159,7 @@
     actions() {
       return bindActions(this, [
         "issueDurationOperation", "issueAutoStartOperation", "issueSelectedTaskOperation",
-        "issueTaskOperation", "addTask", "deleteTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "executeWorkspaceEffects"
+        "issueTaskOperation", "addTask", "deleteTask", "renameTask", "issueCommand", "cancelAndClearTimer", "issuePhaseSelection", "issueSkip", "executeWorkspaceEffects"
       ]);
     }
 
@@ -184,9 +184,14 @@
       return this.issueWorkspaceIntent({ kind: "selectTask", taskId }, { preference: true, context, ownerId: expectedUserId }, "actions.selected-task.save-failed");
     }
 
+    taskIntent(type, task) {
+      if (type === "upsert") return { kind: "upsertTask", title: task.title };
+      if (type === "rename") return { kind: "renameTask", taskId: task.id, title: task.title };
+      return { kind: "deleteTask", taskId: task.id };
+    }
+
     async issueTaskOperation(type, task, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      const intent = type === "upsert" ? { kind: "upsertTask", title: task.title } : { kind: "deleteTask", taskId: task.id };
-      return this.issueWorkspaceIntent(intent, { preference: true, ownerId: expectedUserId }, "actions.task.save-failed");
+      return this.issueWorkspaceIntent(this.taskIntent(type, task), { preference: true, ownerId: expectedUserId }, "actions.task.save-failed");
     }
 
     async addTask(title) {
@@ -208,12 +213,22 @@
       return this.issueTaskOperation("delete", task);
     }
 
+    async renameTask(task, title) {
+      return this.issueTaskOperation("rename", { id: task.id, title });
+    }
+
     async issueCommand(type, options = {}) {
       return this.issueWorkspaceIntent({ kind: type }, {}, "actions.timer.save-failed");
     }
 
     async issuePhaseSelection(phase) {
       return this.issueWorkspaceIntent({ kind: "selectPhase", phase }, {}, "view.phase.save-failed");
+    }
+
+    async issueSkip() {
+      // Core picks the destination phase from the completion lifecycle and
+      // cadence; the PWA only forwards the intent.
+      return this.issueWorkspaceIntent({ kind: "skip" }, {}, "actions.timer.save-failed");
     }
 
     async issueWorkspaceIntent(intent, options, operation) {
@@ -308,6 +323,8 @@
       this.completionAlertDismissedTimerID = null;
       this.completionAlertSnapshot = null;
       this.heartbeatRenewal = null;
+      this.appBadgeShown = false;
+      this.appBadgeWarned = false;
       this.playCompletionTone = this.playCompletionTone.bind(this);
     }
 
@@ -457,6 +474,7 @@
       this.completionAlertTimerID = timer.id;
       this.completionAlertSnapshot = { id: timer.id, phase: timer.phase };
       this.showCompletionNotification();
+      this.showAppBadge();
       if (this.playCompletionTone()) {
         this.completionAlertTimer = this.host.setInterval(this.playCompletionTone, COMPLETION_SOUND_INTERVAL_MS);
       }
@@ -471,6 +489,34 @@
       if (this.completionAlertTimerID) this.completionAlertDismissedTimerID = this.completionAlertTimerID;
       this.completionAlertTimerID = null;
       this.completionAlertSnapshot = null;
+      this.clearAppBadge();
+    }
+
+    // The Badging API is optional and may reject outside an installed app.
+    // A missing badge is cosmetic, so a refusal warns once per session and
+    // never raises a notice.
+    callAppBadge(method, ...args) {
+      const navigator = this.host.navigator;
+      if (typeof navigator?.[method] !== "function") return false;
+      try { Promise.resolve(navigator[method](...args)).catch((error) => this.warnAppBadge(error)); }
+      catch (error) { this.warnAppBadge(error); }
+      return true;
+    }
+
+    showAppBadge() {
+      if (this.callAppBadge("setAppBadge", 1)) this.appBadgeShown = true;
+    }
+
+    clearAppBadge() {
+      if (!this.appBadgeShown) return;
+      this.appBadgeShown = false;
+      this.callAppBadge("clearAppBadge");
+    }
+
+    warnAppBadge(error) {
+      if (this.appBadgeWarned) return;
+      this.appBadgeWarned = true;
+      this.host.console.warn("App badge unavailable:", error);
     }
 
     scheduleCompletionRetry(timerId, outcome, context = this.use.captureAccountContext()) {

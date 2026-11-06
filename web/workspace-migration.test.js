@@ -321,7 +321,7 @@ test("migration expired timer presentation and primary control use Core read sta
   view.renderTimer();
   assert.equal(client.state.timer.status, "running", "keep the raw presented source for automatic completion admission");
   assert.equal(client.state.readModel.display.status, "completed");
-  assert.match(elements.timerDetail.textContent, /COMPLETED/);
+  assert.match(elements.timerDetail.textContent, /^NEXT \/ \d+ MIN$/, "completed reading names the next phase length");
   assert.equal(elements.timerToggle.textContent, "Start short break");
   assert.equal(elements.finishButton.disabled, false);
   assert.equal(source.status, "running");
@@ -349,6 +349,20 @@ for (let count = 0; count <= 12; count += 1) {
     assert.equal(model.cadence.skipDestination, count % 4 === 3 ? "long_break" : "short_break");
   });
 }
+
+test("migration idle Skip forwards the core skip intent and lands on the core destination", async (t) => {
+  const { client } = await prepared(t);
+  assert.equal(client.state.selectedPhase, "focus");
+  const before = client.use.getWorkspaceReadModel();
+  assert.equal(before.cadence.skipDestination, "short_break");
+  assert.equal(await client.use.issueSkip(), true, client.notices.join("; "));
+  assert.equal(client.state.selectedPhase, "short_break");
+  const after = client.use.getWorkspaceReadModel();
+  assert.equal(after.cadence.skipDestination, "focus");
+  assert.deepEqual(after.availableIntents, before.availableIntents);
+  assert.equal(await client.use.issueSkip(), true, client.notices.join("; "));
+  assert.equal(client.state.selectedPhase, "focus");
+});
 
 test("migration account replacement aborts complete group and allocation", async (t) => {
   const { client } = await prepared(t);
@@ -615,7 +629,7 @@ test("migration ownership change after planning aborts every member before effec
   await assert.rejects(storage.planWorkspaceMutation(client.use.database(), input), storage.AccountOwnershipError);
   assert.deepEqual(await dump(client.use.database()), before);
   assert.equal(checks, 2);
-  assert.equal(call("core.version", {}).coreVersion, "0.53.0");
+  assert.equal(call("core.version", {}).coreVersion, "0.54.0");
 });
 
 test("migration claimed head-covered timer survives reload and permits a scoped Pause without rewriting its claim", async (t) => {
@@ -655,6 +669,6 @@ test("migration timer and preference routes invoke official workspace planners",
 
 test("migration version provenance is the immutable official 0.51 release", async (t) => {
   const { core } = await prepared(t);
-  assert.equal(core.call("core.version", {}).coreVersion, "0.53.0");
-  assert.equal(fs.statSync(path.join(__dirname, "pomodorough_core.wasm")).size, 2883081);
+  assert.equal(core.call("core.version", {}).coreVersion, "0.54.0");
+  assert.equal(fs.statSync(path.join(__dirname, "pomodorough_core.wasm")).size, 2883106);
 });

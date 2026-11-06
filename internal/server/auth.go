@@ -156,6 +156,10 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		s.writeGoogleCallbackFailure(w, r, googleFailure)
 		return
 	}
+	if err := s.revokeReplacedWebSession(r); err != nil {
+		s.internalError(w, r, "revoke replaced web session", err)
+		return
+	}
 	session, failure := s.persistWebAccount(r.Context(), identity)
 	if failure != nil {
 		s.internalError(w, r, failure.operation, failure.err)
@@ -164,6 +168,41 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	setSessionCookie(w, session.sessionToken, session.expiresAt)
 	setCSRFCookie(w, session.csrfToken, session.expiresAt)
 	http.Redirect(w, r, state.ReturnTo, http.StatusSeeOther)
+}
+
+// revokeReplacedWebSession revokes the live web session whose cookie the
+// callback is about to overwrite. Once the cookie is replaced the browser can
+// no longer sign that session out, so a sign-out whose revocation was deferred
+// would leave it valid (R54-S03). It runs after Google verification, so an
+// unverified callback never signs the browser out, and before the new session
+// exists, so a failure leaves the browser on its old cookie. Only the session
+// cookie counts: a bearer header names a native session the callback does not
+// replace. A cookie that no longer authenticates has nothing left to revoke.
+func (s *Server) revokeReplacedWebSession(r *http.Request) error {
+	cookie, err := r.Cookie(authn.WebSessionCookie)
+	if err != nil {
+		return nil
+	}
+	userID, tokenHash, err := authn.ParseOpaqueToken(cookie.Value)
+	if err != nil {
+		return nil
+	}
+	replaced, err := s.authenticateCredential(r.Context(), userID, store.DeletionCredential{Method: "cookie", TokenHash: tokenHash})
+	if isUnauthorized(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = s.store.RevokeSessionForGeneration(r.Context(), replaced.UserID, replaced.Generation, replaced.SessionID, time.Now())
+	if isUnauthorized(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.hub.disconnectSession(replaced.UserID, replaced.Generation, replaced.SessionID)
+	return nil
 }
 
 func (s *Server) exchangeAndVerifyGoogle(ctx context.Context, code string, state authn.OAuthState) (googleIdentity, *googleAuthenticationFailure) {

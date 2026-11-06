@@ -250,6 +250,7 @@ test("R51-S04 RTL, keyboard focus, and callbacks survive the fold repair", (t) =
   for (const dir of ["ltr", "rtl"]) {
     const f = headerFixture(t, dir);
     assert.equal(f.elements.profile.hidden, false, `${dir} profile visible`);
+    assert.equal(f.elements.accountSection.hidden, false, `${dir} account section follows profile visibility`);
     assert.equal(f.elements.logoutButton.type, "button", `${dir} Sign out stays a button`);
     assert.equal(f.elements.deleteAccountButton.type, "button", `${dir} Delete stays a button`);
     assert.match(appCss, /\.profile\s*\{[^}]*border-inline-start/, `${dir} logical divider preserved`);
@@ -267,5 +268,13 @@ test("R51-S04 RTL, keyboard focus, and callbacks survive the fold repair", (t) =
   assert.match(appHtml, /<div id="profile" class="profile" hidden>/);
   assert.match(appHtml, /<button id="logoutButton" class="text-button" type="button"/);
   assert.match(appHtml, /<button id="deleteAccountButton" class="text-button action-danger" type="button"/);
+  // Delete account left the masthead for the rail Account section; the
+  // header keeps Privacy and Sign out only.
+  const profileBlock = /<div id="profile" class="profile" hidden>([\s\S]*?)<\/div>/.exec(appHtml)[1];
+  assert.doesNotMatch(profileBlock, /deleteAccountButton/);
+  assert.match(profileBlock, /id="logoutButton"/);
+  const accountBlock = /<section id="accountSection"[^>]*>([\s\S]*?)<\/section>/.exec(appHtml)[1];
+  assert.match(accountBlock, /id="deleteAccountButton"/);
+  assert.ok(appHtml.indexOf('id="accountSection"') > appHtml.indexOf('id="appVersion"'), "Account section is the last rail item");
   assert.match(appHtml, /<a class="wordmark" href="\/" aria-label="Pomodorough home"/);
 });

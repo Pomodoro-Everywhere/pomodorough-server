@@ -223,7 +223,8 @@ function fakeElement() {
 function viewFixture(overrides = {}) {
   const elements = {
     taskSelector: fakeElement(), timerToggle: fakeElement(), timerInstruction: fakeElement(),
-    finishButton: fakeElement(), cancelButton: fakeElement(), clearButton: fakeElement(),
+    skipButton: fakeElement(), finishButton: fakeElement(), cancelButton: fakeElement(),
+    clearButton: fakeElement(), completionLimit: fakeElement(),
     ...overrides.elements
   };
   const state = baseState({
@@ -238,7 +239,7 @@ function viewFixture(overrides = {}) {
   };
   const view = require("./app-view.js").create({
     state, external: {
-      host: { document: { createElement: () => fakeElement() } },
+      host: { document: { createElement: () => fakeElement() }, ...overrides.host },
       syncCore: {}, syncStorage: {}, elements
     }, use
   });
@@ -299,6 +300,72 @@ test("view clear control is stop-sound only and never dismisses terminal timers"
   for (const status of ["idle", "running", "paused", "completed", "cancelled", "superseded"]) {
     silent.view.renderTimerControls({ phase: "focus" }, { status, remaining: 0 });
     assert.equal(silent.elements.clearButton.disabled, true, status);
+    assert.equal(silent.elements.clearButton.hidden, true, `${status} hides Stop sound while silent`);
+  }
+  assert.equal(ringing.elements.clearButton.hidden, false);
+});
+
+function bankVisibility(elements) {
+  return Object.fromEntries(["skipButton", "finishButton", "cancelButton", "clearButton"].map((name) =>
+    [name, { hidden: elements[name].hidden, disabled: elements[name].disabled }]));
+}
+
+test("view idle bank offers Start and Skip while an underway bank offers Finish and Cancel", () => {
+  const fixture = viewFixture();
+  const timer = { id: "bank", phase: "focus", plannedDurationMs: 60000 };
+  const render = (status) => {
+    fixture.state.timer = { ...timer, status };
+    fixture.state.readModel = official.renderModel(fixture.state);
+    fixture.view.renderTimerControls(fixture.state.timer, { status, remaining: 0 });
+    return bankVisibility(fixture.elements);
+  };
+  assert.deepEqual(render("idle"), {
+    skipButton: { hidden: false, disabled: false }, finishButton: { hidden: true, disabled: true },
+    cancelButton: { hidden: true, disabled: true }, clearButton: { hidden: true, disabled: true }
+  });
+  assert.equal(fixture.elements.skipButton.textContent, "Skip to short_break");
+  for (const status of ["running", "paused"]) {
+    assert.deepEqual(render(status), {
+      skipButton: { hidden: true, disabled: false }, finishButton: { hidden: false, disabled: false },
+      cancelButton: { hidden: false, disabled: false }, clearButton: { hidden: true, disabled: true }
+    }, status);
+  }
+  assert.equal(render("completed").skipButton.hidden, false, "terminal timers offer Skip beside Start");
+  assert.equal(fixture.elements.finishButton.hidden, true);
+});
+
+test("view skip label follows the core skip destination and hides without one", () => {
+  const fixture = viewFixture({ use: { phaseLabel: (phase) => ({ long_break: "Long break", focus: "Focus" })[phase] } });
+  fixture.state.readModel = { availableIntents: ["start"], canonical: { remainingMs: 0 },
+    cadence: { skipDestination: "long_break" } };
+  fixture.view.renderTimerControls({ phase: "focus" }, { status: "idle", remaining: 0 });
+  assert.equal(fixture.elements.skipButton.textContent, "Skip to long break");
+  fixture.state.readModel = { availableIntents: ["start"], canonical: { remainingMs: 0 },
+    cadence: { skipDestination: "focus" } };
+  fixture.view.renderTimerControls({ phase: "short_break" }, { status: "idle", remaining: 0 });
+  assert.equal(fixture.elements.skipButton.textContent, "Skip to focus");
+  fixture.state.readModel = { availableIntents: ["start"], canonical: { remainingMs: 0 } };
+  fixture.view.renderTimerControls({ phase: "focus" }, { status: "idle", remaining: 0 });
+  assert.equal(fixture.elements.skipButton.hidden, true, "no core destination hides Skip");
+  assert.equal(fixture.elements.skipButton.disabled, true);
+});
+
+test("view completion note hides only when alerts are granted inside an installed app", () => {
+  const cases = [
+    { name: "browser tab without permission", host: {}, hidden: false },
+    { name: "granted in a browser tab", host: { Notification: { permission: "granted" },
+      matchMedia: () => ({ matches: false }) }, hidden: false },
+    { name: "denied in an installed app", host: { Notification: { permission: "denied" },
+      matchMedia: () => ({ matches: true }) }, hidden: false },
+    { name: "granted in a standalone display", host: { Notification: { permission: "granted" },
+      matchMedia: (query) => ({ matches: query === "(display-mode: standalone)" }) }, hidden: true },
+    { name: "granted on an iOS home-screen app", host: { Notification: { permission: "granted" },
+      matchMedia: () => ({ matches: false }), navigator: { standalone: true } }, hidden: true }
+  ];
+  for (const item of cases) {
+    const fixture = viewFixture({ host: item.host });
+    fixture.view.renderCompletionLimit();
+    assert.equal(fixture.elements.completionLimit.hidden, item.hidden, item.name);
   }
 });
 
@@ -322,7 +389,8 @@ function dialFixture() {
   };
   const elements = {
     taskSelector: fakeElement(), timerToggle: fakeElement(), timerInstruction: fakeElement(),
-    finishButton: fakeElement(), cancelButton: fakeElement(), clearButton: fakeElement(),
+    skipButton: fakeElement(), finishButton: fakeElement(), cancelButton: fakeElement(),
+    clearButton: fakeElement(), completionLimit: fakeElement(),
     dialTicks, dialProgress: { style: {} }, dial: { dataset: {} },
     phaseLabel: fakeElement(), timerDisplay: fakeElement(), timerDetail: fakeElement(),
     longBreakProgress: fakeElement()
@@ -744,4 +812,17 @@ test("S60 completion permission failure warns and reports once", async (t) => {
   assert.equal(fixture.warnings.length, 1);
   assert.match(String(fixture.warnings[0][0]), /completion permission unavailable/);
   assert.match(String(reports[0][0]?.message || reports[0][0]), /permission denied/);
+});
+
+test("view detail line names the next phase length after a completed run", () => {
+  const fixture = dialFixture();
+  const clock = { timeText: "05:00", totalSeconds: 300, seconds: 0, minutes: 5, progress: 0 };
+  const nextBreak = { phase: "short_break", plannedDurationMs: 300_000 };
+  fixture.view.renderTimerClock(nextBreak, { ...clock, status: "completed" });
+  assert.equal(fixture.elements.timerDetail.textContent, "NEXT / 5 MIN");
+  fixture.view.renderTimerClock(nextBreak, { ...clock, status: "idle" });
+  assert.equal(fixture.elements.timerDetail.textContent, "IDLE / 5 MIN");
+  const focus = { phase: "focus", plannedDurationMs: 1_500_000 };
+  fixture.view.renderTimerClock(focus, { ...clock, status: "paused" });
+  assert.equal(fixture.elements.timerDetail.textContent, "PAUSED / 25 MIN");
 });

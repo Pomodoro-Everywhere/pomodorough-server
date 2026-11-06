@@ -105,6 +105,7 @@ function loadTaskProjection() {
     "#syncStatus": { dataset: {} },
     "#syncStatusText": { textContent: "" },
     "#profile": { hidden: true },
+    "#accountSection": { hidden: true },
     "#profileAvatar": {
       hidden: true,
       removeAttribute(name) { if (name === "src") delete this.src; }

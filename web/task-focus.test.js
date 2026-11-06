@@ -26,7 +26,7 @@ function fixture(t) {
   return { document, elements, state, deleted, use, view, buttons, block: () => { blocked = true; } };
 }
 
-test("R43-S06 same task retains Delete focus through repeated fresh projections and reordering", (t) => {
+test("R43-S06 same task retains Delete focus through repeated fresh projections and reordering", async (t) => {
   const f = fixture(t);
   f.buttons()[1].focus();
   for (let index = 0; index < 5; index += 1) {
@@ -35,10 +35,15 @@ test("R43-S06 same task retains Delete focus through repeated fresh projections 
     assert.equal(f.document.activeElement, f.buttons()[2]);
     assert.equal(f.document.activeElement.getAttribute("aria-label"), `Delete b-${index}`);
   }
-  f.document.activeElement.click();
-  assert.deepEqual(f.deleted, [f.state.tasks[2]], "exactly one listener uses current task object");
   assert.deepEqual([...f.elements.taskList.querySelectorAll(".task-name")].map((el) => el.textContent),
     ["c-4", "a-4", "b-4"]);
+  f.document.activeElement.click();
+  // Delete defers behind the undo window; the row hides at once and the
+  // intent is sent on flush with the current task identity.
+  assert.deepEqual([...f.elements.taskList.querySelectorAll(".task-name")].map((el) => el.textContent), ["c-4", "a-4"]);
+  assert.deepEqual(f.deleted, []);
+  await f.view.flushTaskDeletion();
+  assert.deepEqual(f.deleted, [f.state.tasks[2]], "exactly one listener uses current task object");
 });
 
 for (const scenario of [

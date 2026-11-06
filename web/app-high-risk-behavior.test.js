@@ -522,6 +522,26 @@ test("view renders accessible navigation, history, tasks, profile, and sync stat
   assert.equal(fixture.elements.syncStatus.dataset.state, "loading");
 });
 
+test("view hides an unreachable profile photo until the session carries a new link", () => {
+  const fixture = viewFixture({ state: { user: { id: "user-1", avatarUrl: "https://example.test/avatar.png" } }, use: {
+    logout: () => {}, deleteAccount: () => {}, retryPendingLogout: () => {}, redirectToLogin: () => {}
+  } });
+  fixture.view.setupAccountEvents();
+  fixture.view.renderProfile();
+  assert.equal(fixture.elements.profileAvatar.hidden, false);
+  assert.equal(fixture.elements.profileAvatar.src, "https://example.test/avatar.png");
+  fixture.elements.profileAvatar.listeners.get("error")();
+  assert.equal(fixture.elements.profileAvatar.hidden, true);
+  assert.equal("src" in fixture.elements.profileAvatar, false);
+  fixture.view.renderProfile();
+  assert.equal(fixture.elements.profileAvatar.hidden, true, "a re-render must not restore the broken image");
+  assert.equal("src" in fixture.elements.profileAvatar, false);
+  fixture.current.user = { id: "user-1", avatarUrl: "https://example.test/avatar-2.png" };
+  fixture.view.renderProfile();
+  assert.equal(fixture.elements.profileAvatar.hidden, false);
+  assert.equal(fixture.elements.profileAvatar.src, "https://example.test/avatar-2.png");
+});
+
 test("view keyboard navigation and connectivity handlers preserve ownership boundaries", async () => {
   const timerButton = Object.assign(element(), { dataset: { screenButton: "timer" } });
   const taskButton = Object.assign(element(), { dataset: { screenButton: "tasks" } });
