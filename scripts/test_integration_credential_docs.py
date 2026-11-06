@@ -623,10 +623,24 @@ def remove_leaked_fixture(
             shutil.rmtree(relocation_parent)
 
 
+def credential_parent() -> Path:
+    # Mirror the helper's choice so client fixtures that rename the credential
+    # directory into the work directory stay on one filesystem. CI runners can
+    # mount the default temporary directory apart from /var/tmp.
+    for raw_candidate in ("/var/tmp", "/tmp"):
+        candidate = Path(raw_candidate).resolve(strict=True)
+        if candidate != ROOT and ROOT not in candidate.parents:
+            if os.access(candidate, os.W_OK | os.X_OK):
+                return candidate
+    raise RuntimeError("no writable temporary directory exists outside repository")
+
+
 def exercise_helper(
     scenario: str, prefix: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
-    with tempfile.TemporaryDirectory(prefix="credential-docs-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="credential-docs-", dir=credential_parent()
+    ) as directory:
         work = Path(directory)
         provisioner = work / "provisioner tool\n"
         client = work / "client tool\n"
