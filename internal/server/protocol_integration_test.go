@@ -73,12 +73,13 @@ func (s *protocolNativeStore) pendingCount() int {
 }
 
 type protocolRevisionStream struct {
-	context   context.Context
-	cancel    context.CancelFunc
-	body      io.ReadCloser
-	revisions chan int64
-	done      chan struct{}
-	closeOnce sync.Once
+	context    context.Context
+	cancel     context.CancelFunc
+	body       io.ReadCloser
+	revisions  chan int64
+	done       chan struct{}
+	serverDone <-chan struct{}
+	closeOnce  sync.Once
 }
 
 type protocolConnectionTracker struct {
@@ -100,20 +101,21 @@ var cachedProtocolFixtureSeed struct {
 }
 
 type protocolFixture struct {
-	application *Server
-	server      *httptest.Server
-	context     context.Context
-	cancel      context.CancelFunc
-	transport   *http.Transport
-	connections *protocolConnectionTracker
-	userStore   *store.Store
-	userID      string
-	clients     []*protocolClient
-	mu          sync.Mutex
-	closeOnce   sync.Once
-	identifier  int64
-	logicalTime time.Time
-	sequences   map[string]int64
+	application    *Server
+	server         *httptest.Server
+	context        context.Context
+	cancel         context.CancelFunc
+	transport      *http.Transport
+	connections    *protocolConnectionTracker
+	userStore      *store.Store
+	userID         string
+	clients        []*protocolClient
+	mu             sync.Mutex
+	closeOnce      sync.Once
+	identifier     int64
+	logicalTime    time.Time
+	sequences      map[string]int64
+	streamHandlers sync.Map
 }
 
 func newProtocolFixture(t *testing.T) *protocolFixture {
@@ -156,9 +158,8 @@ func newProtocolFixtureWithStreams(t *testing.T, openStreams bool) *protocolFixt
 		t.Fatal(err)
 	}
 	connections := &protocolConnectionTracker{states: make(map[net.Conn]http.ConnState), changed: make(chan struct{}, 1)}
-	testServer := httptest.NewUnstartedServer(application.Handler())
+	testServer := httptest.NewUnstartedServer(nil)
 	testServer.Config.ConnState = connections.track
-	testServer.Start()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	httpClient := &http.Client{Transport: transport}
 	fixture := &protocolFixture{
@@ -166,6 +167,8 @@ func newProtocolFixtureWithStreams(t *testing.T, openStreams bool) *protocolFixt
 		userStore: userStore, userID: seed.credentials.UserID,
 		logicalTime: time.Now().UTC().Add(-time.Minute), sequences: make(map[string]int64),
 	}
+	testServer.Config.Handler = fixture.trackStreamHandlers(application.Handler())
+	testServer.Start()
 	t.Cleanup(func() { fixture.close(t) })
 	for _, credential := range seed.credentials.Clients {
 		fixture.clients = append(fixture.clients, &protocolClient{
@@ -244,7 +247,7 @@ func (f *protocolFixture) close(t *testing.T) {
 		f.cancel()
 		for _, client := range f.clients {
 			if client.stream != nil {
-				client.stream.close()
+				client.stream.close(t)
 			}
 		}
 		f.transport.CloseIdleConnections()
@@ -389,6 +392,10 @@ func (f *protocolFixture) openRevisionStream(t *testing.T, client *protocolClien
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+client.accessToken)
+	serverDone := make(chan struct{})
+	streamID := f.nextID("stream-handler")
+	f.streamHandlers.Store(streamID, serverDone)
+	request.Header.Set("X-Test-Stream-ID", streamID)
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		cancel()
@@ -401,7 +408,7 @@ func (f *protocolFixture) openRevisionStream(t *testing.T, client *protocolClien
 		t.Fatalf("open SSE status=%d body=%s", response.StatusCode, body)
 	}
 	stream := &protocolRevisionStream{
-		context: ctx, cancel: cancel, body: response.Body, revisions: make(chan int64, 64), done: make(chan struct{}),
+		context: ctx, cancel: cancel, body: response.Body, revisions: make(chan int64, 64), done: make(chan struct{}), serverDone: serverDone,
 	}
 	go func() {
 		defer close(stream.done)
@@ -427,11 +434,27 @@ func (s *protocolRevisionStream) waitAtLeast(t *testing.T, revision int64) {
 	}
 }
 
-func (s *protocolRevisionStream) close() {
+func (s *protocolRevisionStream) close(t *testing.T) {
+	t.Helper()
 	s.closeOnce.Do(func() {
 		s.cancel()
 		_ = s.body.Close()
 		<-s.done
+		// Client EOF does not prove the handler has released its account permit.
+		select {
+		case <-s.serverDone:
+		case <-time.After(5 * time.Second):
+			t.Error("SSE server handler did not release its permit before close deadline")
+		}
+	})
+}
+
+func (f *protocolFixture) trackStreamHandlers(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if done, ok := f.streamHandlers.LoadAndDelete(r.Header.Get("X-Test-Stream-ID")); ok {
+			defer close(done.(chan struct{}))
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -1112,7 +1135,7 @@ func TestLogicalProtocolConcurrentStartsAndFinishCancelConvergeDeterministically
 func TestLogicalProtocolSSECoalescingOfflineReconnectAndDuplicateHints(t *testing.T) {
 	fixture := newStreamingProtocolFixture(t)
 	mutator, offline := fixture.clients[0], fixture.clients[3]
-	offline.stream.close()
+	offline.stream.close(t)
 	offline.stream = nil
 	for index := range 3 {
 		at := fixture.nextTime()
@@ -1136,7 +1159,7 @@ func TestLogicalProtocolSSECoalescingOfflineReconnectAndDuplicateHints(t *testin
 		t.Fatalf("offline reconnect state:\nwant %s\ngot  %s", want, got)
 	}
 
-	offline.stream.close()
+	offline.stream.close(t)
 	offline.stream = fixture.openRevisionStream(t, offline)
 	at := fixture.nextTime()
 	payload := fixture.syncPayload(mutator)
