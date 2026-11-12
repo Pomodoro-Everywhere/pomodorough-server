@@ -431,13 +431,27 @@ test("durable action mutations cover writes, no-ops, and translated failures", a
   // in order once it is released, instead of being dropped. The wait timer
   // stays referenced: on Node 22 an unreferenced timer is the only pending
   // work, so the event loop ends and the runner cancels the rest of the file.
-  client.external.host.setTimeout = (callback, delay) => setTimeout(callback, delay);
+  // Resume also schedules the completion alarm through the same host, and a
+  // referenced 25-minute alarm keeps the test process alive after its last
+  // test, so every timer this override created is cleared once the waits end.
+  const fixtureSetTimeout = client.external.host.setTimeout;
+  const referencedTimers = new Set();
+  client.external.host.setTimeout = (callback, delay) => {
+    const handle = setTimeout(() => { referencedTimers.delete(handle); callback(); }, delay);
+    referencedTimers.add(handle);
+    return handle;
+  };
   client.state.actionLocked = true;
   const deleting = client.use.issueTaskOperation("delete", task);
   const resuming = client.use.issueCommand("resume");
   client.state.actionLocked = false;
-  assert.equal(await deleting, true);
-  assert.equal(await resuming, true);
+  try {
+    assert.equal(await deleting, true);
+    assert.equal(await resuming, true);
+  } finally {
+    client.external.host.setTimeout = fixtureSetTimeout;
+    for (const handle of referencedTimers) clearTimeout(handle);
+  }
   assert.equal(client.state.timer.status, "running");
   const database = client.use.database();
   const transaction = database.transaction.bind(database);
