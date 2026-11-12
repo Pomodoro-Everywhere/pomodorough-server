@@ -35,7 +35,7 @@ EXPECTED_BUILD_MATRIX = (
     ("linux", "amd64", "ubuntu-24.04", "pomodorough"),
     ("linux", "arm64", "ubuntu-24.04-arm", "pomodorough"),
     ("darwin", "amd64", "macos-15-intel", "pomodorough"),
-    ("darwin", "arm64", "macos-14", "pomodorough"),
+    ("darwin", "arm64", "macos-15", "pomodorough"),
     ("windows", "amd64", "windows-2022", "pomodorough.exe"),
 )
 EXPECTED_PACKAGE_MATRIX = tuple(

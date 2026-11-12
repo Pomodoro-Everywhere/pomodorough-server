@@ -297,7 +297,7 @@ jobs:
             binary: pomodorough
           - goos: darwin
             goarch: arm64
-            runner: macos-14
+            runner: macos-15
             binary: pomodorough
           - goos: windows
             goarch: amd64
