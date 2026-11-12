@@ -42,13 +42,13 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "a58a07be3cfdd6ad84a3aae165ca8dc5b4d8a576f5278f1e5658cf88778e4848", false},
+	{"index.html", "939c6cc76f0dbe4e7f9912abdd6da9626e3a5000355fbd1b450ec46d1b7dbdc3", false},
 	{"privacy.html", "65ebff33710f5322d0e63d57de9f7ceec79e58ec5de964d587c3edce2fde6fa3", false},
 	{"landing.css", "b70b369419fbc6476cd5a04ff3155b320dd00bcb148bafc4948b2860675c9086", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
 	{"sentry-client.js", "caa4f9f8051ce925d45ab9cf326b7dabac3f5b7e4174e445e88bb7a5ed64c9a6", false},
-	{"app.html", "dca2f511973f0b6e831f6f898f995269534e6096cce402c76fc38c652493ba23", false},
+	{"app.html", "d4c29fd6bac09f2d14bcb887202c8e01f9e724cd37f3523660fe92267a3cb39c", false},
 	{"app.css", "31e8b5ba9e032f59ebb6c034d69c5212f6971f3b09df70cd4d59f0b28c7259ee", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
