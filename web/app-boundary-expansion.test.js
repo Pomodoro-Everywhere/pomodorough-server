@@ -322,11 +322,12 @@ function viewFixture(overrides = {}) {
     finishTimer: () => calls.push("finish"), handleOffline: () => calls.push("offline"), handleOnline: () => calls.push("online"),
     historyDateMs: (item) => Date.parse(item.completedAt) || 0, issueAutoStartOperation: () => calls.push("auto"),
     issueCommand: (command) => calls.push(["command", command]), issueDurationOperation: async () => false,
-    issueSelectedTaskOperation: () => calls.push("selected"), localBootstrapState: () => ({ history: [] }), logout: () => calls.push("logout"),
+    issueSelectedTaskOperation: () => calls.push("selected"), logout: () => calls.push("logout"),
     longBreakProgress: () => 0, needsBootstrapResolution: () => false, persistSettings: async () => {},
     phaseConfig: () => ({ focus: {}, short_break: {} }), phaseLabel: (phase) => phase, phaseShortLabel: (phase) => phase[0],
     positiveNumber: (value, fallback) => Number(value) || fallback, primeCompletionAlerts: () => {}, redirectToLogin: () => calls.push("login"),
     retryBootstrapResolution: () => calls.push("retryBootstrap"), scheduleSync: (...args) => calls.push(["sync", ...args]),
+    replayPendingTaskDeletions: () => calls.push("replayTaskDeletions"),
     selectedDurationMs: () => 1000, startCompletionAlert: () => {}, stopCompletionAlert: () => calls.push("stop"),
     tabId: () => "tab-1", timerStatusLabel: (status) => status, tr: (_key, _args, fallback) => fallback,
     updateTimerCompletion: () => {}, ...overrides.use
@@ -592,7 +593,9 @@ test("phase choice save failure warns, notices, and reports with static operatio
   phase.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fixture.state.selectedPhase, "focus");
-  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /phase offline/.test(entry[1])));
+  // UX round 2 (A2): the notice is a localized sentence; raw error text stays in reporting.
+  assert.deepEqual(fixture.calls.filter((entry) => entry[0] === "notice").map((entry) => entry[1]),
+    ["Phase choice could not be saved. Try again."]);
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "view.phase.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);

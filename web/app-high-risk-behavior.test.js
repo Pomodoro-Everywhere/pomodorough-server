@@ -299,6 +299,25 @@ function syncFixture(overrides = {}) {
   return { actions, calls, current, host, syncStorage, timers, use };
 }
 
+test("R43-S02 overlapping sync callers retain promise identity through delayed preflight", async () => {
+  let entered, release;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  let reads = 0;
+  const fixture = syncFixture({ syncStorage: {
+    readBootstrapState: async () => { reads += 1; entered(); await gate; return { gate: null, resolution: null }; }
+  } });
+  const first = fixture.actions.syncNow(true);
+  const immediate = fixture.actions.syncNow(true);
+  assert.equal(immediate, first);
+  await started;
+  assert.equal(fixture.actions.syncNow(true), first);
+  assert.equal(reads, 1);
+  release();
+  await first;
+  assert.equal(fixture.calls.filter((call) => Array.isArray(call) && call[0] === "apply").length, 1);
+});
+
 test("sync sends refreshed queues and atomically accepts the canonical response", async () => {
   const fixture = syncFixture();
   await fixture.actions.syncNow(true);
@@ -491,7 +510,6 @@ function viewFixture(overrides = {}) {
     clampNumber: (value, min, max) => Math.max(min, Math.min(max, Number(value))), completedFocusCountForDay: () => 0,
     longBreakProgress: () => 0, historyDateMs: (item) => Date.parse(item.completedAt) || 0,
     activeCompletionAlertTimerId: () => null, updateTimerCompletion: () => {}, startCompletionAlert: () => {},
-    localBootstrapState: () => ({ history: [] }),
     getWorkspaceReadModel: () => (current.readModel = official.renderModel(current)), ...overrides.use
   };
   const view = viewModule.create({ state: current, external: { host, syncCore, syncStorage: {}, elements }, use });
@@ -548,6 +566,7 @@ test("view keyboard navigation and connectivity handlers preserve ownership boun
   const calls = [];
   const fixture = viewFixture({ screenButtons: [timerButton, taskButton], use: {
     database: () => ({}), tabId: () => "tab-1", needsBootstrapResolution: () => false,
+    replayPendingTaskDeletions: () => {},
     scheduleSync: (...args) => calls.push(["sync", ...args]), handleOnline: () => calls.push("online"), handleOffline: () => calls.push("offline")
   } });
   fixture.view.handleScreenKeydown({ currentTarget: timerButton, key: "ArrowRight", preventDefault: () => calls.push("prevented") });

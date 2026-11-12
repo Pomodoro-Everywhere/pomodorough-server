@@ -39,7 +39,7 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
     Promise,
     fetch: () => Promise.reject(new Error("Unexpected fetch.")),
     importScripts(url) {
-      assert.equal(url, "/shared-core-metadata.js?v=5");
+      assert.equal(url, "/shared-core-metadata.js?v=6");
       context.self.PomodoroughSharedCoreMetadata = sharedCoreMetadata;
     },
     caches: {
@@ -101,14 +101,14 @@ test("every shipped privacy link uses the contractual application URL", () => {
 
 test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["app.css"]) {
-    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
-    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=22`));
+    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=23`));
+    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=23`));
   }
-  assert.match(appSource, /\/app\.js\?v=46/);
-  assert.match(workerSource, /\/app\.js\?v=46/);
-  assert.match(appSource, /\/shared-core-metadata\.js\?v=5/);
+  assert.match(appSource, /\/app\.js\?v=47/);
+  assert.match(workerSource, /\/app\.js\?v=47/);
+  assert.match(appSource, /\/shared-core-metadata\.js\?v=6/);
   assert.match(appSource, /\/shared-core\.js\?v=7/);
-  assert.match(workerSource, /\/shared-core-metadata\.js\?v=5/);
+  assert.match(workerSource, /\/shared-core-metadata\.js\?v=6/);
   assert.match(workerSource, /\/shared-core\.js\?v=7/);
   assert.doesNotMatch(workerSource, /aec9688661f39b92f21de8a26231419f0a2839ab7629bd158af5a46d49632ddf/);
   assert.match(appScriptSource, /sharedCoreHost\.SharedCore\.load/);
@@ -119,24 +119,24 @@ test("shell entry assets use cache-busting version URLs", () => {
       < appCompositionSource.indexOf('await call(application, "loadLocalState", context)')
   );
   assert.match(appScriptSource, /\.taskIdentity\(/);
-  assert.match(appSource, /\/sync-core\.js\?v=28/);
-  assert.match(workerSource, /\/sync-core\.js\?v=28/);
-  assert.match(appSource, /\/sync-storage\.js\?v=35/);
-  assert.match(workerSource, /\/sync-storage\.js\?v=35/);
-  assert.match(appSource, /\/i18n\.js\?v=5/);
-  for (const asset of ["/i18n.js?v=5", "/locales/en.json?v=4", "/locales/ar-XB.json?v=4"]) {
+  assert.match(appSource, /\/sync-core\.js\?v=29/);
+  assert.match(workerSource, /\/sync-core\.js\?v=29/);
+  assert.match(appSource, /\/sync-storage\.js\?v=36/);
+  assert.match(workerSource, /\/sync-storage\.js\?v=36/);
+  assert.match(appSource, /\/i18n\.js\?v=7/);
+  for (const asset of ["/i18n.js?v=7", "/locales/en.json?v=6", "/locales/ar-XB.json?v=6"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 10, "app-storage.js": 14, "app-actions.js": 12, "app-sync.js": 9,
-    "app-bootstrap.js": 7, "app-session.js": 9, "app-view.js": 12
+    "app-state.js": 11, "app-storage.js": 16, "app-actions.js": 13, "app-sync.js": 10,
+    "app-bootstrap.js": 8, "app-session.js": 11, "app-view.js": 15
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
     const asset = `/${file}?v=${scriptVersions[file] || 1}`;
     assert.match(appSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v72-/);
+  assert.match(workerSource, /pomodorough-shell-v75-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

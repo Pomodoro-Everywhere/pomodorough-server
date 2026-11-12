@@ -127,6 +127,21 @@ test("task wire codec strips Core deviceId without changing wire identity", () =
   });
 });
 
+// Core 0.56.0 rename: the old task ID and the new title. The server requires
+// the title and checks it with Core, so the codec must not drop it.
+test("task wire codec keeps the new title of a rename", () => {
+  const rename = {
+    id: "task-operation-0003", deviceId: "device-1", taskId: "task-abc12345",
+    type: "rename", title: "Renamed task", occurredAt: "2026-07-22T12:00:00Z",
+    hlcWallMs: 3, hlcCounter: 0
+  };
+  assert.deepEqual(sync.taskRequestOperation(rename), {
+    id: "task-operation-0003", taskId: "task-abc12345", type: "rename",
+    occurredAt: "2026-07-22T12:00:00Z", hlcWallMs: 3, hlcCounter: 0,
+    title: "Renamed task"
+  });
+});
+
 test("real Core task rows encode to strict wire shape for sync and bootstrap", async () => {
   const upsert = await coreTaskOperation("Review offline task");
   assert.equal(typeof upsert.deviceId, "string", "Core durable row carries deviceId");

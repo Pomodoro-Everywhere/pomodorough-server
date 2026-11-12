@@ -107,7 +107,7 @@
       deviceSequence: 0, hlcWallMs: 0, hlcCounter: 0, clockOffset: null,
       activeScreen: "timer", syncing: false, retrying: false, conflict: null, savedClaimRecovery: null,
       durationSyncBootstrapped: false, autoStartSyncBootstrapped: false,
-      selectedTaskSyncBootstrapped: false, actionLocked: false, coreCapabilities: null,
+      selectedTaskSyncBootstrapped: false, actionLocked: false,
       tabId: tabID(host),
       ...initialOwnershipState(),
       localOwnerId: null, quarantinedLocal: null,
@@ -199,34 +199,6 @@
     clockContinuityId() { return this.continuityId ||= this.host.crypto.randomUUID(); }
   }
 
-  const RENAME_TASK_CORE_VERSION = [0, 54, 0];
-
-  function parseCoreVersion(version) {
-    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version || ""));
-    return match ? match.slice(1, 4).map(Number) : null;
-  }
-
-  function coreVersionAtLeast(version, floor) {
-    if (!version) return false;
-    for (let index = 0; index < floor.length; index += 1) {
-      if (version[index] !== floor[index]) return version[index] > floor[index];
-    }
-    return true;
-  }
-
-  // Rename ships with core 0.54.0. Older cores reject the intent kind, so
-  // the client reads the version once and hides the control instead of
-  // failing on every commit. A core without `core.version` predates both.
-  function coreCapabilities(core) {
-    let version = null;
-    if (typeof core?.call === "function") {
-      try { version = parseCoreVersion(core.call("core.version", {})?.coreVersion); }
-      catch (error) { if (!/unsupported shared-core operation/.test(String(error?.message))) throw error; }
-    }
-    return Object.freeze({ coreVersion: version ? version.join(".") : null,
-      renameTask: coreVersionAtLeast(version, RENAME_TASK_CORE_VERSION) });
-  }
-
   class SharedTaskCore {
     constructor(state, sharedCoreHost) {
       this.state = state;
@@ -243,7 +215,6 @@
       const pending = (this.promise ||= this.sharedCoreHost.SharedCore.load());
       try {
         const core = await pending;
-        this.state.coreCapabilities ||= coreCapabilities(core);
         return core;
       } catch (error) {
         if (this.promise === pending) this.promise = null;

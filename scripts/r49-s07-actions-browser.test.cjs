@@ -19,9 +19,21 @@ const INSET = { top: 47, right: 44, bottom: 34, left: 44 };
 const FOLDS = [470, 300, 360, 640];
 const MASK = 20;
 const LOCALES = ["en", "ar-XB"];
-const EXPECTED_IDS = ["timerToggle", "finishButton", "cancelButton",
-  "clearButton", "taskSelector", "focusDuration", "shortBreakDuration",
-  "longBreakDuration", "autoStartBreaks"];
+// Since 0.54.0 the bank hides inapplicable actions instead of dimming them.
+// Idle offers Start and Skip, an underway timer offers Pause, Finish, and
+// Cancel, and a ringing timer offers Start, Skip, and Stop sound.
+const BANK_IDS = Object.freeze({
+  idle: ["timerToggle", "skipButton"],
+  running: ["timerToggle", "finishButton", "cancelButton"],
+  ringing: ["timerToggle", "skipButton", "clearButton"],
+});
+const ALL_BANK_IDS = ["timerToggle", "skipButton", "finishButton", "cancelButton", "clearButton"];
+// The task selector, three phase buttons, three duration inputs with six
+// steppers, the auto-start switch, and Delete account stay visible in every
+// timer state.
+const RAIL_IDS = ["taskSelector", "focusDuration", "shortBreakDuration",
+  "longBreakDuration", "autoStartBreaks", "deleteAccountButton"];
+const RAIL_DESCENDANTS = 15;
 
 function scenarios() {
   const rows = [];
@@ -139,6 +151,22 @@ async function stripActionFix(context, page) {
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
 
+// The baseline this control reproduces predates 0.54.0: Finish, Cancel, and
+// Stop sound shared the bank in every state and Skip did not exist. Since
+// 0.54.0 a ringing timer hides Finish and Cancel, so their zero rects can
+// never cross the fold. Inline important styles outlast later renders that
+// rewrite the hidden attribute.
+async function restoreThreeActionBank(page) {
+  await page.evaluate(() => {
+    const shown = getComputedStyle(document.getElementById("clearButton")).display;
+    for (const id of ["finishButton", "cancelButton"]) {
+      document.getElementById(id).style.setProperty("display", shown, "important");
+    }
+    document.getElementById("skipButton").style.setProperty("display", "none", "important");
+  });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+}
+
 function usableBounds(scenario) {
   if (scenario.fold) return { left: 0, right: scenario.fold };
   if (scenario.insets.left || scenario.insets.right) {
@@ -182,18 +210,33 @@ async function assertEnvironment(page, scenario) {
 }
 
 function readDescendants(page, vertical) {
-  return page.evaluate((vertical) => {
+  return page.evaluate(async (vertical) => {
     for (const el of document.querySelectorAll("*")) if (el.scrollLeft) el.scrollLeft = 0;
     window.scrollTo({ left: 0, top: 0, behavior: "instant" });
     const controls = [...document.querySelectorAll(
       "#timerScreen :is(button, input, select, textarea, a[href], summary, [tabindex]):not([tabindex='-1'])",
     )].filter((el) => el.checkVisibility());
-    const items = controls.map((el, index) => {
-      if (vertical) {
+    const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    // The Timer dock (UX round 2) covers the bottom of the page while the
+    // countdown or the primary control is off screen, and reserves that strip
+    // as root scroll padding. A control outside the area above the dock is
+    // centered in it; the next pass uses the padding of the dock that the
+    // scroll showed or hid. A control already in that area is measured as is.
+    const reservedEdge = () => parseFloat(getComputedStyle(document.documentElement).scrollPaddingBottom) || 0;
+    const placeAboveDock = async (el) => {
+      for (let pass = 0; pass < 3; pass += 1) {
+        const room = window.innerHeight - reservedEdge();
         const q = el.getBoundingClientRect();
+        if ((q.top >= 0 && q.bottom <= room) || pass === 2) return;
         window.scrollTo({ left: 0,
-          top: window.scrollY + q.top + q.height / 2 - window.innerHeight / 2, behavior: "instant" });
+          top: window.scrollY + q.top + q.height / 2 - room / 2, behavior: "instant" });
+        await frames();
       }
+    };
+    if (vertical) await frames();
+    const items = [];
+    for (const [index, el] of controls.entries()) {
+      if (vertical) await placeAboveDock(el);
       const r = el.getBoundingClientRect();
       const hitEl = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
       const clipped = [];
@@ -209,28 +252,39 @@ function readDescendants(page, vertical) {
         glyphs = [...range.getClientRects()].map((g) => ({ left: g.left, right: g.right }));
       }
       const style = getComputedStyle(el);
-      return { key: el.id || el.getAttribute("aria-label") || el.getAttribute("data-phase")
+      items.push({ key: el.id || el.getAttribute("aria-label") || el.getAttribute("data-phase")
           || `${el.getAttribute("data-for")}:${el.getAttribute("data-step")}` || `${el.tagName}#${index}`,
         id: el.id || null, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
         width: r.width, height: r.height, disabled: !!el.disabled,
         glyphs, clipped, scrollWidth: el.scrollWidth, clientWidth: el.clientWidth,
         hit: hitEl === el || el.contains(hitEl),
-        zoom: style.zoom, transform: style.transform };
-    });
+        cover: hitEl === el || el.contains(hitEl) ? null : (hitEl?.closest("[id]")?.id || hitEl?.tagName || "nothing"),
+        zoom: style.zoom, transform: style.transform });
+    }
     const bank = document.querySelector(".action-bank");
     const clear = document.querySelector("#clearButton").getBoundingClientRect();
-    return { items, scrollX: window.scrollX, bankWidth: bank.clientWidth,
+    const dockInline = document.getElementById("timerDock").classList.contains("timer-dock-inline");
+    return { items, dockInline, scrollX: window.scrollX, bankWidth: bank.clientWidth,
       bankScroll: bank.scrollWidth,
       clear: { left: clear.left, right: clear.right, height: clear.height,
         disabled: document.querySelector("#clearButton").disabled } };
   }, vertical);
 }
 
-function assertDescendants(frame, scenario, vertical) {
+function assertDescendants(frame, scenario, vertical, phase) {
   const bounds = usableBounds(scenario);
-  assert.equal(frame.items.length, 18, `${scenario.name} measures every Timer descendant`);
-  for (const id of EXPECTED_IDS) {
-    assert.ok(frame.items.some((item) => item.id === id), `${scenario.name} measures ${id}`);
+  const bank = BANK_IDS[phase];
+  assert.ok(bank, `${scenario.name} known timer phase ${phase}`);
+  // A dock taller than a third of the viewport sits inline at the end of the
+  // Timer content (UX round 2, B2 follow-up), so its control is measured too.
+  const dock = frame.dockInline ? ["timerDockToggle"] : [];
+  assert.equal(frame.items.length, RAIL_DESCENDANTS + bank.length + dock.length,
+    `${scenario.name} ${phase} measures every Timer descendant`);
+  for (const id of [...bank, ...RAIL_IDS, ...dock]) {
+    assert.ok(frame.items.some((item) => item.id === id), `${scenario.name} ${phase} measures ${id}`);
+  }
+  for (const id of ALL_BANK_IDS.filter((id) => !bank.includes(id))) {
+    assert.ok(!frame.items.some((item) => item.id === id), `${scenario.name} ${phase} hides ${id}`);
   }
   assert.equal(frame.scrollX, 0, `${scenario.name} no horizontal window pan`);
   assert.ok(frame.bankScroll <= frame.bankWidth + 1,
@@ -251,16 +305,18 @@ function assertDescendants(frame, scenario, vertical) {
     assert.equal(item.transform, "none", `${label} no transform`);
     if (vertical && !item.disabled) {
       assert.ok(item.top >= -1 && item.bottom <= scenario.height + 1, `${label} vertically reachable`);
-      assert.ok(item.hit, `${label} center hit test`);
+      assert.ok(item.hit, `${label} center hit test (covered by ${item.cover})`);
     }
   }
+  // Stop sound renders only while the completion alert rings.
+  if (phase !== "ringing") return;
   const wantClear = scenario.font === 200 ? 88 : 44;
   assert.ok(Math.abs(frame.clear.height - wantClear) <= 2, `${scenario.name} clear height`);
 }
 
-async function assertBothPasses(page, scenario) {
-  assertDescendants(await readDescendants(page, false), scenario, false);
-  assertDescendants(await readDescendants(page, true), scenario, true);
+async function assertBothPasses(page, scenario, phase) {
+  assertDescendants(await readDescendants(page, false), scenario, false, phase);
+  assertDescendants(await readDescendants(page, true), scenario, true, phase);
 }
 
 function timerInfo(page) {
@@ -277,15 +333,34 @@ async function keyToStatus(page, id, key, status) {
   assert.equal(await page.evaluate(() => window.scrollX), 0, `${id} keyboard keeps scrollX zero`);
 }
 
+// The Timer dock (UX round 2) lies over the bottom of the page while the
+// countdown or the primary control is off screen, and reserves that strip as
+// scroll padding. The control is centered in the area above the dock, the way
+// scrollIntoView places it; a second pass uses the padding of the dock that the
+// first scroll showed or hid.
+async function centerAboveDock(page, id) {
+  for (let pass = 0; pass < 2; pass += 1) {
+    await page.evaluate((target) => {
+      document.getElementById(target).scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      window.scrollTo({ left: 0, top: window.scrollY, behavior: "instant" });
+    }, id);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
+}
+
 async function clickToStatus(page, id, status) {
+  await centerAboveDock(page, id);
   const point = await page.evaluate((target) => {
     const el = document.getElementById(target);
-    const r = el.getBoundingClientRect();
-    window.scrollTo({ left: 0,
-      top: window.scrollY + r.top + r.height / 2 - window.innerHeight / 2, behavior: "instant" });
     const q = el.getBoundingClientRect();
-    return { x: q.left + q.width / 2, y: q.top + q.height / 2 };
+    const x = q.left + q.width / 2;
+    const y = q.top + q.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const cover = hit === el || el.contains(hit) ? null
+      : (hit?.closest("[id]")?.id || hit?.tagName || "nothing");
+    return { x, y, cover };
   }, id);
+  assert.equal(point.cover, null, `${id} pointer target is not covered`);
   assert.equal(await page.locator(`#${id}`).isEnabled(), true, `${id} enabled for pointer`);
   await page.mouse.click(point.x, point.y);
   await page.waitForFunction((want) => window.PomodoroughAppTest?.state?.timer?.status === want,
@@ -336,32 +411,53 @@ async function tabReachesActions(page, scenario, forcedColors = false) {
   }
 }
 
+async function restoreIdleTimer(page) {
+  await page.waitForFunction(() => !window.PomodoroughAppTest.state.actionLocked,
+    null, { timeout: 15000 });
+  // A completed timer offers no Cancel, so cleanup starts the next phase
+  // first and then cancels it, which leaves the timer idle.
+  await page.evaluate(() => {
+    const app = window.PomodoroughAppTest;
+    app.stopCompletionAlert();
+    if (app.state.timer.status === "completed") document.getElementById("timerToggle").click();
+  });
+  await page.waitForFunction(() => window.PomodoroughAppTest.state.timer.status !== "completed"
+    && !window.PomodoroughAppTest.state.actionLocked, null, { timeout: 15000 });
+  await page.evaluate(() => {
+    if (window.PomodoroughAppTest.state.timer.status !== "idle") document.getElementById("cancelButton").click();
+  });
+  await page.waitForFunction(() => window.PomodoroughAppTest.state.timer.status === "idle",
+    null, { timeout: 15000 });
+  assert.deepEqual(await timerInfo(page), { status: "idle", id: null }, "scenario cleanup restores idle");
+}
+
+// A cleanup that fails after a failed scenario must not hide the scenario's
+// own failure, so that one is reported and the cleanup failure is logged.
 async function withTimerCleanup(page, run) {
+  let failure = null;
   try {
     await run();
-  } finally {
-    await page.waitForFunction(() => !window.PomodoroughAppTest.state.actionLocked,
-      null, { timeout: 15000 });
-    await page.evaluate(() => {
-      const app = window.PomodoroughAppTest;
-      app.stopCompletionAlert();
-      if (app.state.timer.status !== "idle") document.getElementById("cancelButton").click();
-    });
-    await page.waitForFunction(() => window.PomodoroughAppTest.state.timer.status === "idle",
-      null, { timeout: 15000 });
-    assert.deepEqual(await timerInfo(page), { status: "idle", id: null }, "scenario cleanup restores idle");
+  } catch (error) {
+    failure = error;
   }
+  try {
+    await restoreIdleTimer(page);
+  } catch (cleanupFailure) {
+    if (!failure) throw cleanupFailure;
+    console.log(`R49-S07 cleanup after a failed scenario also failed: ${cleanupFailure.message}`);
+  }
+  if (failure) throw failure;
 }
 
 async function runScenario(page, cdp, scenario) {
   await emulate(page, cdp, scenario);
   await assertEnvironment(page, scenario);
   assert.equal((await timerInfo(page)).status, "idle", `${scenario.name} starts idle`);
-  await assertBothPasses(page, scenario);
+  await assertBothPasses(page, scenario, "idle");
   await keyToStatus(page, "timerToggle", "Enter", "running");
   const runningId = (await timerInfo(page)).id;
   assert.ok(runningId, `${scenario.name} running has an identity`);
-  await assertBothPasses(page, scenario);
+  await assertBothPasses(page, scenario, "running");
   await tabReachesActions(page, scenario);
   try {
     await page.emulateMedia({ forcedColors: "active" });
@@ -377,7 +473,7 @@ async function runScenario(page, cdp, scenario) {
   assert.equal((await timerInfo(page)).id, runningId, `${scenario.name} finish keeps identity`);
   await page.waitForFunction(() => !document.querySelector("#clearButton").disabled,
     null, { timeout: 15000 });
-  await assertBothPasses(page, scenario);
+  await assertBothPasses(page, scenario, "ringing");
   await keyToStatus(page, "clearButton", "Space", "completed");
   assert.equal(await page.locator("#clearButton").isDisabled(), true, `${scenario.name} stop sound disables clear`);
   assert.equal((await timerInfo(page)).id, runningId, `${scenario.name} stop keeps identity`);
@@ -391,12 +487,12 @@ async function runScenario(page, cdp, scenario) {
     await clickToStatus(page, "finishButton", "completed");
     await page.waitForFunction(() => !document.querySelector("#clearButton").disabled,
       null, { timeout: 15000 });
-    await assertBothPasses(page, scenario);
+    await assertBothPasses(page, scenario, "ringing");
     await clickToStatus(page, "clearButton", "completed");
     await clickToStatus(page, "timerToggle", "running");
     await clickToStatus(page, "cancelButton", "idle");
   }
-  await assertBothPasses(page, scenario);
+  await assertBothPasses(page, scenario, "idle");
   console.log(`R49-S07 pass ${scenario.name}`);
 }
 
@@ -465,6 +561,7 @@ test("R49-S07 baseline without the action fix overflows", { timeout: 120_000 }, 
         null, { timeout: 15000 });
       const before = await readDescendants(page, false);
       assert.ok(before.bankScroll <= before.bankWidth + 1, `${scenario.name} fixed bank fits`);
+      await restoreThreeActionBank(page);
       await stripActionFix(context, page);
       await page.waitForTimeout(250);
       const after = await page.evaluate(() => {

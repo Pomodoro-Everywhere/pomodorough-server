@@ -5,6 +5,15 @@ const { readFileSync } = require("node:fs");
 const test = require("node:test");
 const { chromium } = require(process.env.POMODOROUGH_PLAYWRIGHT_MODULE || "playwright");
 const fixture = JSON.parse(readFileSync(0, "utf8"));
+// Since 0.54.0 the Timer bank hides inapplicable actions. The other fifteen
+// Timer descendants (task selector, phase buttons, duration inputs and
+// steppers, auto-start switch, Delete account) stay visible in every state.
+const TIMER_BANK = Object.freeze({
+  idle: ["timerToggle", "skipButton"],
+  running: ["timerToggle", "finishButton", "cancelButton"],
+  ringing: ["timerToggle", "skipButton", "clearButton"],
+});
+const TIMER_RAIL_DESCENDANTS = 15;
 
 async function authenticatedContext(browser) {
   const context = await browser.newContext({ serviceWorkers: "allow", bypassCSP: false, ignoreHTTPSErrors: true });
@@ -125,15 +134,26 @@ async function timerControls(page, scrollVertically) {
         scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, hit: hit === el || el.contains(hit) };
     });
     const bank = document.querySelector(".action-bank");
-    return { bounds, scrollX, scrollWidth: document.documentElement.scrollWidth,
+    const dockInline = document.getElementById("timerDock").classList.contains("timer-dock-inline");
+    return { bounds, dockInline, scrollX, scrollWidth: document.documentElement.scrollWidth,
       bankWidth: bank.clientWidth, bankScrollWidth: bank.scrollWidth };
   }, scrollVertically);
 }
 
-async function assertTimerControls(page, width, height, left, right) {
+async function assertTimerControls(page, width, height, left, right, phase) {
+  const bank = TIMER_BANK[phase];
+  assert.ok(bank, `known timer phase ${phase}`);
   for (const vertical of [false, true]) {
     const frame = await timerControls(page, vertical);
-    assert.equal(frame.bounds.length, 18, "all Timer interactive descendants measured");
+    // A dock taller than a third of the viewport sits inline at the end of
+    // the Timer content (UX round 2, B2 follow-up); its control counts too.
+    const dock = frame.dockInline ? ["timerDockToggle"] : [];
+    assert.equal(frame.bounds.length, TIMER_RAIL_DESCENDANTS + bank.length + dock.length,
+      `${phase} all Timer interactive descendants measured`);
+    assert.deepEqual(dock.filter((key) => !frame.bounds.some((control) => control.key === key)), [],
+      `${phase} the inline dock control is measured`);
+    assert.deepEqual(frame.bounds.filter((control) => Object.values(TIMER_BANK).flat().includes(control.key))
+      .map((control) => control.key), bank, `${phase} Timer bank shows only applicable actions`);
     assert.equal(frame.scrollX, 0, "no horizontal window scroll");
     assert.ok(frame.scrollWidth <= width + 1, `${width}px ${left}..${right} document width ${frame.scrollWidth}`);
     assert.ok(frame.bankScrollWidth <= frame.bankWidth + 1, "no action-bank overflow");
@@ -191,14 +211,14 @@ test("R49-S07 all Timer actions fit enabled, enlarged, segmented, and inset layo
         assert.equal(await page.evaluate(() => innerWidth), width, "actual layout viewport width");
         assert.equal(await page.evaluate(() => matchMedia("(horizontal-viewport-segments:2)").matches), !!offset);
         assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize), `${font * 0.16}px`);
-        await assertTimerControls(page, width, height, left, right);
+        await assertTimerControls(page, width, height, left, right, "idle");
         await timerKey(page, "timerToggle", "Enter", "running");
-        await assertTimerControls(page, width, height, left, right);
+        await assertTimerControls(page, width, height, left, right, "running");
         await timerKey(page, "timerToggle", "Space", "paused");
         await timerKey(page, "timerToggle", "Space", "running");
         await timerKey(page, "finishButton", "Enter", "completed");
         await page.waitForFunction(() => !document.querySelector("#clearButton").disabled);
-        await assertTimerControls(page, width, height, left, right);
+        await assertTimerControls(page, width, height, left, right, "ringing");
         await timerKey(page, "clearButton", "Space", "completed");
         assert.ok(await page.locator("#clearButton").isDisabled(), "Clear stops the completion sound");
         await timerKey(page, "timerToggle", "Enter", "running");

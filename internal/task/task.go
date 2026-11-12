@@ -88,6 +88,17 @@ func SharedIdentities(ctx context.Context, titles []string) ([]Task, error) {
 }
 
 func decodeSharedIdentity(result []byte) (Task, error) {
+	value, err := decodeSharedEnvelope("shared task identity", result)
+	if err != nil {
+		return Task{}, err
+	}
+	return decodeSharedIdentityValue(value)
+}
+
+// decodeSharedEnvelope returns the success value of a Core envelope. A Core
+// failure is a SharedIdentityValidationError carrying Core's reason; a
+// malformed envelope is a SharedIdentityRuntimeError.
+func decodeSharedEnvelope(subject string, result []byte) (json.RawMessage, error) {
 	var envelope struct {
 		OK    *bool           `json:"ok"`
 		Value json.RawMessage `json:"value"`
@@ -96,29 +107,33 @@ func decodeSharedIdentity(result []byte) (Task, error) {
 	decoder := json.NewDecoder(bytes.NewReader(result))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err != nil {
-		return Task{}, &SharedIdentityRuntimeError{Cause: fmt.Errorf("decode shared task identity envelope: %w", err)}
+		return nil, &SharedIdentityRuntimeError{Cause: fmt.Errorf("decode %s envelope: %w", subject, err)}
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Task{}, &SharedIdentityRuntimeError{Cause: errors.New("shared task identity envelope contains trailing data")}
+		return nil, &SharedIdentityRuntimeError{Cause: fmt.Errorf("%s envelope contains trailing data", subject)}
 	}
 	if envelope.OK == nil {
-		return Task{}, &SharedIdentityRuntimeError{Cause: errors.New("shared task identity envelope is missing ok")}
+		return nil, &SharedIdentityRuntimeError{Cause: fmt.Errorf("%s envelope is missing ok", subject)}
 	}
 	if !*envelope.OK {
 		if envelope.Error == nil || *envelope.Error == "" || len(envelope.Value) != 0 {
-			return Task{}, &SharedIdentityRuntimeError{Cause: errors.New("shared task identity failure envelope is malformed")}
+			return nil, &SharedIdentityRuntimeError{Cause: fmt.Errorf("%s failure envelope is malformed", subject)}
 		}
-		return Task{}, &SharedIdentityValidationError{Detail: *envelope.Error}
+		return nil, &SharedIdentityValidationError{Detail: *envelope.Error}
 	}
 	if envelope.Error != nil || len(envelope.Value) == 0 || string(envelope.Value) == "null" {
-		return Task{}, &SharedIdentityRuntimeError{Cause: errors.New("shared task identity success envelope is malformed")}
+		return nil, &SharedIdentityRuntimeError{Cause: fmt.Errorf("%s success envelope is malformed", subject)}
 	}
+	return envelope.Value, nil
+}
+
+func decodeSharedIdentityValue(result json.RawMessage) (Task, error) {
 	var value struct {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
 		UTF8Bytes *int   `json:"utf8Bytes"`
 	}
-	valueDecoder := json.NewDecoder(bytes.NewReader(envelope.Value))
+	valueDecoder := json.NewDecoder(bytes.NewReader(result))
 	valueDecoder.DisallowUnknownFields()
 	if err := valueDecoder.Decode(&value); err != nil {
 		return Task{}, &SharedIdentityRuntimeError{Cause: fmt.Errorf("decode shared task identity: %w", err)}

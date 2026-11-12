@@ -46,6 +46,21 @@ func TestMigrateVersionOneAddsTaskSchema(t *testing.T) {
 	}
 }
 
+// legacyTaskOperationsTable is task_operations as schema v2 to v7 created it.
+// The v8 rebuild copies every real column, so legacy fixtures that predate v8
+// use the real columns rather than a minimal stand-in.
+const legacyTaskOperationsTable = `CREATE TABLE task_operations (
+	id TEXT PRIMARY KEY,
+	device_id TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	operation_type TEXT NOT NULL CHECK (operation_type IN ('upsert', 'delete')),
+	title TEXT NOT NULL,
+	occurred_at TEXT NOT NULL,
+	occurred_at_ms INTEGER NOT NULL,
+	hlc_wall_ms INTEGER NOT NULL,
+	hlc_counter INTEGER NOT NULL
+) STRICT`
+
 func TestMigrateVersionTwoAddsDurationSchemaWithoutRecreatingTasks(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/legacy.sqlite")
@@ -54,8 +69,9 @@ func TestMigrateVersionTwoAddsDurationSchemaWithoutRecreatingTasks(t *testing.T)
 	}
 	defer db.Close()
 	for _, statement := range []string{
-		`CREATE TABLE task_operations (id TEXT PRIMARY KEY, title TEXT NOT NULL)`,
-		`INSERT INTO task_operations(id, title) VALUES ('task-operation-0001', 'Preserved')`,
+		legacyTaskOperationsTable,
+		`INSERT INTO task_operations(id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter)
+		VALUES ('task-operation-0001', 'device-0001', 'task-0001', 'upsert', 'Preserved', '2026-07-15T10:00:00Z', 1784109600000, 1784109600000, 0)`,
 		`PRAGMA user_version = 2`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -104,7 +120,7 @@ func TestMigrateVersionThreeAddsBootstrapSchemaAndScopedDeleteBypass(t *testing.
 	defer db.Close()
 	for _, statement := range []string{
 		`CREATE TABLE timer_commands (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE task_operations (id TEXT PRIMARY KEY)`,
+		legacyTaskOperationsTable,
 		`CREATE TABLE duration_operations (id TEXT PRIMARY KEY)`,
 		`CREATE TRIGGER timer_commands_no_delete BEFORE DELETE ON timer_commands BEGIN SELECT RAISE(ABORT, 'timer commands are immutable'); END`,
 		`CREATE TRIGGER task_operations_no_delete BEFORE DELETE ON task_operations BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
@@ -128,8 +144,14 @@ func TestMigrateVersionThreeAddsBootstrapSchemaAndScopedDeleteBypass(t *testing.
 		}
 		rows.Close()
 	}
+	inserts := map[string]string{
+		"timer_commands": `INSERT INTO timer_commands(id) VALUES ('operation-0001')`,
+		"task_operations": `INSERT INTO task_operations(id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter)
+			VALUES ('operation-0001', 'device-0001', 'task-0001', 'upsert', 'Kept', '2026-07-15T10:00:00Z', 1784109600000, 1784109600000, 0)`,
+		"duration_operations": `INSERT INTO duration_operations(id) VALUES ('operation-0001')`,
+	}
 	for _, table := range []string{"timer_commands", "task_operations", "duration_operations"} {
-		if _, err := db.ExecContext(ctx, `INSERT INTO `+table+`(id) VALUES ('operation-0001')`); err != nil {
+		if _, err := db.ExecContext(ctx, inserts[table]); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.ExecContext(ctx, `DELETE FROM `+table); err == nil {
@@ -169,6 +191,7 @@ func TestMigrateVersionFourAddsImmutableAutoStartSchema(t *testing.T) {
 	defer db.Close()
 	for _, statement := range []string{
 		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
+		legacyTaskOperationsTable,
 		`PRAGMA user_version = 4`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -263,6 +286,7 @@ func TestMigrateVersionFiveAddsImmutableNullableSelectedTaskSchema(t *testing.T)
 	defer db.Close()
 	for _, statement := range []string{
 		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
+		legacyTaskOperationsTable,
 		`PRAGMA user_version = 5`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -356,7 +380,7 @@ func TestConcurrentMigrationsSerializeSchemaOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`CREATE TABLE task_operations (id TEXT PRIMARY KEY, title TEXT NOT NULL)`,
+		legacyTaskOperationsTable,
 		`PRAGMA user_version = 2`,
 	} {
 		if _, err := setup.ExecContext(ctx, statement); err != nil {

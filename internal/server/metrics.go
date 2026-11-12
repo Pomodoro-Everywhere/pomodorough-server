@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -182,7 +183,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if err := s.metrics.writePrometheus(w); err != nil {
-		s.logger.Warn("write metrics response", "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "write metrics response")
+		recordRequestFailure(s.logger, s.metrics, r, "write metrics response", err, slog.LevelWarn)
 	}
 }

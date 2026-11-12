@@ -37,9 +37,44 @@
     }));
   }
 
-  // Undo window for a deferred task delete. The delete reaches core only
-  // after this delay, on the next task mutation, or when the page hides.
-  const TASK_DELETE_UNDO_MS = 5000;
+  // Undo window for a deferred task delete. The window has no time limit: the
+  // delete reaches core when the user dismisses the undo, deletes, adds, or
+  // renames another task, leaves the Tasks screen, or the page hides or unloads.
+
+  // Notice kinds let a later success clear only the failure it answers. They
+  // reuse the operation tags the actions module reports failures with.
+  const DURATION_NOTICE = "actions.duration.save-failed";
+  // The range notice is the view's own: an entry inside the field range
+  // answers it even when core has nothing to save.
+  const DURATION_RANGE_NOTICE = "view.duration.range";
+  const TASK_NOTICE = "actions.task.save-failed";
+  // Share of a timer element that must be inside the viewport before the
+  // dock stops repeating it; below 1 so sub-pixel rounding does not flicker.
+  const TIMER_DOCK_ON_SCREEN_RATIO = 0.99;
+  // A dock taller than this share of the viewport would cover too much of the
+  // page at the bottom edge, so it sits inline at the end of the Timer content.
+  const TIMER_DOCK_MAX_VIEWPORT_SHARE = 1 / 3;
+
+  // Sticky bars overlay the scrolling page, so the scroller reserves their
+  // measured height: focus and anchor scrolling then stop clear of them.
+  function reserveScrollEdge(document, edge, bar) {
+    const root = document?.documentElement;
+    if (!root?.style) return;
+    const height = bar && !bar.hidden ? bar.getBoundingClientRect?.().height || 0 : 0;
+    root.style[edge] = height > 0 ? `${height}px` : "";
+  }
+
+  function setTextOnChange(element, text) {
+    if (element && element.textContent !== text) element.textContent = text;
+  }
+
+  const ENDED_TIMER_STATUSES = new Set(["completed", "cancelled", "superseded"]);
+
+  // A completed run whose recorded time is below its plan was finished early.
+  function historyFinishedEarly(item) {
+    return item.status === "completed" && Number.isFinite(item.elapsedMs)
+      && item.elapsedMs < item.plannedDurationMs;
+  }
 
   function dialTickCountForTimer(timer) {
     return Math.max(1, Math.ceil((timer?.plannedDurationMs || 0) / 60_000));
@@ -84,24 +119,34 @@
       "finishTimer", "cancelAndClearTimer", "stopCompletionAlert", "logout", "deleteAccount",
       "closeRevisionStreamForIdentityChange", "clearLocalData", "redirectToLogin",
       "chooseBootstrapStrategy", "retryBootstrapResolution", "handleOnline", "handleOffline",
-      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "localBootstrapState", "getWorkspaceReadModel", "issuePhaseSelection", "issueSkip",
+      "database", "tabId", "needsBootstrapResolution", "scheduleSync", "getWorkspaceReadModel", "issuePhaseSelection", "issueSkip",
       "quarantineAccountMismatch", "retryPendingLogout", "captureAccountContext", "captureDatabaseContext",
-      "armSavedClaimRecovery", "cancelSavedClaimRecovery", "discardSavedClaimRecovery"
+      "armSavedClaimRecovery", "cancelSavedClaimRecovery", "discardSavedClaimRecovery",
+      "markPendingTaskDeletion", "clearPendingTaskDeletion",
+      "replayPendingTaskDeletions", "workspaceOwnerId"
     ],
     provides: [
       "render", "renderScreens", "activateScreen", "handleScreenKeydown", "setupScreenNavigation",
       "renderDurations", "renderVersion", "renderTaskSelector", "displayTimer", "timerDisplayView",
       "renderTimerClock", "renderTimerInstruction", "renderTimerControls", "renderCompletionLimit", "renderDialTicks", "renderTimer", "resumeWakeLock",
+      "watchTimerDock", "renderTimerDock",
       "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
-      "renderTasks", "flushTaskDeletion", "undoTaskDeletion", "formatTaskDuration", "formatHistoryDate", "renderProfile", "hideUnreachableAvatar",
+      "renderTasks", "flushTaskDeletion", "afterTaskDeletion", "undoTaskDeletion", "dismissTaskDeletion", "formatTaskDuration", "formatHistoryDate", "renderProfile", "hideUnreachableAvatar",
       "renderSyncStatus", "renderConflict", "renderBootstrapDialog", "renderDeviceMark", "showNotice", "dismissNotice",
-      "createDialTicks", "dialTickCountFor", "commitDurationInput", "setupPreferenceEvents", "setupTaskEvents",
+      "clearNotice", "retryNotice", "renderNotice",
+      "createDialTicks", "dialTickCountFor", "commitDurationInput", "stepDuration", "setupPreferenceEvents", "setupTaskEvents",
       "setupTimerEvents", "setupAccountEvents", "resetBootstrapChoice", "focusBootstrapDialog", "refocusBootstrapAfterCancel",
       "setupBootstrapEvents", "setupConnectivityEvents", "setupInstallEvents", "setupEvents"
     ],
     emits: [],
     listens: []
   });
+
+  // A field without a min or max attribute is not bounded on that side.
+  function fieldBound(attribute, unbounded) {
+    const bound = attribute === undefined || attribute === null || attribute === "" ? Number.NaN : Number(attribute);
+    return Number.isFinite(bound) ? bound : unbounded;
+  }
 
   class ViewPart {
     constructor(state, external, use) {
@@ -114,11 +159,19 @@
   }
 
   class PreferenceView extends ViewPart {
+    // `notice` presents duration feedback; `screenObservers` run after the
+    // visible screen changes so other parts can settle screen-bound state.
+    constructor(state, external, use, { notice = null, screenObservers = [] } = {}) {
+      super(state, external, use);
+      this.notice = notice;
+      this.screenObservers = screenObservers;
+    }
+
     actions() {
       return super.actions([
         "renderScreens", "activateScreen", "handleScreenKeydown", "renderDurations",
         "renderVersion", "renderTaskSelector", "renderDeviceMark", "createDialTicks",
-        "dialTickCountFor", "commitDurationInput"
+        "dialTickCountFor", "commitDurationInput", "stepDuration"
       ]);
     }
 
@@ -132,6 +185,7 @@
       const showingTasks = state.activeScreen === "tasks";
       elements.timerScreen.hidden = showingTasks;
       elements.tasksScreen.hidden = !showingTasks;
+      this.placeNoticeStack(showingTasks);
       for (const button of elements.screenButtons) {
         const selected = button.dataset.screenButton === state.activeScreen;
         button.setAttribute("aria-selected", String(selected));
@@ -139,10 +193,24 @@
       }
     }
 
+    // The notice stack pins to the top edge once it reaches it. It follows
+    // the Tasks heading in the document, so the heading has scrolled away
+    // before the stack pins and the stack never lies over it. The Timer
+    // heading is not displayed; there the stack leads the panel.
+    placeNoticeStack(showingTasks) {
+      const { elements } = this;
+      const stack = elements.noticeStack;
+      const heading = elements.tasksScreen.querySelector?.(".tasks-heading");
+      if (!stack || typeof heading?.after !== "function" || typeof elements.timerScreen.before !== "function") return;
+      if (showingTasks && heading.nextElementSibling !== stack) heading.after(stack);
+      if (!showingTasks && elements.timerScreen.previousElementSibling !== stack) elements.timerScreen.before(stack);
+    }
+
     activateScreen(button, focus = false) {
       const { state } = this;
       state.activeScreen = button.dataset.screenButton === "tasks" ? "tasks" : "timer";
       this.renderScreens();
+      for (const observer of this.screenObservers) observer(state.activeScreen);
       if (focus) button.focus();
     }
 
@@ -180,7 +248,7 @@
         if (document.activeElement !== input) input.value = String(state.durationsMs[input.name] / 60_000);
         input.disabled = blocked || active;
       }
-      for (const button of elements.stepButtons) button.disabled = blocked || active;
+      for (const button of elements.stepButtons) this.renderStepButton(button, blocked || active);
       elements.autoStartBreaks.checked = state.autoStartBreaks;
       elements.autoStartBreaks.disabled = blocked;
       this.renderVersion();
@@ -234,13 +302,76 @@
       renderDialTickMarks(this.document, this.elements, count);
     }
 
+    // A step button at its field's bound is disabled. When it held the focus,
+    // the focus moves to its field so the keyboard user keeps a place.
+    renderStepButton(button, unavailable) {
+      const target = this.durationStepTarget(button);
+      const disabled = unavailable || !target || target.next === target.base;
+      if (disabled && this.document.activeElement === button) target?.input.focus();
+      button.disabled = disabled;
+    }
+
+    // The stepper keeps to the field's own min and max, which are the minute
+    // bounds core accepts, so a step never sends an out-of-range value. A
+    // field without a whole number steps from the saved duration.
+    durationStepTarget(button) {
+      const input = this.document.getElementById(button.dataset.for);
+      if (!input) return null;
+      const step = Number(button.dataset.step);
+      const typed = String(input.value).trim() === "" ? Number.NaN : Number(input.value);
+      const base = Number.isInteger(typed) ? typed : this.state.durationsMs[input.name] / 60_000;
+      const stepped = base + (Number.isFinite(step) ? step : 0);
+      const next = Math.min(fieldBound(input.max, Infinity), Math.max(fieldBound(input.min, -Infinity), stepped));
+      return { input, base, next };
+    }
+
+    stepDuration(button) {
+      const target = this.durationStepTarget(button);
+      if (!target || target.next === target.base) return;
+      target.input.value = String(target.next);
+      this.commitDurationInput(target.input);
+    }
+
+    // Core decides whether a duration is saved and always receives the entry.
+    // The field's own constraints (min, max, whole minutes) are read before
+    // the attempt only to word the feedback for an entry core did not save.
     commitDurationInput(input) {
       const { use } = this;
       const context = use.captureAccountContext();
-      const value = Number(input.value);
-      use.issueDurationOperation(input.name, value * 60_000).then((saved) => {
+      const outsideFieldRange = this.durationEntryOutsideFieldRange(input);
+      use.issueDurationOperation(input.name, Number(input.value) * 60_000).then((saved) => {
         if (!saved && accountOperation.isCurrent(context)) this.renderDurations();
+        if (!accountOperation.isCurrent(context)) return;
+        if (!saved && outsideFieldRange) this.rejectDurationEntry(input);
+        else this.settleDurationEntry(input, saved);
       });
+    }
+
+    durationEntryOutsideFieldRange(input) {
+      return String(input.value).trim() === "" || input.validity?.valid === false;
+    }
+
+    // A focused field keeps the rejected entry and is marked invalid; a field
+    // without focus already shows the saved duration again.
+    rejectDurationEntry(input) {
+      const { use } = this;
+      const values = { phase: use.phaseLabel(input.name), min: input.min, max: input.max };
+      if (this.durationEntryOutsideFieldRange(input)) input.setAttribute?.("aria-invalid", "true");
+      else input.removeAttribute?.("aria-invalid");
+      this.notice?.showNotice(use.tr(
+        "notice.durationRange", values,
+        `${values.phase} length was not changed: enter a whole number of minutes from ${values.min} to ${values.max}.`
+      ), { kind: DURATION_RANGE_NOTICE });
+    }
+
+    // An entry inside the field range is not marked invalid and answers the
+    // range notice, whether core saved it or it already was the saved
+    // duration. Only a saved entry answers a failed save; a save that fails
+    // again keeps the notice the actions module showed.
+    settleDurationEntry(input, saved) {
+      input.removeAttribute?.("aria-invalid");
+      this.notice?.clearNotice(DURATION_RANGE_NOTICE);
+      if (saved) this.notice?.clearNotice(DURATION_NOTICE);
     }
   }
 
@@ -252,13 +383,181 @@
       this.wakeLockRequest = null;
       this.wakeLockDenied = false;
       this.wakeLockWarned = false;
+      this.timerDockObserver = null;
+      this.timerDockOnScreen = new Map();
+      this.timerDockRoomWatched = false;
+      this.timerDockWaiting = false;
+      this.timerDockReserves = null;
+      this.timerDockInline = false;
+      this.timerDockEdgeHeight = null;
+      this.timerDockMeasureDue = true;
     }
 
     actions() {
       return super.actions([
         "displayTimer", "timerDisplayView", "renderTimerClock", "renderTimerInstruction",
-        "renderTimerControls", "renderCompletionLimit", "renderDialTicks", "renderTimer", "resumeWakeLock"
+        "renderTimerControls", "renderCompletionLimit", "renderDialTicks", "renderTimer", "resumeWakeLock",
+        "watchTimerDock", "renderTimerDock"
       ]);
+    }
+
+    // The dock repeats the countdown and the primary control at the bottom of
+    // the viewport while either original is not fully on screen. Observing
+    // again reports fresh geometry after the Timer screen returns; until that
+    // report the dock stays hidden.
+    watchTimerDock() {
+      const { host, elements } = this;
+      if (!elements.timerDock) return;
+      const originals = [elements.timerToggle, elements.timerDisplay];
+      this.timerDockOnScreen.clear();
+      this.timerDockMeasureDue = true;
+      this.watchTimerDockRoom();
+      if (typeof host.IntersectionObserver !== "function") {
+        // No geometry reports: keep the dock up on the Timer screen.
+        for (const original of originals) this.timerDockOnScreen.set(original, false);
+        this.renderTimerDock();
+        return;
+      }
+      this.timerDockObserver ??= new host.IntersectionObserver(
+        (entries) => this.recordTimerDockGeometry(entries), { threshold: TIMER_DOCK_ON_SCREEN_RATIO }
+      );
+      for (const original of originals) {
+        this.timerDockObserver.unobserve(original);
+        this.timerDockObserver.observe(original);
+      }
+      this.renderTimerDock();
+    }
+
+    // Scrolling and resizing move the Timer panel against the bottom edge.
+    // A new text size changes the dock's size without a resize; the observer
+    // reports it before the next paint. Its report only asks for a new
+    // measurement at the bottom edge, so a size that the place itself
+    // changes cannot move the dock back.
+    watchTimerDockRoom() {
+      if (this.timerDockRoomWatched) return;
+      this.timerDockRoomWatched = true;
+      if (typeof this.host.ResizeObserver === "function") {
+        new this.host.ResizeObserver(() => {
+          this.timerDockMeasureDue = true;
+          this.renderTimerDock();
+        }).observe(this.elements.timerDock);
+      }
+      this.host.addEventListener?.("scroll", () => this.renderTimerDock(), { passive: true });
+      this.host.addEventListener?.("resize", () => {
+        this.timerDockMeasureDue = true;
+        this.renderTimerDock();
+      }, { passive: true });
+    }
+
+    recordTimerDockGeometry(entries) {
+      for (const entry of entries) {
+        this.timerDockOnScreen.set(entry.target, entry.intersectionRatio >= TIMER_DOCK_ON_SCREEN_RATIO);
+      }
+      this.renderTimerDock();
+    }
+
+    // The dock belongs to the Timer panel. Until the panel reaches the dock's
+    // place at the bottom edge, that strip holds the screen tabs or the
+    // masthead, and the dock waits instead of lying over them.
+    timerDockWaits(dock) {
+      const panelTop = this.elements.timerScreen.getBoundingClientRect?.().top;
+      const dockHeight = dock.getBoundingClientRect?.().height;
+      const viewportHeight = this.document.documentElement?.clientHeight;
+      if (![panelTop, dockHeight, viewportHeight].every(Number.isFinite)) return false;
+      return panelTop > viewportHeight - dockHeight;
+    }
+
+    // The dock's height at the bottom edge decides its place. The inline
+    // height is never used: the choice changes it, so reading it could flip
+    // the place on every render (as in IOS18-01). The viewport height does
+    // not depend on the place either. Away from the Timer content the dock is
+    // measured on every render; inline it is measured again only when a
+    // resize, a new label or its own new size can change its height.
+    timerDockOversized(dock) {
+      const viewportHeight = this.document.documentElement?.clientHeight;
+      if (!this.timerDockInline || this.timerDockMeasureDue || this.timerDockEdgeHeight === null) {
+        const shown = !this.timerDockInline && !dock.hidden;
+        this.timerDockEdgeHeight = shown ? dock.getBoundingClientRect?.().height : this.measureTimerDockAtEdge(dock);
+        this.timerDockMeasureDue = false;
+      }
+      const height = this.timerDockEdgeHeight;
+      if (![height, viewportHeight].every(Number.isFinite) || viewportHeight <= 0) return false;
+      return height > viewportHeight * TIMER_DOCK_MAX_VIEWPORT_SHARE;
+    }
+
+    // Shows the dock at the bottom edge only long enough to read its height.
+    // Everything happens inside one task, so nothing is painted in between.
+    measureTimerDockAtEdge(dock) {
+      const { inline, hidden } = { inline: this.timerDockInline, hidden: dock.hidden };
+      if (inline) this.placeTimerDock(dock, false);
+      dock.hidden = false;
+      const height = dock.getBoundingClientRect?.().height;
+      dock.hidden = hidden;
+      if (inline) this.placeTimerDock(dock, true);
+      return height;
+    }
+
+    // Inline, the dock is the last part of the Timer content; otherwise it is
+    // the last element of the page, where it sticks to the bottom edge.
+    // Moving an element drops its focus, so a focused control takes it back.
+    placeTimerDock(dock, inline) {
+      const { document } = this;
+      const home = inline ? this.elements.timerScreen : document.body;
+      const focused = dock.contains?.(document.activeElement) ? document.activeElement : null;
+      this.timerDockInline = inline;
+      dock.classList?.toggle("timer-dock-inline", inline);
+      if (home && home.lastElementChild !== dock) home.append?.(dock);
+      if (focused && document.activeElement !== focused) focused.focus?.({ preventScroll: true });
+    }
+
+    renderTimerDock() {
+      const { state, elements, document } = this;
+      const dock = elements.timerDock;
+      if (!dock) return;
+      const onTimer = state.activeScreen !== "tasks";
+      const inline = onTimer && this.timerDockOversized(dock);
+      if (this.timerDockInline !== inline) this.placeTimerDock(dock, inline);
+      const originalOffScreen = [...this.timerDockOnScreen.values()].includes(false);
+      // An inline dock is part of the page flow. Showing it only while an
+      // original is off screen would move the page and flip that report.
+      const hidden = !onTimer || (!inline && !originalOffScreen);
+      const focused = dock.contains?.(document.activeElement);
+      if (dock.hidden !== hidden) dock.hidden = hidden;
+      this.renderTimerDockEdge(dock, { atEdge: !hidden && !inline, focused });
+    }
+
+    // At the bottom edge the dock waits while the strip there still holds the
+    // screen tabs; otherwise it overlays the page and reserves its measured
+    // height, which a resize can change.
+    renderTimerDockEdge(dock, { atEdge, focused }) {
+      const waits = atEdge && this.timerDockWaits(dock);
+      const reserves = atEdge && !waits;
+      const reserved = reserves ? this.timerDockEdgeHeight : null;
+      if (this.timerDockReserves === reserved && this.timerDockWaiting === waits) return;
+      // A dock that is not shown cannot keep focus; the original control takes it over.
+      if (focused && (dock.hidden || waits)) this.elements.timerToggle.focus?.({ preventScroll: true });
+      dock.classList?.toggle("timer-dock-waiting", waits);
+      this.timerDockWaiting = waits;
+      this.timerDockReserves = reserved;
+      reserveScrollEdge(this.document, "scrollPaddingBottom", reserves ? dock : null);
+    }
+
+    // The 250 ms render loop calls this, so the dock changes only on a difference.
+    mirrorTimerDock(view) {
+      const { elements } = this;
+      if (!elements.timerDockToggle) return;
+      // A new label or a clock of another length can change the dock's height
+      // at the bottom edge. A clock that only counts keeps its length.
+      if (elements.timerDockToggle.textContent !== elements.timerToggle.textContent
+        || elements.timerDockDisplay.textContent.length !== String(view.timeText).length) this.timerDockMeasureDue = true;
+      setTextOnChange(elements.timerDockToggle, elements.timerToggle.textContent);
+      setTextOnChange(elements.timerDockDisplay, view.timeText);
+      if (elements.timerDockToggle.disabled !== elements.timerToggle.disabled) {
+        elements.timerDockToggle.disabled = elements.timerToggle.disabled;
+      }
+      // A new label can change the dock's height, and the page can move
+      // without a scroll: each timer render measures the dock's room again.
+      this.renderTimerDock();
     }
 
     renderDialTicks(timer) {
@@ -287,11 +586,7 @@
       const { state, use, elements } = this;
       elements.timerDisplay.textContent = view.timeText;
       elements.timerDisplay.dateTime = `PT${Math.floor(view.totalSeconds / 60)}M${view.seconds}S`;
-      elements.timerDisplay.setAttribute("aria-label", use.tr(
-        "timer.remainingLabel",
-        { minutes: view.minutes, seconds: view.seconds, phase: use.phaseLabel(timer.phase), status: use.timerStatusLabel(view.status) },
-        `${view.minutes} minutes ${view.seconds} seconds remaining, ${use.phaseLabel(timer.phase)}, ${use.timerStatusLabel(view.status)}`
-      ));
+      elements.timerDisplay.setAttribute("aria-label", this.timerClockLabel(timer, view));
       elements.phaseLabel.textContent = use.phaseLabel(timer.phase).toUpperCase();
       elements.timerDetail.textContent = this.timerDetailText(timer, view.status);
       const breakProgress = state.readModel?.cadence.longBreakProgress ?? 0;
@@ -303,6 +598,25 @@
       elements.dial.dataset.status = view.status;
       elements.dialProgress.style.strokeDashoffset = String(DIAL_CIRCUMFERENCE * (1 - view.progress));
       this.renderDocumentTitle(timer, view);
+    }
+
+    // An ended timer has no time left, even one finished early whose Core view
+    // still reports remaining time, so its label states the clock without
+    // calling it remaining.
+    timerClockLabel(timer, view) {
+      const { use } = this;
+      const values = {
+        minutes: view.minutes, seconds: view.seconds,
+        phase: use.phaseLabel(timer.phase), status: use.timerStatusLabel(view.status)
+      };
+      if (ENDED_TIMER_STATUSES.has(view.status)) return use.tr(
+        "timer.endedLabel", values,
+        `${values.minutes} minutes ${values.seconds} seconds, ${values.phase}, ${values.status}`
+      );
+      return use.tr(
+        "timer.remainingLabel", values,
+        `${values.minutes} minutes ${values.seconds} seconds remaining, ${values.phase}, ${values.status}`
+      );
     }
 
     // The tab title mirrors the clock while a run is underway and names the
@@ -473,15 +787,19 @@
       this.renderTimerClock(timer, view);
       this.renderTimerInstruction(timer, status);
       this.renderTimerControls(timer, view);
+      this.mirrorTimerDock(view);
       this.renderCompletionLimit();
       this.syncWakeLock(status);
     }
   }
 
   class ActivityView extends ViewPart {
-    constructor(state, external, use) {
+    // `notice` presents the refusal of a blank rename draft.
+    constructor(state, external, use, { notice = null } = {}) {
       super(state, external, use);
+      this.notice = notice;
       this.pendingTaskDeletion = null;
+      this.taskDeletionSettling = null;
       this.taskRename = null;
       this.taskFocusHint = null;
     }
@@ -489,7 +807,8 @@
     actions() {
       return super.actions([
         "arrivalHistoryItems", "historyTaskContext", "historyStatusLabel", "renderHistory",
-        "renderTasks", "flushTaskDeletion", "undoTaskDeletion", "formatTaskDuration", "formatHistoryDate"
+        "renderTasks", "flushTaskDeletion", "afterTaskDeletion", "undoTaskDeletion", "dismissTaskDeletion", "formatTaskDuration",
+        "formatHistoryDate"
       ]);
     }
 
@@ -532,9 +851,6 @@
     historyListItem(item) {
       const { use, document } = this;
       const phaseKey = use.phaseConfig()[item.phase] ? item.phase : "focus";
-      const durationMs = use.positiveNumber(
-        item.plannedDurationMs ?? item.durationMs ?? item.timer?.plannedDurationMs, 0
-      );
       const dateValue = item.completedAt || item.endedAt || item.occurredAt || item.createdAt;
       const listItem = document.createElement("li");
       listItem.className = "history-item";
@@ -548,10 +864,30 @@
       date.textContent = this.formatHistoryDate(dateValue);
       const duration = document.createElement("span");
       duration.className = "history-duration";
-      const minutes = Math.max(1, Math.round(durationMs / 60000));
-      duration.textContent = use.tr("history.minutes", { count: minutes }, `${minutes} min`);
+      duration.textContent = this.historyDurationText(item);
       listItem.append(stamp, this.historyItemLabel(item, phaseKey), date, duration);
       return listItem;
+    }
+
+    // Core records the time a run really took as elapsedMs, and that is the
+    // time shown. A row stored before Core recorded it has only the planned
+    // length: a completed run spent its minutes, while a cancelled or
+    // superseded row is labelled as planned, never as time spent. A row
+    // without a status is an older completed row.
+    historyDurationText(item) {
+      const { use } = this;
+      if (Number.isFinite(item.elapsedMs)) {
+        const minutes = Math.round(Math.max(0, item.elapsedMs) / 60000);
+        return use.tr("history.minutes", { count: minutes }, `${minutes} min`);
+      }
+      const durationMs = use.positiveNumber(
+        item.plannedDurationMs ?? item.durationMs ?? item.timer?.plannedDurationMs, 0
+      );
+      const minutes = Math.max(1, Math.round(durationMs / 60000));
+      if (!item.status || item.status === "completed") {
+        return this.use.tr("history.minutes", { count: minutes }, `${minutes} min`);
+      }
+      return this.use.tr("history.plannedMinutes", { count: minutes }, `planned ${minutes} min`);
     }
 
     renderHistory() {
@@ -588,6 +924,9 @@
 
     historyStatusLabel(item) {
       const { use } = this;
+      if (historyFinishedEarly(item)) return use.tr(
+        "history.finishedEarly", {}, "Finished early"
+      );
       if (!item.status || item.status === "completed") return use.tr(
         "history.completed", {}, "Completed"
       );
@@ -616,8 +955,7 @@
       row.dataset.taskId = task.id;
       const controls = document.createElement("span");
       controls.className = "task-actions";
-      if (this.state.coreCapabilities?.renameTask === true) controls.append(this.taskRenameButton(task, blocked));
-      controls.append(this.taskDeleteButton(task, blocked));
+      controls.append(this.taskRenameButton(task, blocked), this.taskDeleteButton(task, blocked));
       row.append(this.taskTitleCell(task), ...this.taskStatCells(summary), controls);
       return row;
     }
@@ -713,15 +1051,21 @@
       this.taskRowElement(task.id)?.querySelector(".task-rename")?.focus({ preventScroll: true });
     }
 
-    // Empty, whitespace-only, and unchanged titles cancel without an intent.
+    // An unchanged title cancels without an intent. Rename follows the
+    // composer: a blank draft is refused with the composer's notice, and any
+    // other draft is sent as typed, because edge spaces are part of a title.
     // Rename replaces the task identity, so the focus hint names the new
     // identity for the render that follows the commit.
     async commitTaskRename(task) {
       const rename = this.taskRename;
       if (!rename || rename.taskId !== task.id) return false;
-      const title = rename.draft.trim();
+      const title = rename.draft;
       this.cancelTaskRename(task);
-      if (title === "" || title === task.title) return false;
+      if (title === task.title) return false;
+      if (title.trim() === "") {
+        this.notice.showNotice(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."), { kind: TASK_NOTICE });
+        return false;
+      }
       await this.flushTaskDeletion();
       this.taskFocusHint = await this.renamedTaskId(title);
       return this.use.renameTask(task, title);
@@ -743,31 +1087,103 @@
     deferTaskDeletion(task) {
       // A second delete flushes the first immediately; only one undo is open.
       const flushed = this.flushTaskDeletion();
-      const pending = { taskId: task.id, title: task.title, timer: null };
-      pending.timer = this.host.setTimeout(() => this.flushTaskDeletion(pending), TASK_DELETE_UNDO_MS);
-      this.pendingTaskDeletion = pending;
+      this.pendingTaskDeletion = { taskId: task.id, title: task.title, ownerId: this.use.workspaceOwnerId() };
+      // Written before any asynchronous step: a page that unloads inside the
+      // undo window leaves this marker for the next startup to replay.
+      this.use.markPendingTaskDeletion(task);
       this.renderTasks();
       this.showUndoToast(task.title);
       return flushed;
     }
 
     // Flushing is idempotent: the first caller sends the delete, later callers
-    // and an undone timer resolve false. Callers must not report the result as
-    // their own; it is the delete's outcome.
-    flushTaskDeletion(expected = this.pendingTaskDeletion) {
+    // resolve false. Callers must not report the result as their own; it is
+    // the delete's outcome. The promise never rejects, so pagehide, a hidden
+    // page, a screen change, Dismiss, a rename and an account action can all
+    // flush without a catch of their own.
+    flushTaskDeletion() {
       const pending = this.pendingTaskDeletion;
-      if (!pending || pending !== expected) return Promise.resolve(false);
+      if (!pending) return Promise.resolve(false);
       this.pendingTaskDeletion = null;
-      this.host.clearTimeout(pending.timer);
       this.hideUndoToast();
-      return this.use.deleteTask({ id: pending.taskId, title: pending.title });
+      this.taskDeletionSettling = this.completeTaskDeletion(pending)
+        .catch((error) => this.reportRejectedTaskDeletion(error));
+      return this.taskDeletionSettling;
+    }
+
+    // A delete that rejects instead of resolving false is reported once here.
+    // Its row is already back (completeTaskDeletion), so the notice says the
+    // task was not deleted.
+    reportRejectedTaskDeletion(error) {
+      const { use } = this;
+      this.host.console.warn("Pomodorough task delete failed:", error);
+      reportFrontendError(error, "actions.task.save-failed");
+      const failure = use.tr("notice.taskDeleteFailed", {}, "Task could not be deleted.");
+      this.notice.showNotice(use.tr("notice.tryAgainAfter", { failure }, `${failure} Try again.`), { kind: TASK_NOTICE });
+      return false;
+    }
+
+    // A refused delete leaves the task in the workspace, so its row is shown
+    // again. Owner fence: a delete deferred in one workspace is never sent in
+    // another; it is dropped with its marker.
+    // A delete that settles clears its marker, whatever the outcome and even
+    // while the page is hidden: a saved delete needs no replay, and a refused
+    // or failed one has shown its notice with the row back, so a later replay
+    // would delete the task without a word, perhaps while another tab runs a
+    // focus on it. Only a page that dies before the delete settles leaves a
+    // marker, which the next startup or foreground replays.
+    async completeTaskDeletion(pending) {
+      if (pending.ownerId !== this.use.workspaceOwnerId()) {
+        this.use.clearPendingTaskDeletion(pending.taskId);
+        return false;
+      }
+      let deleted = false;
+      try {
+        deleted = await this.use.deleteTask({ id: pending.taskId, title: pending.title });
+        return deleted;
+      } finally {
+        this.use.clearPendingTaskDeletion(pending.taskId);
+        if (deleted !== true) this.renderTasks();
+      }
+    }
+
+    // The undo window belongs to the workspace it was opened in. When the
+    // workspace owner changes under it (sign-out in another tab, an expired
+    // session, another account) the window closes and nothing is deleted.
+    dropForeignTaskDeletion() {
+      const pending = this.pendingTaskDeletion;
+      if (!pending || pending.ownerId === this.use.workspaceOwnerId()) return;
+      this.pendingTaskDeletion = null;
+      this.use.clearPendingTaskDeletion(pending.taskId);
+      this.hideUndoToast();
+    }
+
+    // Sign-out and account deletion replace the workspace. A task delete
+    // inside its undo window, or still being saved, completes first, so
+    // sign-out counts it with the changes that wait to sync instead of
+    // discarding it. A delete that fails does not hold the account action back.
+    afterTaskDeletion(action) {
+      const settling = this.pendingTaskDeletion ? this.flushTaskDeletion() : this.taskDeletionSettling;
+      if (!settling) return action();
+      // The settling delete never rejects (flushTaskDeletion reports a
+      // rejection once), so it cannot reject the account action.
+      return settling.then(() => action());
+    }
+
+    // Dismiss ends the undo window without Undo. The toast and its buttons
+    // leave the page, so focus returns to the task field.
+    dismissTaskDeletion() {
+      const focusWasInToast = this.elements.undoToast?.contains(this.document.activeElement) === true;
+      const flushed = this.flushTaskDeletion();
+      if (focusWasInToast) this.elements.taskInput?.focus({ preventScroll: true });
+      return flushed;
     }
 
     undoTaskDeletion() {
       const pending = this.pendingTaskDeletion;
       if (!pending) return false;
       this.pendingTaskDeletion = null;
-      this.host.clearTimeout(pending.timer);
+      this.use.clearPendingTaskDeletion(pending.taskId);
       this.hideUndoToast();
       this.renderTasks();
       this.taskRowElement(pending.taskId)?.querySelector(".task-delete")?.focus({ preventScroll: true });
@@ -777,12 +1193,23 @@
     showUndoToast(title) {
       const { use, elements } = this;
       if (!elements.undoToast || !elements.undoToastText) return;
-      elements.undoToastText.textContent = use.tr("tasks.deletedNamed", { title }, `Deleted \u201c${title}\u201d`);
+      // The status region is exposed before its text changes, so the change
+      // is announced; the hint names the Undo action for screen readers.
       elements.undoToast.hidden = false;
+      elements.undoToastText.textContent = use.tr("tasks.deletedNamed", { title }, `Deleted \u201c${title}\u201d`);
+      if (elements.undoToastHint) {
+        elements.undoToastHint.textContent = use.tr("tasks.undoAvailable", {}, "Undo is available.");
+      }
+      reserveScrollEdge(this.document, "scrollPaddingTop", elements.noticeStack);
     }
 
     hideUndoToast() {
-      if (this.elements.undoToast) this.elements.undoToast.hidden = true;
+      const { elements } = this;
+      if (!elements.undoToast) return;
+      elements.undoToast.hidden = true;
+      if (elements.undoToastText) elements.undoToastText.textContent = "";
+      if (elements.undoToastHint) elements.undoToastHint.textContent = "";
+      reserveScrollEdge(this.document, "scrollPaddingTop", elements.noticeStack);
     }
 
     visibleTasks() {
@@ -820,6 +1247,7 @@
 
     renderTasks() {
       const { use, elements } = this;
+      this.dropForeignTaskDeletion();
       const focus = this.focusedTaskControl();
       const blocked = use.controlsBlocked();
       const tasks = this.visibleTasks();
@@ -845,7 +1273,7 @@
       if (!this.state.ready) return new Map();
       const rows = this.use.getWorkspaceReadModel().tasks.completedFocusTodayByTask;
       return new Map(Object.entries(rows).map(([id, row]) => [id,
-        { count: row.count, durationMs: row.plannedDurationMs }]));
+        { count: row.count, durationMs: row.elapsedMs }]));
     }
 
     formatTaskDuration(durationMs) {
@@ -1045,7 +1473,7 @@
     renderBootstrapConfirmation(view) {
       const { state, elements, use, syncCore } = this;
       if (!view.confirming) return;
-      const confirmation = syncCore.confirmationFor(state.bootstrapStrategy);
+      const confirmation = syncCore.confirmationFor(state.bootstrapStrategy, use.tr);
       elements.bootstrapConfirmationTitle.textContent = confirmation.title;
       elements.bootstrapConfirmationMessage.textContent = confirmation.message;
       elements.bootstrapConfirm.textContent = state.bootstrapSubmitting
@@ -1133,24 +1561,81 @@
     }
   }
 
+  // Notice precedence: which notice wins when a new one arrives while another
+  // is shown. A "standing" notice names a condition the person must act on
+  // (saved data that needs recovery, a sign-out whose cleanup failed). A
+  // "refusal" reports a change the workspace would not take, and the standing
+  // notice already names why, so a refusal never replaces it. Every other
+  // notice replaces the one shown, so a newer failure is never hidden. A
+  // shown notice whose `staleWhen` holds no longer names a condition, so it
+  // holds no rank.
+  const NOTICE_PRECEDENCE = Object.freeze({ standing: "standing", refusal: "refusal" });
+
+  function noticeYields(incoming, shown) {
+    return incoming === NOTICE_PRECEDENCE.refusal && shown === NOTICE_PRECEDENCE.standing;
+  }
+
   class NoticePresenter extends ViewPart {
-    actions() {
-      return super.actions(["showNotice", "dismissNotice"]);
+    constructor(state, external, use) {
+      super(state, external, use);
+      this.shown = null;
     }
 
-    showNotice(message) {
+    actions() {
+      return super.actions(["showNotice", "dismissNotice", "clearNotice", "retryNotice", "renderNotice"]);
+    }
+
+    // `message` is one localized sentence; raw error text never reaches here
+    // from the failure paths that classify. Options: `kind` names the failure
+    // so `clearNotice` can answer it, `retry` puts an action behind Try again,
+    // `staleWhen` reports that the failure no longer holds, and `precedence`
+    // ranks the notice (see noticeYields).
+    showNotice(message, { kind = null, retry = null, staleWhen = null, precedence = null } = {}) {
       const { elements } = this;
       const text = elements.noticeText || elements.notice;
       if (!elements.notice || !text) return;
+      const shown = this.shown?.staleWhen?.() ? null : this.shown;
+      if (noticeYields(precedence, shown?.precedence)) return;
+      this.shown = { kind, retry, staleWhen, precedence };
       text.textContent = message;
+      if (elements.noticeRetry) elements.noticeRetry.hidden = typeof retry !== "function";
       elements.notice.hidden = false;
       elements.notice.setAttribute?.("role", "alert");
       elements.notice.setAttribute?.("aria-live", "assertive");
+      reserveScrollEdge(this.document, "scrollPaddingTop", elements.noticeStack);
     }
 
     dismissNotice() {
       const { elements } = this;
-      if (elements.notice) elements.notice.hidden = true;
+      this.shown = null;
+      if (!elements.notice) return;
+      this.handBackNoticeFocus();
+      elements.notice.hidden = true;
+      reserveScrollEdge(this.document, "scrollPaddingTop", elements.noticeStack);
+    }
+
+    // Hiding the notice that holds the focus would drop it on the page body,
+    // as Try again and Dismiss do. The selected screen tab comes just before
+    // the notice in keyboard order, so the focus goes there.
+    handBackNoticeFocus() {
+      if (!this.elements.notice.contains?.(this.document.activeElement)) return;
+      this.document.querySelector?.("[data-screen-button][aria-selected='true']")?.focus();
+    }
+
+    clearNotice(kind) {
+      if (kind && this.shown?.kind === kind) this.dismissNotice();
+    }
+
+    // Try again replaces the notice with the attempt; a repeated failure
+    // shows its own notice again.
+    retryNotice() {
+      const retry = this.shown?.retry;
+      this.dismissNotice();
+      return typeof retry === "function" ? retry() : undefined;
+    }
+
+    renderNotice() {
+      if (this.shown?.staleWhen?.()) this.dismissNotice();
     }
   }
 
@@ -1172,6 +1657,7 @@
       view.renderSyncStatus();
       view.renderConflict();
       view.renderBootstrapDialog();
+      view.renderNotice();
     }
   }
 
@@ -1217,15 +1703,7 @@
         input.addEventListener("blur", () => view.commitDurationInput(input));
       }
       for (const button of elements.stepButtons) {
-        button.addEventListener("click", () => {
-          const input = document.getElementById(button.dataset.for);
-          if (!input) return;
-          const step = Number(button.dataset.step);
-          const delta = Number.isFinite(step) ? step : 0;
-          const base = Number(input.value);
-          input.value = String(base + delta);
-          view.commitDurationInput(input);
-        });
+        button.addEventListener("click", () => view.stepDuration(button));
       }
       elements.autoStartBreaks.addEventListener("change", () => {
         use.issueAutoStartOperation(elements.autoStartBreaks.checked);
@@ -1239,27 +1717,42 @@
     setupTaskEvents() {
       const { use, elements, view } = this;
       elements.undoToastUndo?.addEventListener("click", () => view.undoTaskDeletion());
+      elements.undoToastDismiss?.addEventListener("click", () => view.dismissTaskDeletion());
       elements.taskForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const value = elements.taskInput.value;
         try {
           await view.flushTaskDeletion();
-          if (await use.addTask(value)) elements.taskInput.value = "";
+          if (!await use.addTask(value)) return;
+          elements.taskInput.value = "";
+          view.clearNotice(TASK_NOTICE);
         } catch (error) {
-          view.showNotice(error.message || use.tr("notice.taskAddFailed", {}, "Task could not be added."));
+          view.showNotice(this.taskAddFailureNotice(error), { kind: TASK_NOTICE });
         }
       });
     }
 
+    // A task-title refusal carries its own localized sentence. Any other
+    // failure keeps its raw text in the console and error reporting.
+    taskAddFailureNotice(error) {
+      const { use } = this;
+      if (error?.name === "TaskTitleError") return error.message;
+      const failure = use.tr("notice.taskAddFailed", {}, "Task could not be added.");
+      return use.tr("notice.tryAgainAfter", { failure }, `${failure} Try again.`);
+    }
+
     setupTimerEvents() {
       const { state, use, elements, view } = this;
-      elements.timerToggle.addEventListener("click", () => {
+      const issuePrimaryCommand = () => {
         const kind = use.getWorkspaceReadModel().availableIntents.find((intent) =>
           ["start", "pause", "resume"].includes(intent));
         if (!kind) return;
         use.primeCompletionAlerts();
         use.issueCommand(kind);
-      });
+      };
+      elements.timerToggle.addEventListener("click", issuePrimaryCommand);
+      elements.timerDockToggle?.addEventListener("click", issuePrimaryCommand);
+      view.watchTimerDock();
       elements.skipButton.addEventListener("click", () => use.issueSkip());
       elements.finishButton.addEventListener("click", () => use.finishTimer(false));
       elements.cancelButton.addEventListener("click", use.cancelAndClearTimer);
@@ -1273,9 +1766,9 @@
 
     setupAccountEvents() {
       const { state, use, elements, host, view } = this;
-      elements.logoutButton.addEventListener("click", use.logout);
+      elements.logoutButton.addEventListener("click", () => view.afterTaskDeletion(use.logout));
       elements.profileAvatar.addEventListener("error", view.hideUnreachableAvatar);
-      elements.deleteAccountButton.addEventListener("click", use.deleteAccount);
+      elements.deleteAccountButton.addEventListener("click", () => view.afterTaskDeletion(use.deleteAccount));
       elements.logoutRecoveryRetry?.addEventListener("click", use.retryPendingLogout);
       elements.logoutRecoverySignIn?.addEventListener("click", use.redirectToLogin);
       host.addEventListener("storage", (event) => {
@@ -1300,7 +1793,9 @@
       elements.savedClaimDiscard?.addEventListener("click", () => {
         if (state.savedClaimRecovery?.armed === true) {
           use.discardSavedClaimRecovery(use.captureAccountContext()).catch((error) => {
-            view.showNotice(error.message || state.conflict);
+            host.console.warn("Saved sync request was not discarded:", error);
+            view.showNotice(use.tr("notice.savedClaimDiscardFailed", {},
+              "The saved sync request could not be discarded. Try again."));
           });
         } else {
           use.armSavedClaimRecovery();
@@ -1310,6 +1805,7 @@
         use.cancelSavedClaimRecovery();
       });
       elements.noticeDismiss?.addEventListener("click", () => view.dismissNotice());
+      elements.noticeRetry?.addEventListener("click", () => view.retryNotice());
     }
 
     setupBootstrapEvents() {
@@ -1322,7 +1818,7 @@
       });
       elements.bootstrapCancel.addEventListener("click", () => view.resetBootstrapChoice(true));
       elements.bootstrapRetry.addEventListener("click", () => use.retryBootstrapResolution(use.captureAccountContext()));
-      elements.bootstrapSignOut.addEventListener("click", use.logout);
+      elements.bootstrapSignOut.addEventListener("click", () => view.afterTaskDeletion(use.logout));
       elements.bootstrapDialog.addEventListener("cancel", (event) => {
         event.preventDefault();
         if (state.bootstrapStrategy && !state.bootstrapPending) view.resetBootstrapChoice();
@@ -1359,6 +1855,9 @@
         }
         view.resumeWakeLock();
         view.renderTimer();
+        // A task delete whose page died inside its undo window left a marker;
+        // that is the only way a marker outlives its page. It completes now.
+        if (state.ready) use.replayPendingTaskDeletions();
         if (host.navigator.onLine) {
           if (state.authenticated && state.csrfToken && !use.needsBootstrapResolution()) {
             use.scheduleSync(0, true);
@@ -1399,12 +1898,21 @@
   }
 
   function create({ state, external, use }) {
+    const notice = new NoticePresenter(state, external, use);
+    const timer = new TimerView(state, external, use);
+    const activity = new ActivityView(state, external, use, { notice });
+    // Leaving the Tasks screen ends the undo window; returning to the Timer
+    // screen needs fresh dock geometry.
+    const screenObservers = [
+      (screen) => { if (screen !== "tasks") activity.flushTaskDeletion(); },
+      () => timer.watchTimerDock()
+    ];
     const view = {
-      ...new PreferenceView(state, external, use).actions(),
-      ...new TimerView(state, external, use).actions(),
-      ...new ActivityView(state, external, use).actions(),
+      ...new PreferenceView(state, external, use, { notice, screenObservers }).actions(),
+      ...timer.actions(),
+      ...activity.actions(),
       ...new AccountView(state, external, use).actions(),
-      ...new NoticePresenter(state, external, use).actions()
+      ...notice.actions()
     };
     const installer = new ViewEventInstaller(state, external, use, view);
     return { render: new ViewRenderer(view).render, ...view, ...installer.actions() };

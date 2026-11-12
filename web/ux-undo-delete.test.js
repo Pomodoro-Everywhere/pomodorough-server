@@ -2,9 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { viewFixture, setVisibility, waitFor, spy, taskRows, rowFor } = require("./test/ux-view-fixture.js");
-
-const UNDO_MS = 5000;
+const { viewFixture, setVisibility, settle, waitFor, spy, taskRows, rowFor } = require("./test/ux-view-fixture.js");
 
 async function withTasks(t, titles) {
   const current = await viewFixture(t);
@@ -13,15 +11,17 @@ async function withTasks(t, titles) {
   return current;
 }
 
-function undoTimer(current) {
-  const timers = current.callbacks.filter((entry) => entry.delay === UNDO_MS);
-  return timers[timers.length - 1];
+function deleteRow(current, task) {
+  rowFor(current.elements, task.id).querySelector(".task-delete").click();
 }
 
-test("delete hides the row, shows the undo toast, and sends nothing for 5 s", async (t) => {
+// UX round 2 (A1): the undo window has no time limit, so a delete schedules
+// no host timer and the toast stays until the user moves on.
+test("delete hides the row, shows the undo toast, and sends nothing while the window is open", async (t) => {
   const current = await withTasks(t, ["Alpha"]);
   const [alpha] = current.state.tasks;
-  rowFor(current.elements, alpha.id).querySelector(".task-delete").click();
+  const scheduledBefore = current.callbacks.length;
+  deleteRow(current, alpha);
   assert.equal(rowFor(current.elements, alpha.id), null);
   assert.equal(current.elements.taskCount.textContent, "00");
   assert.equal(current.elements.undoToast.hidden, false);
@@ -31,28 +31,69 @@ test("delete hides the row, shows the undo toast, and sends nothing for 5 s", as
   assert.equal(current.elements.notice.hidden, true);
   assert.equal(current.deletes.length, 0);
   assert.deepEqual(current.state.tasks.map((task) => task.title), ["Alpha"]);
-  const timer = undoTimer(current);
-  assert.ok(timer, "undo timer scheduled at 5000 ms");
-  assert.equal(await timer.callback(), true);
+  assert.deepEqual(current.callbacks.slice(scheduledBefore).map((entry) => entry.delay), [],
+    "the undo window schedules no timer");
+  assert.equal(current.elements.undoToast.hidden, false);
+});
+
+// UX round 2 (18:20 rule): the second button deletes the task at once, so it
+// says so. Its visible label is its whole accessible name.
+test("the undo toast announces Undo and offers a Delete now action", async (t) => {
+  const current = await withTasks(t, ["Alpha"]);
+  deleteRow(current, current.state.tasks[0]);
+  const { undoToast, undoToastHint, undoToastUndo, undoToastDismiss } = current.elements;
+  assert.equal(undoToastHint.textContent, "Undo is available.");
+  assert.ok(undoToast.contains(undoToastHint), "the hint is inside the live region");
+  assert.equal(undoToastUndo.tagName, "BUTTON");
+  assert.equal(undoToastDismiss.tagName, "BUTTON");
+  assert.equal(undoToastDismiss.textContent, "Delete now");
+  assert.equal(undoToastDismiss.getAttribute("aria-label"), null);
+});
+
+test("Dismiss completes the delete with the record the timeout used to send", async (t) => {
+  const current = await withTasks(t, ["Alpha"]);
+  const [alpha] = current.state.tasks;
+  deleteRow(current, alpha);
+  current.elements.undoToastDismiss.focus();
+  current.elements.undoToastDismiss.click();
   assert.equal(current.deletes.length, 1);
-  assert.deepEqual(current.deletes[0].args[0], { id: alpha.id, title: "Alpha" });
+  assert.deepEqual(current.deletes[0].args, [{ id: alpha.id, title: "Alpha" }]);
+  assert.equal(await current.deletes[0].result, true);
   assert.deepEqual(current.state.tasks, []);
+  assert.equal(current.elements.undoToast.hidden, true);
+  assert.equal(current.elements.undoToastHint.textContent, "");
+  assert.equal(current.document.activeElement, current.elements.taskInput);
+  assert.equal(await current.view.dismissTaskDeletion(), false, "a second Dismiss sends nothing");
+  assert.equal(current.deletes.length, 1);
+});
+
+test("leaving the Tasks screen completes the delete; staying on it does not", async (t) => {
+  const current = await withTasks(t, ["Alpha"]);
+  const [alpha] = current.state.tasks;
+  const screenButton = (name) => current.elements.screenButtons.find((button) => button.dataset.screenButton === name);
+  deleteRow(current, alpha);
+  current.view.activateScreen(screenButton("tasks"));
+  assert.equal(current.deletes.length, 0);
+  assert.equal(current.elements.undoToast.hidden, false);
+  current.view.activateScreen(screenButton("timer"));
+  assert.equal(current.deletes.length, 1);
+  assert.deepEqual(current.deletes[0].args, [{ id: alpha.id, title: "Alpha" }]);
+  assert.equal(await current.deletes[0].result, true);
   assert.equal(current.elements.undoToast.hidden, true);
 });
 
 test("undo restores the row, hides the toast, focuses its delete button, and never sends", async (t) => {
   const current = await withTasks(t, ["Alpha", "Beta"]);
   const [alpha] = current.state.tasks;
-  rowFor(current.elements, alpha.id).querySelector(".task-delete").click();
-  const timer = undoTimer(current);
+  deleteRow(current, alpha);
   current.elements.undoToastUndo.click();
   assert.equal(current.elements.undoToast.hidden, true);
   const restored = rowFor(current.elements, alpha.id);
   assert.ok(restored);
   assert.equal(current.document.activeElement, restored.querySelector(".task-delete"));
   assert.equal(current.elements.taskCount.textContent, "02");
-  assert.equal(await timer.callback(), false, "stale timer is inert after undo");
   assert.equal(await current.view.flushTaskDeletion(), false);
+  assert.equal(await current.view.dismissTaskDeletion(), false, "Dismiss is inert after undo");
   assert.equal(current.deletes.length, 0);
   assert.deepEqual(current.state.tasks.map((task) => task.title), ["Alpha", "Beta"]);
 });
@@ -109,14 +150,55 @@ test("pagehide flushes the pending delete before the timer lease handling", asyn
   assert.deepEqual(current.state.tasks, []);
 });
 
-test("flush is idempotent: repeated flushes and the fired timer send one delete", async (t) => {
+// The fixture records host timers instead of running them. A delete that
+// waits for the action lock polls with zero-delay timers, so the test runs
+// those, and only those, until the delete settles.
+async function runLockPolls(current, from, pending) {
+  let settled = false;
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  for (let round = 0; !settled && round < 5000; round += 1) {
+    const polls = current.callbacks.slice(from).filter((entry) => entry.delay === 0);
+    from = current.callbacks.length;
+    for (const poll of polls) poll.callback();
+    await settle(1);
+  }
+  return pending;
+}
+
+// A synchronization or another action holds the action lock for a moment.
+// Nothing repeats a delete that ends an undo window, so it must wait.
+test("a delete that ends the undo window behind the action lock completes when the lock is released", async (t) => {
+  const current = await withTasks(t, ["Alpha", "Beta"]);
+  const alpha = current.state.tasks.find((task) => task.title === "Alpha");
+  deleteRow(current, alpha);
+  const scheduled = current.callbacks.length;
+  current.state.actionLocked = true;
+  current.view.flushTaskDeletion();
+  await settle();
+  assert.deepEqual(current.state.tasks.map((task) => task.title).sort(), ["Alpha", "Beta"],
+    "the delete waits while the lock is held");
+  current.state.actionLocked = false;
+  assert.equal(await runLockPolls(current, scheduled, current.deletes[0].result), true);
+  assert.deepEqual(current.state.tasks.map((task) => task.title), ["Beta"]);
+  assert.equal(current.elements.notice.hidden, true);
+});
+
+test("two deletes that end in the same turn both complete", async (t) => {
+  const current = await withTasks(t, ["Alpha", "Beta", "Gamma"]);
+  const [first, second] = current.state.tasks.slice(0, 2);
+  const scheduled = current.callbacks.length;
+  const results = Promise.all([current.use.deleteTask(first), current.use.deleteTask(second)]);
+  assert.deepEqual(await runLockPolls(current, scheduled, results), [true, true]);
+  assert.equal(current.state.tasks.length, 1);
+});
+
+test("flush is idempotent: repeated flushes and a later Dismiss send one delete", async (t) => {
   const current = await withTasks(t, ["Alpha"]);
   rowFor(current.elements, current.state.tasks[0].id).querySelector(".task-delete").click();
-  const timer = undoTimer(current);
   const [first, second] = [current.view.flushTaskDeletion(), current.view.flushTaskDeletion()];
   assert.equal(await first, true);
   assert.equal(await second, false);
-  assert.equal(await timer.callback(), false);
+  assert.equal(await current.view.dismissTaskDeletion(), false);
   assert.equal(current.deletes.length, 1);
 });
 

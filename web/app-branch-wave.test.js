@@ -292,7 +292,7 @@ test("offline restoration and cleanup fail closed around unavailable storage", a
   const cleanup = sessionFixture({ localStorage: memoryStorage({ pomodoroughPendingLogout: "1" }),
     use: { clearLocalData: async () => { throw new Error("disk full"); } } });
   assert.equal((await cleanup.actions.clearPendingLogoutData(undefined, cleanup.use.captureAccountContext())).cleared, false);
-  assert.ok(cleanup.calls.some((entry) => entry[0] === "notice" && /disk full/.test(entry[1])));
+  assert.ok(cleanup.calls.some((entry) => entry[0] === "notice" && /could not be cleared/.test(entry[1]) && !/disk full/.test(entry[1])));
 });
 
 test("session restore chooses bootstrap, normal sync, and retry recovery", async () => {
@@ -427,10 +427,16 @@ test("durable action mutations cover writes, no-ops, and translated failures", a
   assert.equal(await client.use.issueSelectedTaskOperation(task.id), false);
   await workspaceFixture.startFocus(client);
   assert.equal(await client.use.issueCommand("pause"), true);
+  // UX round 2 (B4): changes made while the lock is held wait for it and run
+  // in order once it is released, instead of being dropped.
+  client.external.host.setTimeout = (callback, delay) => { const handle = setTimeout(callback, delay); handle.unref(); return handle; };
   client.state.actionLocked = true;
-  assert.equal(await client.use.issueTaskOperation("delete", task), false);
-  assert.equal(await client.use.issueCommand("resume"), false);
+  const deleting = client.use.issueTaskOperation("delete", task);
+  const resuming = client.use.issueCommand("resume");
   client.state.actionLocked = false;
+  assert.equal(await deleting, true);
+  assert.equal(await resuming, true);
+  assert.equal(client.state.timer.status, "running");
   const database = client.use.database();
   const transaction = database.transaction.bind(database);
   database.transaction = (...argumentsList) => {

@@ -107,7 +107,7 @@ test("S39 pending logout cleanup failure warns, notices, and reports", async (t)
   const reports = withSentryStub(t);
   assert.equal((await fixture.actions.clearPendingLogoutData(undefined, fixture.use.captureAccountContext())).cleared, false);
   assert.equal(fixture.state.logoutRecoveryRequired, true);
-  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /disk full/.test(entry[1])));
+  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /could not be cleared/.test(entry[1]) && !/disk full/.test(entry[1])));
   assert.ok(fixture.calls.some((entry) => entry[0] === "warn"
     && /Pomodorough pending logout cleanup failed:/.test(entry[1])));
   assert.equal(reports.length, 1);

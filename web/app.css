@@ -3,6 +3,9 @@
   --platform: #142c5c;
   --platform-deep: #0c1b39;
   --signal: #ff604f;
+  /* Coral is 2.4:1 on sky and 2.8:1 on porcelain. A focus ring needs 3:1 on
+     every light surface it can sit on, so light mode draws it darker. */
+  --focus-ring: #e04436;
   --ticket: #f5d05b;
   --sky: #dceaf1;
   --porcelain: #f7f8f2;
@@ -68,7 +71,7 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 3px solid var(--signal);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 4px;
 }
 
@@ -480,6 +483,94 @@ main {
   justify-content: space-between;
   gap: 0.75rem 1rem;
   border-left-color: var(--track);
+}
+
+/* UX round 2: notices and the undo control stay where the user is looking.
+   The stack sits in normal flow at the top of the page and pins to the top
+   edge of the viewport once the page scrolls, above page content and below
+   the skip link. The page reserves its measured height as scroll padding. */
+.notice-stack {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 5;
+}
+
+.notice:not(.undo-toast) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+}
+
+.notice-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+}
+
+/* UX round 2: the dock repeats the countdown and the primary timer control
+   at the bottom edge of the viewport while either original is off screen.
+   It is the last element of the page, so at the end of the page it rests
+   below the footer instead of covering it. */
+.timer-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.6rem max(clamp(0.9rem, 4vw, 4.5rem), env(safe-area-inset-right, 0px)) calc(0.6rem + env(safe-area-inset-bottom, 0px)) max(clamp(0.9rem, 4vw, 4.5rem), env(safe-area-inset-left, 0px));
+  color: var(--porcelain);
+  background: var(--platform-deep);
+  border-top: 2px solid var(--signal);
+}
+
+/* Near the top of the page the strip at the bottom edge still holds the
+   screen tabs or the masthead. The dock keeps its measured place there but
+   waits unseen, so it never lies over them. */
+.timer-dock-waiting {
+  visibility: hidden;
+}
+
+/* A dock taller than a third of the viewport would cover too much of the
+   page, so it sits inline as the last part of the Timer content instead. */
+.timer-dock-inline {
+  position: static;
+  padding: 0.6rem clamp(0.9rem, 4vw, 4.5rem);
+}
+
+.timer-dock-display {
+  color: var(--ticket);
+  font-family: var(--display);
+  font-size: 1.9rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.035em;
+  line-height: 1;
+}
+
+/* 2.75rem is the touch-target minimum; the label sets the rest of the size. */
+.timer-dock button {
+  flex: 1 1 auto;
+  min-height: 2.75rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 0.5rem 0.9rem;
+  border: 2px solid var(--porcelain);
+  border-radius: 0;
+  font-family: var(--display);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.timer-dock button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
 }
 
 .bootstrap-dialog {
@@ -1148,7 +1239,7 @@ main {
 }
 
 .auto-start-toggle input:focus-visible + .toggle-track {
-  outline: 3px solid var(--signal);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 4px;
 }
 
@@ -2715,6 +2806,7 @@ main {
   :root {
     --page-bg: #0d1722;
     --page-text: #edf3f5;
+    --focus-ring: var(--signal);
     --surface: #172430;
     --surface-alt: #101d29;
     --surface-border: #91a7b5;

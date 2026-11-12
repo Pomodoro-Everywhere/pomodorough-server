@@ -90,7 +90,7 @@ async function app(indexedDB, userId, tabId, core) {
     renderTaskSelector: () => {}, renderTimer: () => calls.push("render-timer"),
     showNotice: (message) => calls.push(["notice", message]),
     openRevisionStream: () => {}, closeRevisionStream: () => {}, renderBootstrapDialog: () => {},
-    queueSessionRevalidation: () => calls.push("revalidate")
+    queueSessionRevalidation: () => calls.push("revalidate"), settleDeferredSession: () => {}
   };
   const external = {
     host, syncCore: sync, syncStorage: storage, elements: {},

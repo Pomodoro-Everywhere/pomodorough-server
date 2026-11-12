@@ -216,6 +216,58 @@ test("frontend errors are rate-safe within a minute window", (t) => {
   assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
 });
 
+test("quota rejection does not poison a new incident across window rollover", (t) => {
+  const calls = withFrontendReporting(t);
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(Math, "random", () => 0.5);
+  for (let index = 0; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("quota"), `quota.${index}`), true);
+  }
+  now += client.FRONTEND_ERROR_WINDOW_MS - 1;
+  assert.equal(client.reportFrontendError(new Error("new"), "quota.new"), false);
+  now += 1;
+  assert.equal(client.reportFrontendError(new Error("new"), "quota.new"), true);
+  assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW + 1);
+  assert.equal(calls.breadcrumbs.length, 0);
+  assert.equal(client.reportFrontendError(new Error("new"), "quota.new"), false);
+  assert.equal(calls.breadcrumbs.length, 1);
+});
+
+test("failed capture commits neither quota nor incident dedup state", (t) => {
+  const calls = withFrontendReporting(t);
+  const capture = globalThis.Sentry.captureException;
+  t.mock.method(Date, "now", () => 1_000_000);
+  t.mock.method(Math, "random", () => 0.5);
+  globalThis.Sentry.captureException = () => { throw new Error("SDK unavailable"); };
+  for (let index = 0; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("failure"), "capture.retry"), false);
+  }
+  globalThis.Sentry.captureException = capture;
+  assert.equal(client.reportFrontendError(new Error("failure"), "capture.retry"), true);
+  for (let index = 1; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("failure"), `capture.distinct.${index}`), true);
+  }
+  assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
+  assert.equal(client.reportFrontendError(new Error("failure"), "capture.overflow"), false);
+});
+
+test("repeat bursts do not spend quota reserved for distinct incidents", (t) => {
+  const calls = withFrontendReporting(t);
+  t.mock.method(Date, "now", () => 1_000_000);
+  t.mock.method(Math, "random", () => 0.5);
+  assert.equal(client.reportFrontendError(new Error("repeat"), "repeat.original"), true);
+  for (let index = 0; index < 50; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("repeat"), "repeat.original"), false);
+  }
+  for (let index = 1; index < client.FRONTEND_ERROR_MAX_PER_WINDOW; index += 1) {
+    assert.equal(client.reportFrontendError(new Error("distinct"), `distinct.${index}`), true);
+  }
+  assert.equal(calls.length, client.FRONTEND_ERROR_MAX_PER_WINDOW);
+  assert.equal(calls.breadcrumbs.length, 50);
+  assert.equal(client.reportFrontendError(new Error("overflow"), "distinct.overflow"), false);
+});
+
 test("frontend repeat bursts collapse to one error plus breadcrumbs", (t) => {
   const calls = withFrontendReporting(t);
   assert.equal(client.reportFrontendError(new Error("boom"), "sync.deferred"), true);
@@ -367,7 +419,7 @@ test("S30 storage/locale sites report with static operations", () => {
     assert.ok(source.includes(call), `${file} must report with ${operation}`);
   }
   const composition = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
-  assert.ok(composition.includes('call(application, "tr", "storage.unavailable"'),
+  assert.ok(composition.includes('call(application, "tr", "notice.storageUnavailable"'),
     "app.js must keep the resource-backed storage notice");
   assert.ok(composition.includes('call(application, "renderSyncStatus")'),
     "app.js must keep rendering sync status after storage failure");
@@ -413,6 +465,8 @@ test("S32 actions/bootstrap save-failed sites report with static operations", (t
     "app-actions.js must keep the task-choice save-failed notice");
   assert.ok(actions.includes('"notice.taskSaveFailed"'),
     "app-actions.js must keep the task save-failed notice");
+  assert.ok(actions.includes('"notice.taskDeleteFailed"'),
+    "app-actions.js must keep the task delete-failed notice");
   assert.ok(actions.includes('"notice.timerSaveFailed"'),
     "app-actions.js must keep the timer save-failed notice");
   assert.match(actions, /AccountOwnershipError/,
@@ -482,7 +536,10 @@ test("S40 rejected timer finish warns, notices, and reports with static operatio
     else globalThis.PomodoroughSentryClient = previous;
   });
   assert.equal(await fixture.actions.finishTimer(false), false);
-  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /finish offline/.test(entry[1])));
+  // UX round 2 (A2): the notice is a localized sentence; raw error text stays in reporting.
+  assert.deepEqual(fixture.calls.filter((entry) => entry[0] === "notice").map((entry) => entry[1]),
+    ["Timer action could not be saved. Try again."]);
+  assert.equal(reports[0][0].message, "finish offline");
   assert.ok(fixture.calls.some((entry) => entry[0] === "warn" && /Pomodorough timer finish failed:/.test(entry[1])));
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "actions.timer.finish-failed");

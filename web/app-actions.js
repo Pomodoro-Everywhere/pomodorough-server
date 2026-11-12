@@ -64,6 +64,71 @@
     }
   }
 
+  // Resolves once no other change or synchronization holds the action lock.
+  async function actionLockReleased(actor) {
+    while (actor.state.actionLocked) await new Promise((resolve) => actor.host.setTimeout(resolve, timingMs("defer", 0)));
+  }
+
+  // The sentence a failed change shows: what failed, then what to do. The
+  // error's own text stays with error reporting and never reaches the page.
+  function retryableFailureNotice(use, failure) {
+    return use.tr("notice.tryAgainAfter", { failure }, `${failure} Try again.`);
+  }
+
+  function savedDataRecoverySentence(use) {
+    return use.tr("notice.savedDataNeedsRecovery", {},
+      "Data saved on this device needs recovery, so the change was not saved; reload the page.");
+  }
+
+  // A task delete names its own outcome: its row left the list and came back,
+  // so "change could not be saved" would not say which change.
+  function changeFailureSentence(use, operation, intent) {
+    const failure = intent?.kind === "deleteTask"
+      ? use.tr("notice.taskDeleteFailed", {}, "Task could not be deleted.")
+      : mutationFailureNotice(use, operation);
+    return retryableFailureNotice(use, failure);
+  }
+
+  // Failures are told apart by error type only. Saved display context that
+  // fails validation cannot be fixed by repeating the change.
+  function mutationFailureSentence(use, error, operation, intent = null) {
+    if (error?.name === "PersistedDisplayContextError") return savedDataRecoverySentence(use);
+    return changeFailureSentence(use, operation, intent);
+  }
+
+  // A refused change is one the workspace would not take: its controls were
+  // blocked when it ran. Which notice wins is the notice precedence in
+  // NoticePresenter.showNotice (app-view.js): a refusal never replaces a
+  // standing notice, such as saved data that needs recovery or a sign-out
+  // whose cleanup failed, because that notice names the cause. While saved
+  // data needs recovery the refusal says so too, since only a reload helps.
+  function showRefusalNotice(actor, operation, intent = null) {
+    const { use, state } = actor;
+    const sentence = state.workspaceBlocked ? savedDataRecoverySentence(use) : changeFailureSentence(use, operation, intent);
+    use.showNotice(sentence, { kind: operation, precedence: "refusal" });
+  }
+
+  // Resolves true when the change may run: the lock is free, the controls are
+  // open, and a change that had to wait still applies. A change that was
+  // accepted on open controls and then waited while the lock holder blocked
+  // them is refused, and `refuse` shows its notice.
+  async function waitForActionTurn(actor, stillApplies, refuse) {
+    const waited = actor.state.actionLocked;
+    while (actor.state.actionLocked) await actionLockReleased(actor);
+    if (!actor.use.controlsBlocked()) return !waited || stillApplies();
+    if (waited) refuse();
+    return false;
+  }
+
+  // A task name that core refused. The message is already a localized
+  // sentence, so presentation may show it as written.
+  class TaskTitleError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "TaskTitleError";
+    }
+  }
+
   const manifest = Object.freeze({
     name: "actions",
     externals: ["host", "syncCore", "syncStorage"],
@@ -168,19 +233,15 @@
         { preference: true }, "actions.duration.save-failed");
     }
 
-    async waitForUnlockedAction() {
-      while (this.state.actionLocked) await new Promise((resolve) => this.host.setTimeout(resolve, timingMs("defer", 0)));
-    }
-
+    // Preference changes wait for the action lock inside issueWorkspaceIntent,
+    // so a change refused after the wait shows its notice.
     async issueAutoStartOperation(enabled, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       const context = this.use.captureAccountContext();
-      await this.waitForUnlockedAction();
       return this.issueWorkspaceIntent({ kind: "setAutoStart", enabled }, { preference: true, context, ownerId: expectedUserId }, "actions.auto-start.save-failed");
     }
 
     async issueSelectedTaskOperation(taskId, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
       const context = this.use.captureAccountContext();
-      await this.waitForUnlockedAction();
       return this.issueWorkspaceIntent({ kind: "selectTask", taskId }, { preference: true, context, ownerId: expectedUserId }, "actions.selected-task.save-failed");
     }
 
@@ -194,13 +255,19 @@
       return this.issueWorkspaceIntent(this.taskIntent(type, task), { preference: true, ownerId: expectedUserId }, "actions.task.save-failed");
     }
 
+    // Core accepts a name made only of spaces, so a blank draft is refused
+    // here. A draft with any other character is sent as typed: edge spaces
+    // are part of a task's identity.
     async addTask(title) {
       const context = this.use.captureAccountContext();
+      if (String(title || "").trim() === "") {
+        throw new TaskTitleError(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."));
+      }
       try { await this.use.sharedTaskIdentity(String(title || "")); }
       catch (error) {
         const message = String(error?.message || "");
-        if (/printable|must not be empty|title is empty/.test(message)) throw new Error(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."));
-        if (/512|too long/.test(message)) throw new Error(this.use.tr("notice.taskTooLong", {}, "Task name is too long."));
+        if (/printable|must not be empty|title is empty/.test(message)) throw new TaskTitleError(this.use.tr("notice.taskPrintable", {}, "Enter a printable task name."));
+        if (/512|too long/.test(message)) throw new TaskTitleError(this.use.tr("notice.taskTooLong", {}, "Task name is too long."));
         this.host.console.warn("Pomodorough task identity failed:", error);
         reportFrontendError(error, "actions.task.identity-failed");
         throw error;
@@ -209,16 +276,50 @@
         { preference: true, context }, "actions.task.save-failed");
     }
 
+    // A delete ends an undo window, so nothing asks for it a second time.
+    // issueWorkspaceIntent makes it wait for a synchronization or another
+    // action to release the action lock instead of dropping it.
     async deleteTask(task) {
-      return this.issueTaskOperation("delete", task);
+      const context = this.use.captureAccountContext();
+      const ownerId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+      const intent = this.taskIntent("delete", task);
+      // The delete is sent after its row left the list, so no disabled control
+      // explains a refusal: a workspace that cannot take it says so.
+      if (this.use.controlsBlocked()) {
+        showRefusalNotice(this, "actions.task.save-failed", intent);
+        return false;
+      }
+      return this.issueWorkspaceIntent(intent, { preference: true, context, ownerId }, "actions.task.save-failed");
     }
 
     async renameTask(task, title) {
       return this.issueTaskOperation("rename", { id: task.id, title });
     }
 
+    // A timer command that waited for the lock still applies only when core
+    // still offers it: a second Start behind the first would restart the timer.
     async issueCommand(type, options = {}) {
-      return this.issueWorkspaceIntent({ kind: type }, {}, "actions.timer.save-failed");
+      const stillApplies = () => this.commandStillOffered(type);
+      return this.issueWorkspaceIntent({ kind: type }, {}, "actions.timer.save-failed", stillApplies);
+    }
+
+    // Reads the offered intents fresh, because the lock holder may have changed
+    // the workspace. A read model that fails is reported, the command no longer
+    // applies, and the timer notice says it was not saved; the observation the
+    // failed read may have advanced is put back, so the check leaves no trace
+    // in the workspace. A command that is no longer offered stays silent: the
+    // page already shows the state that made it moot.
+    commandStillOffered(type) {
+      const observation = this.state.workspaceObservation;
+      try {
+        return this.use.getWorkspaceReadModel().availableIntents.includes(type);
+      } catch (error) {
+        this.state.workspaceObservation = observation;
+        this.host.console.warn("Pomodorough timer command check failed:", error);
+        reportMutationFailure(error, "actions.timer.save-failed");
+        showRefusalNotice(this, "actions.timer.save-failed");
+        return false;
+      }
     }
 
     async issuePhaseSelection(phase) {
@@ -227,17 +328,27 @@
 
     async issueSkip() {
       // Core picks the destination phase from the completion lifecycle and
-      // cadence; the PWA only forwards the intent.
-      return this.issueWorkspaceIntent({ kind: "skip" }, {}, "actions.timer.save-failed");
+      // cadence; the PWA only forwards the intent. A Skip that waited for the
+      // lock skips only the phase the person saw, never the one after it.
+      const shownPhase = this.state.selectedPhase;
+      const stillApplies = () => this.state.selectedPhase === shownPhase;
+      return this.issueWorkspaceIntent({ kind: "skip" }, {}, "actions.timer.save-failed", stillApplies);
     }
 
-    async issueWorkspaceIntent(intent, options, operation) {
-      if (this.use.controlsBlocked() || this.state.actionLocked) return false;
+    // A change made while another one or a synchronization is being saved
+    // waits its turn instead of being dropped. The context taken before the
+    // wait keeps it in its own account. A change relative to what the person
+    // saw passes stillApplies; after a wait it runs only if that holds, and
+    // the page already shows the state that made it moot.
+    async issueWorkspaceIntent(intent, options, operation, stillApplies = () => true) {
+      if (this.use.controlsBlocked()) return false;
+      const context = options.context || this.use.captureAccountContext();
+      if (!await waitForActionTurn(this, stillApplies, () => showRefusalNotice(this, operation, intent))) return false;
       if (!options.preference && this.state.workspaceBlocked) {
-        this.use.showNotice(this.state.conflict);
+        this.use.showNotice(this.use.tr("notice.savedDataNeedsRecovery", {},
+          "Data saved on this device needs recovery, so the change was not saved; reload the page."));
         return false;
       }
-      const context = options.context || this.use.captureAccountContext();
       this.state.actionLocked = true;
       try {
         const plan = await this.use.persistWorkspaceIntent(intent, { ...options, context });
@@ -266,7 +377,7 @@
       } catch (error) {
         if (error.name === "AccountOwnershipError") { reportMutationFailure(error, operation); return false; }
         reportMutationFailure(error, operation);
-        this.use.showNotice(error.message || mutationFailureNotice(this.use, operation));
+        this.use.showNotice(mutationFailureSentence(this.use, error, operation, intent), { kind: operation });
         return false;
       } finally {
         this.state.actionLocked = false;
@@ -339,10 +450,16 @@
       ]);
     }
 
+    // An automatic finish that meets the action lock is dropped: the next
+    // completion tick asks again. A Finish click waits for the lock like other
+    // changes, and finishes only the timer the person saw when clicking.
     async finishTimer(automatic = false, expectedUserId = this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null) {
-      if (this.use.controlsBlocked() || this.state.actionLocked) return false;
-      if (this.state.workspaceBlocked) return false;
+      if (this.use.controlsBlocked() || (automatic && this.state.actionLocked)) return false;
       const context = this.use.captureAccountContext();
+      const clickedTimerId = this.state.timer?.id ?? null;
+      const sameTimer = () => (this.state.timer?.id ?? null) === clickedTimerId;
+      if (!await waitForActionTurn(this, sameTimer, () => showRefusalNotice(this, "actions.timer.finish-failed"))) return false;
+      if (this.state.workspaceBlocked) return false;
       const timer = this.use.clone(this.state.timer);
       this.state.actionLocked = true;
       try {
@@ -367,9 +484,8 @@
         if (error.name === "AccountOwnershipError") return false;
         this.host.console.warn("Pomodorough timer finish failed:", error);
         reportFrontendError(error, "actions.timer.finish-failed");
-        this.use.showNotice(error.message || this.use.tr(
-          "notice.timerSaveFailed", {}, "Timer action could not be saved."
-        ));
+        this.use.showNotice(mutationFailureSentence(this.use, error, "actions.timer.finish-failed"),
+          { kind: "actions.timer.finish-failed" });
         return false;
       } finally {
         this.state.actionLocked = false;

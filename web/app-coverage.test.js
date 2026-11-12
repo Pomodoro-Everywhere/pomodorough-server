@@ -58,11 +58,18 @@ test("action persistence serializes writes, updates queues, and unlocks after fa
   const before = await workspaceFixture.dump(client.use.database());
   client.use.persistWorkspaceIntent = async () => { throw new Error("disk full"); };
   assert.equal(await client.use.issueDurationOperation("focus", 2_100_000), false);
-  assert.equal(client.notices.at(-1), "disk full");
+  // UX round 2 (A2): the notice never repeats the raw error text.
+  assert.equal(client.notices.at(-1), "Duration change could not be saved. Try again.");
   assert.deepEqual(await workspaceFixture.dump(client.use.database()), before);
   assert.equal(client.state.actionLocked, false);
+  // UX round 2 (B4): a command made while the lock is held waits for it
+  // instead of being dropped. Pause without a running timer is then refused,
+  // because core no longer offers it.
+  client.external.host.setTimeout = (callback, delay) => { const handle = setTimeout(callback, delay); handle.unref(); return handle; };
   client.state.actionLocked = true;
-  assert.equal(await client.use.issueCommand("pause"), false);
+  const waiting = client.use.issueCommand("pause");
+  client.state.actionLocked = false;
+  assert.equal(await waiting, false);
 });
 
 test("task actions select existing identities and reject invalid printable names", async (t) => {
@@ -689,7 +696,7 @@ test("S51 mutation failure surfaces a single operation tag end to end", async (t
   });
   const reports = withSentryCapture(t);
   assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
-  assert.deepEqual(fixture.notices, ["idb offline"]);
+  assert.deepEqual(fixture.notices, ["Duration change could not be saved. Try again."]);
   assert.equal(fixture.state.actionLocked, false);
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "actions.duration.save-failed");
@@ -747,7 +754,7 @@ test("S52 generic post-write failure surfaces a single operation tag end to end"
   });
   const reports = withSentryCapture(t);
   assert.equal(await fixture.actions.issueDurationOperation("focus", 1_800_000), false);
-  assert.deepEqual(fixture.notices, ["post-write conflict"]);
+  assert.deepEqual(fixture.notices, ["Duration change could not be saved. Try again."]);
   assert.equal(reports.length, 1);
   assert.equal(reports[0][1], "actions.duration.save-failed");
   assert.match(reports[0][1], /^[a-z0-9][a-z0-9.-]*$/);

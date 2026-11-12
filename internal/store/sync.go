@@ -273,6 +273,7 @@ type accountReduction struct {
 	revision                     int64
 	commands                     []timer.Command
 	timer                        timer.Result
+	returned                     returnedTimer
 	taskOperations               []task.Operation
 	tasks                        []task.Task
 	winningTaskOperations        map[string]string
@@ -500,6 +501,9 @@ func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (
 		return accountReduction{}, err
 	}
 	if err := reduceTaskProjection(ctx, source, &reduction); err != nil {
+		return accountReduction{}, err
+	}
+	if err := carryReturnedHistory(ctx, callAccountSharedCore, &reduction); err != nil {
 		return accountReduction{}, err
 	}
 	if err := reduceDurationProjection(ctx, source, &reduction); err != nil {
@@ -763,8 +767,8 @@ func resultFromReductionWithCore(ctx context.Context, call coreJSONCall, reducti
 		AutoStartAcknowledgements:    []AutoStartAcknowledgement{},
 		SelectedTaskAcknowledgements: []SelectedTaskAcknowledgement{},
 		Revision:                     revision,
-		CanonicalTimer:               reduction.timer.Canonical,
-		History:                      nonNilHistory(reduction.timer.History),
+		CanonicalTimer:               reduction.returned.Canonical,
+		History:                      nonNilHistory(reduction.returned.History),
 		Tasks:                        reduction.tasks,
 		DurationsMs:                  reduction.durations,
 		AutoStartBreaks:              reduction.autoStartBreaks,

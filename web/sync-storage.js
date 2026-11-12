@@ -41,6 +41,7 @@
   const uuid7Parts = uuidModule.parts;
   const reserveUuid7 = uuidModule.reserve;
   const LEGACY_EPOCH = new Date(0).toISOString();
+  const READ_MODEL_SCHEMA_VERSION = 2;
   const DEFAULT_DURATIONS_MS = Object.freeze({
     focus: 1_500_000,
     short_break: 300_000,
@@ -80,7 +81,13 @@
     const raw = workspaceRecords(input);
     const context = workspaceCore.completionContext(input);
     const request = workspaceCore.readRequest(raw, context.selection.phase, input.nowMs, input.monotonic ?? null, context);
-    return callWorkspaceCore("workspace.readModel.v1", request);
+    const readModel = callWorkspaceCore("workspace.readModel.v1", request);
+    // Version 2 renamed the totals to elapsed time. Any other version has keys
+    // this view does not know, so it fails closed instead of showing NaN.
+    if (readModel?.schemaVersion !== READ_MODEL_SCHEMA_VERSION) {
+      throw new Error(`Official workspace Core returned read-model schema version ${readModel?.schemaVersion}; expected ${READ_MODEL_SCHEMA_VERSION}.`);
+    }
+    return readModel;
   }
 
   function observeWorkspace(input) {

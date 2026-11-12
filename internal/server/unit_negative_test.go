@@ -130,7 +130,7 @@ func TestParseSyncRequestRejectsInvalidTaskOperations(t *testing.T) {
 	}{
 		{name: "invalid operation ID", mutate: func(value *syncTaskOperationJSON) { value.ID = "short" }},
 		{name: "invalid task ID", mutate: func(value *syncTaskOperationJSON) { value.TaskID = "short" }},
-		{name: "invalid type", mutate: func(value *syncTaskOperationJSON) { value.Type = "rename" }},
+		{name: "invalid type", mutate: func(value *syncTaskOperationJSON) { value.Type = "merge" }},
 		{name: "empty normalized title", mutate: func(value *syncTaskOperationJSON) { value.Title = "\x00\x1f" }},
 		{name: "mismatched deterministic ID", mutate: func(value *syncTaskOperationJSON) { value.TaskID = "task-0000001" }},
 		{name: "delete with title", mutate: func(value *syncTaskOperationJSON) { value.Type = "delete" }},

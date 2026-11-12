@@ -3,8 +3,27 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 )
+
+type responseDiagnosticsKey struct{}
+
+// recordRequestFailure keeps cancellation out of fault monitoring without changing the response.
+func recordRequestFailure(logger *slog.Logger, metrics *requestMetrics, r *http.Request, operation string, err error, level slog.Level) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if isRequestCancellation(err, r.Context()) {
+		logger.Info(operation+" canceled", "cause", monitoringCause(err))
+		if metrics != nil {
+			metrics.observeCancellation(r.Method, r.Pattern)
+		}
+		return
+	}
+	logger.Log(r.Context(), level, operation, "cause", monitoringCause(err))
+	reportInternalErrorToErrorMonitoring(err, r, operation)
+}
 
 // isRequestCancellation reports typed request cancellation without
 // substring matching. Only errors.Is against context.Canceled and

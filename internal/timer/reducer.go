@@ -45,8 +45,12 @@ type HistoryItem struct {
 	Phase             string `json:"phase"`
 	Status            string `json:"status"`
 	PlannedDurationMs int64  `json:"plannedDurationMs"`
-	CompletedAt       string `json:"completedAt,omitempty"`
-	EndedAt           string `json:"endedAt,omitempty"`
+	// ElapsedMs is the time the session really ran, in 0..PlannedDurationMs.
+	// Core writes it on every projected row; a row stored before the field
+	// existed has none, and the server passes it through without a default.
+	ElapsedMs   *int64 `json:"elapsedMs,omitempty"`
+	CompletedAt string `json:"completedAt,omitempty"`
+	EndedAt     string `json:"endedAt,omitempty"`
 }
 
 type Outcome struct {

@@ -18,11 +18,15 @@ function fixture(t) {
   const use = {
     controlsBlocked: () => blocked, tr: (_key, _args, fallback) => fallback,
     deleteTask: (task) => deleted.push(task), historyDateMs: (item) => Date.parse(item.completedAt),
+    markPendingTaskDeletion: () => true, clearPendingTaskDeletion: () => {},
+    workspaceOwnerId: () => null,
     positiveNumber: (value, fallback) => Number(value) || fallback
   };
   const view = viewModule.create({ state, external: { host: dom.window, elements }, use });
   view.renderTasks();
-  const buttons = () => [...elements.taskList.querySelectorAll("button")];
+  // Each row has Rename and then Delete. These tests move focus between the
+  // rows' Delete buttons.
+  const buttons = () => [...elements.taskList.querySelectorAll("button.task-delete")];
   return { document, elements, state, deleted, use, view, buttons, block: () => { blocked = true; } };
 }
 
@@ -86,7 +90,7 @@ test("R43-S06 blocked or hidden tasks do not receive restored focus", (t) => {
   f.block();
   f.view.renderTasks();
   assert.equal(f.document.activeElement, f.document.body);
-  assert.ok(f.buttons().every((button) => button.disabled));
+  assert.ok([...f.elements.taskList.querySelectorAll("button")].every((button) => button.disabled));
   f.use.controlsBlocked = () => false;
   f.view.renderTasks();
   assert.equal(f.document.activeElement, f.document.body, "unblocking must not revive stale focus");

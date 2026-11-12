@@ -344,8 +344,10 @@ for (let count = 0; count <= 12; count += 1) {
     await client.use.reloadPersistedState();
     const model = client.use.getWorkspaceReadModel();
     assert.equal(model.cadence.completedFocusToday, count);
-    assert.equal(model.cadence.completedFocusTodayPlannedDurationMs, count * 60000);
+    // These rows predate elapsedMs, so Core counts each completed row at its plan.
+    assert.equal(model.cadence.completedFocusTodayElapsedMs, count * 60000);
     assert.equal(model.tasks.completedFocusTodayByTask[taskId].count, Math.ceil(count / 2));
+    if (count) assert.equal(model.tasks.completedFocusTodayByTask[taskId].elapsedMs, Math.ceil(count / 2) * 60000);
     assert.equal(model.cadence.skipDestination, count % 4 === 3 ? "long_break" : "short_break");
   });
 }
@@ -629,7 +631,7 @@ test("migration ownership change after planning aborts every member before effec
   await assert.rejects(storage.planWorkspaceMutation(client.use.database(), input), storage.AccountOwnershipError);
   assert.deepEqual(await dump(client.use.database()), before);
   assert.equal(checks, 2);
-  assert.equal(call("core.version", {}).coreVersion, "0.54.0");
+  assert.equal(call("core.version", {}).coreVersion, "0.56.0");
 });
 
 test("migration claimed head-covered timer survives reload and permits a scoped Pause without rewriting its claim", async (t) => {
@@ -669,6 +671,6 @@ test("migration timer and preference routes invoke official workspace planners",
 
 test("migration version provenance is the immutable official 0.51 release", async (t) => {
   const { core } = await prepared(t);
-  assert.equal(core.call("core.version", {}).coreVersion, "0.54.0");
-  assert.equal(fs.statSync(path.join(__dirname, "pomodorough_core.wasm")).size, 2883106);
+  assert.equal(core.call("core.version", {}).coreVersion, "0.56.0");
+  assert.equal(fs.statSync(path.join(__dirname, "pomodorough_core.wasm")).size, 2945116);
 });

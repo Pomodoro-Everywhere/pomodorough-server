@@ -210,7 +210,6 @@
       frontendErrorTimestamps.shift();
     }
     if (frontendErrorTimestamps.length >= FRONTEND_ERROR_MAX_PER_WINDOW) return true;
-    frontendErrorTimestamps.push(nowMs);
     return false;
   }
 
@@ -228,15 +227,11 @@
 
   function frontendErrorSuppressed(key, nowMs) {
     const sample = frontendErrorSamples.get(key);
-    if (!sample) {
-      frontendErrorSamples.set(key, { last: nowMs, repeats: 0 });
-      return false;
-    }
+    if (!sample) return false;
     if (nowMs - sample.last < frontendErrorBackoff(sample.repeats)) {
       sample.repeats += 1;
       return true;
     }
-    frontendErrorSamples.set(key, { last: nowMs, repeats: 0 });
     return false;
   }
 
@@ -280,7 +275,8 @@
       if (!scope || !scope.Sentry || typeof scope.Sentry.captureException !== "function") return false;
       const name = safeErrorName(error.name);
       const nowMs = Date.now();
-      if (frontendErrorSuppressed(`${operation}\n${String(name).slice(0, 100)}`, nowMs)) {
+      const key = `${operation}\n${String(name).slice(0, 100)}`;
+      if (frontendErrorSuppressed(key, nowMs)) {
         noteFrontendErrorRepeat(operation);
         return false;
       }
@@ -291,6 +287,8 @@
         level: "warning",
         tags: { "error.operation": operation }
       });
+      frontendErrorTimestamps.push(nowMs);
+      frontendErrorSamples.set(key, { last: nowMs, repeats: 0 });
       return true;
     } catch {
       return false;

@@ -60,6 +60,7 @@ func terminalSessions(sessions []Session) []Session {
 }
 
 func historyItem(session Session) HistoryItem {
+	elapsed := clamp(session.ElapsedAtAnchorMs, 0, session.PlannedDurationMs)
 	item := HistoryItem{
 		ID:                session.TimerID,
 		TimerID:           session.TimerID,
@@ -68,6 +69,7 @@ func historyItem(session Session) HistoryItem {
 		Phase:             session.Phase,
 		Status:            session.Status,
 		PlannedDurationMs: session.PlannedDurationMs,
+		ElapsedMs:         &elapsed,
 		EndedAt:           formatTime(session.EndedAt),
 	}
 	if session.Status == "completed" {

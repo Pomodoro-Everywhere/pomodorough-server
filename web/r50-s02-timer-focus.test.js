@@ -131,7 +131,7 @@ test("R50-S02 keyboard and narrow tracks are preserved", () => {
 });
 
 test("R50-S02 global focus indicator still covers unclipped controls", () => {
-  assert.match(appCss, /button:focus-visible,[\s\S]{0,120}outline:\s*3px solid var\(--signal\)/);
+  assert.match(appCss, /button:focus-visible,[\s\S]{0,120}outline:\s*3px solid var\(--focus-ring\)/);
   assert.match(appCss, /\.action-clear\s*\{[^}]*clip-path:\s*none !important/);
   assert.match(appCss, /\.site-footer a:focus-visible\s*\{[^}]*outline:\s*3px solid var\(--signal\)/);
 });

@@ -1228,7 +1228,7 @@ components:
 
     TaskOperationType:
       type: string
-      enum: [upsert, delete]
+      enum: [upsert, delete, rename]
 
     TaskOperation:
       type: object
@@ -1251,9 +1251,13 @@ components:
           type: string
           maxLength: 512
           description: |
-            Required for `upsert` and forbidden for `delete`. The server normalizes
-            to NFC and strips non-printable Unicode code points from both ends.
-            UTF-8 encoding must not exceed 512 bytes.
+            Required for `upsert` and `rename`, and forbidden for `delete`. For
+            `upsert`, the server normalizes to NFC and strips non-printable
+            Unicode code points from both ends. For `rename`, the title is the
+            new title of the existing `taskId`. The server does not normalize it:
+            Core rejects the rename unless the title is already in normalized
+            form and gives an identity different from `taskId`. UTF-8 encoding
+            must not exceed 512 bytes.
         occurredAt:
           type: string
           format: date-time

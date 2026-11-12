@@ -361,7 +361,7 @@ test("R54-S02 cleanup retry recovery opens without an overlapping refusal and sh
   const notices = fixture.calls.filter((entry) => entry[0] === "notice").map((entry) => entry[1]);
   assert.equal(notices.length, 2);
   assert.equal(notices[0], refusal);
-  assert.match(notices[1], /transaction abort/);
+  assert.equal(notices[1], "Signed-out data on this device could not be cleared. Try again.");
   assert.deepEqual(reports.map(([, operation]) => operation), ["session.logout.marker-write-failed",
     "session.logout.pending-queues", "session.logout.cleanup-incomplete"]);
   reads.push(async () => { throw unreadable; });
@@ -432,7 +432,8 @@ test("R53-S01 combined storage, revocation, and cleanup failures stay fenced unt
   assert.equal(fixture.use.database(), database);
   assert.equal(controlsBlocked(fixture), true);
   assert.equal(fixture.state.logoutRecoveryBusy, false);
-  assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /transaction abort/.test(entry[1])));
+  assert.ok(fixture.calls.some((entry) => entry[0] === "notice"
+    && entry[1] === "Signed-out data on this device could not be cleared. Try again."));
   assert.equal(fixture.calls.filter((entry) => entry[0] === "assign").length, 0);
   fixture.use.resumeStartup = async () => { assert.fail("volatile recovery must not resume ordinary startup"); };
   fixture.use.resetSyncRetry = () => {};

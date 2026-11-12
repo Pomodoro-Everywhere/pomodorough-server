@@ -181,4 +181,38 @@ var incrementalMigrations = []schemaMigration{
 		) STRICT`,
 		`INSERT INTO account_metadata(singleton, generation) VALUES (1, 1)`,
 	}},
+	{version: 8, statements: taskOperationRenameStatements()},
+}
+
+// taskOperationRenameStatements admits the Core 0.56.0 `rename` task
+// operation. SQLite cannot change a CHECK constraint in place, so the table is
+// rebuilt and renamed inside the migration transaction. DROP TABLE removes the
+// old index and triggers, and its implicit row delete fires no trigger. The
+// delete trigger comes from the same definition as
+// replaceImmutableDeleteTriggers, so fresh and upgraded databases end with the
+// same schema text.
+func taskOperationRenameStatements() []string {
+	return []string{
+		`CREATE TABLE task_operations_v8 (
+			id TEXT PRIMARY KEY,
+			device_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			operation_type TEXT NOT NULL CHECK (operation_type IN ('upsert', 'delete', 'rename')),
+			title TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			occurred_at_ms INTEGER NOT NULL,
+			hlc_wall_ms INTEGER NOT NULL,
+			hlc_counter INTEGER NOT NULL
+		) STRICT`,
+		`INSERT INTO task_operations_v8(
+			id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
+		) SELECT id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter
+		FROM task_operations`,
+		`DROP TABLE task_operations`,
+		`ALTER TABLE task_operations_v8 RENAME TO task_operations`,
+		`CREATE INDEX task_operations_order_idx ON task_operations(task_id, hlc_wall_ms, hlc_counter, device_id, id)`,
+		`CREATE TRIGGER task_operations_no_update BEFORE UPDATE ON task_operations
+		BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
+		immutableDeleteTriggerStatement(taskOperationsImmutable),
+	}
 }

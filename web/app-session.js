@@ -12,6 +12,7 @@
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
   const PENDING_DELETION_KEY = "pomodoroughPendingDeletion";
   const PENDING_LOGOUT_SIGN_IN_KEY = "pomodoroughPendingLogoutSignIn";
+  const ACCOUNT_DELETION_REFUSED = "account-deletion-refused";
   const SIGN_IN_LANDING_FIELD = "signin=";
 
   function timingMs(name, fallback) {
@@ -118,7 +119,7 @@
       "activateCachedOwnerOffline", "fetchSessionPayload", "applySessionPayload", "loadSession",
       "refreshMutationCsrf", "postMutation", "redirectToLogin", "openRevisionStream",
       "closeRevisionStreamForIdentityChange", "closeRevisionStream", "pollRemoteState",
-      "queueSessionRevalidation", "restoreSessionAndSync", "handleOnline", "handleOffline",
+      "queueSessionRevalidation", "restoreSessionAndSync", "settleDeferredSession", "handleOnline", "handleOffline",
       "accountDeletionConfirmationIsValid", "pendingLocalLogout", "markPendingLogout",
       "clearPendingLogout", "clearPendingLogoutData", "initializeSession",
       "requestSessionRevocation", "deleteAccount", "confirmDeleteAccount",
@@ -216,13 +217,14 @@
       this.logoutMarkerFailureNames = new Set();
       this.logoutCleanupRetryRequired = false;
       this.deletionAttemptRecords = new WeakMap();
+      this.sessionDeferred = false;
     }
 
     actions() {
       return bindActions(this, [
         "activateCachedOwnerOffline", "fetchSessionPayload", "applySessionPayload", "loadSession",
         "refreshMutationCsrf", "postMutation", "redirectToLogin", "queueSessionRevalidation",
-        "restoreSessionAndSync", "handleOnline", "handleOffline", "accountDeletionConfirmationIsValid",
+        "restoreSessionAndSync", "settleDeferredSession", "handleOnline", "handleOffline", "accountDeletionConfirmationIsValid",
         "pendingLocalLogout", "markPendingLogout", "clearPendingLogout", "clearPendingLogoutData",
         "initializeSession", "requestSessionRevocation", "deleteAccount", "confirmDeleteAccount",
         "cancelDeleteAccount", "logout", "retryPendingLogout",
@@ -542,15 +544,30 @@
           }
           context.assertCurrent();
         }
+        this.settleDeferredSession();
       } catch (error) {
         if (!accountOperation.isCurrent(context)) return;
         await this.activateCachedOwnerOffline(context);
         if (!accountOperation.isCurrent(context)) return;
         this.state.retrying = true;
-        this.use.render();
         this.use.scheduleRetry(context);
         this.host.console.warn("Pomodorough remains offline:", error);
         reportFrontendError(error, "session.restore.offline");
+        this.renderReported("session.restore.offline");
+      }
+    }
+
+    // A catch path renders last, after its retry is scheduled and its error is
+    // reported. A render that throws there is reported under the same operation
+    // and does not escape, so the scheduled retry can still recover the page.
+    // Settling a deferred session renders the same way, because it runs inside
+    // those paths and in the retry timer before the next synchronization.
+    renderReported(operation) {
+      try {
+        this.use.render();
+      } catch (error) {
+        this.host.console.warn("Pomodorough could not render:", error);
+        reportFrontendError(error, operation);
       }
     }
 
@@ -739,6 +756,20 @@
       this.redirectToLogin();
       return true;
     }
+    // The cleanup error's own text goes to the console and error reporting.
+    // The notice is shown as standing: a change refused while sign-out
+    // recovery blocks the controls leaves it in place.
+    logoutCleanupFailedNotice() {
+      return this.use.tr("notice.logoutCleanupFailed", {},
+        "Signed-out data on this device could not be cleared. Try again.");
+    }
+
+    // Once a later cleanup succeeds the failure no longer holds: the notice is
+    // dismissed on the next render and no longer outranks a refusal.
+    logoutCleanupFailedOptions() {
+      return { precedence: "standing", staleWhen: () => !this.state.logoutRecoveryRequired };
+    }
+
     async clearPendingLogoutData(identity, issuer) {
       accountOperation.requireBound(issuer);
       if (!this.pendingLocalLogout()) return { cleared: true, context: issuer };
@@ -751,10 +782,7 @@
         const context = error.cleanupContext || issuer;
         if (!accountOperation.isCurrent(context)) return { cleared: false, context };
         this.state.logoutRecoveryRequired = true;
-        this.use.showNotice(this.use.tr(
-          "account.logout.cleanupFailed", { error: error.message },
-          `Signed-out local data could not be cleared: ${error.message}`
-        ));
+        this.use.showNotice(this.logoutCleanupFailedNotice(), this.logoutCleanupFailedOptions());
         this.host.console.warn("Pomodorough pending logout cleanup failed:", error);
         reportFrontendError(error, "session.logout-recovery.cleanup-failed");
         this.use.render();
@@ -804,6 +832,7 @@
           await this.use.prepareBootstrap(context);
         }
         accountOperation.requireBound(context);
+        this.settleDeferredSession();
         return context;
       } catch (error) {
         context = this.logoutFailureContexts.get(error) || context;
@@ -820,13 +849,42 @@
           if (!accountOperation.isCurrent(context)) return null;
         }
         if (this.host.navigator.onLine) this.state.retrying = true;
-        this.use.render();
         this.use.scheduleRetry(context);
-        this.use.showNotice(error.message);
+        this.announceDeferredSession();
         this.host.console.warn("Pomodorough session deferred:", error);
         reportFrontendError(error, "session.initialize.deferred");
+        this.renderReported("session.initialize.deferred");
         return context;
       }
+    }
+
+    // A deferred session check leaves the app working on local data. The
+    // offline status and the logout recovery dialog explain their own cases,
+    // so only a failure while online gets a notice. The error's own text goes
+    // to the console and error reporting, never to the page.
+    announceDeferredSession() {
+      this.sessionDeferred = true;
+      if (this.state.logoutRecoveryRequired || !this.host.navigator.onLine) return;
+      this.use.showNotice(this.use.tr(
+        "notice.sessionDeferred", {},
+        "Your account could not be reached; try again in a moment."
+      ), {
+        kind: "session.initialize.deferred",
+        retry: () => this.retryDeferredSession(),
+        staleWhen: () => !this.sessionDeferred || !this.host.navigator.onLine
+      });
+    }
+
+    async retryDeferredSession() {
+      await this.handleOnline();
+      if (this.sessionDeferred) this.announceDeferredSession();
+    }
+
+    // The session answered: the next render drops a notice that said it did not.
+    settleDeferredSession() {
+      if (!this.sessionDeferred) return;
+      this.sessionDeferred = false;
+      this.renderReported("session.initialize.deferred");
     }
 
     // A tab in logout recovery never resolves history, and its next attempt
@@ -991,8 +1049,7 @@
           // Retry in this dialog runs logout() again and shows its own refusal.
           // A refusal left by an overlapping click must not open with the dialog.
           this.state.bootstrapSignOutError = null;
-          this.use.showNotice(this.use.tr("account.logout.cleanupFailed", { error: error.message },
-            `Signed-out local data could not be cleared: ${error.message}`));
+          this.use.showNotice(this.logoutCleanupFailedNotice(), this.logoutCleanupFailedOptions());
           this.use.render();
           return false;
         }
@@ -1025,16 +1082,17 @@
         context.assertCurrent();
         if (!response.ok) {
           if (response.status === 401 || response.status === 400 || response.status === 403) this.writePendingDeletionAttempt(null);
-          throw new Error(this.use.tr(
+          throw Object.assign(new Error(this.use.tr(
             "account.delete.httpFailed", { status: response.status },
             `Account deletion failed (${response.status}).`
-          ));
+          )), { code: ACCOUNT_DELETION_REFUSED });
         }
         return true;
       } catch (error) {
         if (!accountOperation.isCurrent(context)) return false;
         this.elements.deleteAccountButton.disabled = false;
-        this.use.showNotice(error.message || this.use.tr(
+        // Only the server's refusal carries a localized sentence of its own.
+        this.use.showNotice(error.code === ACCOUNT_DELETION_REFUSED ? error.message : this.use.tr(
           "account.delete.failed", {}, "Account deletion failed. Your local data was kept."
         ));
         this.host.console.warn("Pomodorough account deletion request failed:", error);

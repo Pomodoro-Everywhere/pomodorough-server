@@ -20,7 +20,7 @@ var (
 	platformPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
 	validTypes               = map[string]struct{}{"start": {}, "pause": {}, "resume": {}, "finish": {}, "cancel": {}, "clear": {}, "retarget": {}}
 	validPhases              = map[string]struct{}{"focus": {}, "short_break": {}, "long_break": {}}
-	validTaskOperationTypes  = map[string]struct{}{"upsert": {}, "delete": {}}
+	validTaskOperationTypes  = map[string]struct{}{"upsert": {}, "delete": {}, "rename": {}}
 	validBootstrapStrategies = map[string]struct{}{
 		store.BootstrapKeepRemote: {}, store.BootstrapReplaceRemote: {}, store.BootstrapMerge: {},
 	}

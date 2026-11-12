@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const convergenceFixtureSHA256 = "51c357d8fd63e7200c1316ef36fc45821bea9ac2fbe11f255832fa21110ea104"
+const convergenceFixtureSHA256 = "60ee91bed591a89fb728e6d252cfc47a202ca87cac3adc7f4c4bfab3de7038f3"
 
 type convergenceFixture struct {
 	Version int               `json:"version"`
@@ -61,6 +61,7 @@ type convergenceHistory struct {
 	Status     string `json:"status"`
 	Phase      string `json:"phase"`
 	DurationMs int64  `json:"durationMs"`
+	ElapsedMs  int64  `json:"elapsedMs"`
 	CommandID  string `json:"commandId"`
 	EndedMs    int64  `json:"endedMs"`
 	TaskID     string `json:"taskId"`
@@ -150,11 +151,18 @@ func normalizeConvergenceResult(result Result, epoch time.Time) convergenceExpec
 	for _, item := range result.History {
 		normalized.History = append(normalized.History, convergenceHistory{
 			TimerID: item.TimerID, Status: item.Status, Phase: item.Phase,
-			DurationMs: item.PlannedDurationMs, CommandID: item.CommandID,
+			DurationMs: item.PlannedDurationMs, ElapsedMs: historyElapsed(item), CommandID: item.CommandID,
 			EndedMs: timeOffsetMs(timed(item.EndedAt), epoch), TaskID: item.TaskID,
 		})
 	}
 	return normalized
+}
+
+func historyElapsed(item HistoryItem) int64 {
+	if item.ElapsedMs == nil {
+		panic("projected history row has no elapsedMs")
+	}
+	return *item.ElapsedMs
 }
 
 func timed(value string) time.Time {

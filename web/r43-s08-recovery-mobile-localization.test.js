@@ -7,6 +7,7 @@ const path = require("node:path");
 const { JSDOM } = require("jsdom");
 const { createI18n } = require("./i18n.js");
 const appView = require("./app-view.js");
+const sync = require("./sync-core.js");
 
 const catalogs = Object.fromEntries(["en", "ar-XB"].map((locale) => [
   locale, JSON.parse(fs.readFileSync(path.join(__dirname, "locales", `${locale}.json`), "utf8"))
@@ -65,6 +66,24 @@ function renderDialog(f, dialogView) {
 
 function failedView(extra = {}) {
   return { open: true, failed: true, choosing: false, confirming: false, busy: false, ...extra };
+}
+
+for (const locale of ["en", "ar-XB"]) {
+  for (const [strategy, key] of Object.entries({ replace_remote: "keepLocal", keep_remote: "keepRemote", merge: "keepBoth" })) {
+    test(`R43-S08 ${locale} renders all confirmation fields for ${strategy}`, (t) => {
+      const f = fixture(t, locale);
+      f.syncCore.confirmationFor = sync.confirmationFor;
+      f.state.bootstrapStrategy = strategy;
+      renderDialog(f, failedView({ failed: false, confirming: true }));
+      assert.equal(f.elements.bootstrapConfirmationTitle.textContent, catalogs[locale][`bootstrap.${key}.confirmTitle`]);
+      assert.equal(f.elements.bootstrapConfirmationMessage.textContent, catalogs[locale][`bootstrap.${key}.confirmMessage`]);
+      assert.equal(f.elements.bootstrapConfirm.textContent, catalogs[locale][`bootstrap.${key}`]);
+      f.state.bootstrapSubmitting = true;
+      renderDialog(f, failedView({ failed: false, confirming: true, busy: true }));
+      assert.equal(f.elements.bootstrapConfirm.textContent, catalogs[locale]["bootstrap.applyingChoice"]);
+      assert.equal(f.elements.bootstrapConfirm.disabled, true);
+    });
+  }
 }
 
 for (const [conflict, key, english] of [

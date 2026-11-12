@@ -66,47 +66,44 @@ function spy(use, name, log) {
   return log;
 }
 
-// Wraps the real core so `core.version` advertises rename support and rename
-// intents are captured instead of reaching the bundled core, so tests can
-// inspect each request without changing stored tasks.
-function renameCapableCore(core, requests) {
-  const stub = {};
-  for (let proto = core; proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
-    for (const name of Object.getOwnPropertyNames(proto)) {
-      if (typeof core[name] === "function" && !(name in stub)) stub[name] = core[name].bind(core);
-    }
-  }
-  stub.call = (operation, input) => {
-    if (operation === "core.version") return { coreVersion: "0.54.0", schemaVersion: 1 };
-    if (operation === "workspace.intent.v1" && input.intent?.kind === "renameTask") {
-      requests.push(input);
-      return { outcome: "noop", reason: "unchangedOrIneligible" };
-    }
-    return core.call(operation, input);
-  };
-  return stub;
+// Gives one fixture app its own page: the real view on app.html, with the
+// task and connectivity events wired.
+function attachView(t, app) {
+  const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "..", "app.html"), "utf8"), { url: "https://local.test/app" });
+  t.after(() => dom.window.close());
+  const { document } = dom.window;
+  const elements = pageElements(document);
+  const host = app.external.host;
+  Object.assign(host, { document, localStorage: dom.window.localStorage,
+    addEventListener: dom.window.addEventListener.bind(dom.window) });
+  app.external.elements = elements;
+  const view = viewModule.create({ state: app.state, external: app.external, use: app.use });
+  for (const name of VIEW_RENDERERS) app.use[name] = view[name];
+  view.setupTaskEvents();
+  view.setupConnectivityEvents();
+  app.state.activeScreen = "tasks";
+  view.render();
+  return { dom, window: dom.window, document, elements, host, view,
+    state: app.state, use: app.use, calls: app.calls, callbacks: app.callbacks };
 }
 
 async function viewFixture(t, timerStatus = null, { core: coreOverride = null } = {}) {
   const current = await fixture(t, timerStatus);
   const { stale } = current;
   if (coreOverride) stale.external.sharedCoreHost.SharedCore.load = async () => coreOverride;
-  const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "..", "app.html"), "utf8"), { url: "https://local.test/app" });
-  t.after(() => dom.window.close());
-  const { document } = dom.window;
-  const elements = pageElements(document);
-  const host = stale.external.host;
-  Object.assign(host, { document, localStorage: dom.window.localStorage,
-    addEventListener: dom.window.addEventListener.bind(dom.window) });
-  stale.external.elements = elements;
-  const view = viewModule.create({ state: stale.state, external: stale.external, use: stale.use });
-  for (const name of VIEW_RENDERERS) stale.use[name] = view[name];
-  view.setupTaskEvents();
-  view.setupConnectivityEvents();
-  stale.state.activeScreen = "tasks";
-  view.render();
-  return { ...current, dom, window: dom.window, document, elements, host, view,
-    state: stale.state, use: stale.use, calls: stale.calls, callbacks: stale.callbacks };
+  return { ...current, ...attachView(t, stale) };
+}
+
+// A second tab of the same browser profile: the same workspace database, the
+// first tab's localStorage and, when the first tab has them, its Web Locks.
+async function secondTab(t, current, tabId = "tab-second") {
+  const app = await current.open("account-A", tabId);
+  await app.use.reloadPersistedState();
+  const tab = attachView(t, app);
+  tab.host.localStorage = current.host.localStorage;
+  tab.host.navigator = current.host.navigator;
+  tab.view.render();
+  return tab;
 }
 
 function taskRows(elements) {
@@ -117,4 +114,4 @@ function rowFor(elements, taskId) {
   return taskRows(elements).find((row) => row.dataset.taskId === taskId) || null;
 }
 
-module.exports = { viewFixture, setVisibility, settle, waitFor, forceDisplayStatus, spy, renameCapableCore, taskRows, rowFor };
+module.exports = { viewFixture, secondTab, setVisibility, settle, waitFor, forceDisplayStatus, spy, taskRows, rowFor };

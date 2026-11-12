@@ -280,7 +280,22 @@ func validateCoreHistoryItem(
 	if !historyMatchesSession(item, session) {
 		return time.Time{}, errors.New("timer history is inconsistent with its session")
 	}
+	if err := validateHistoryElapsed(item); err != nil {
+		return time.Time{}, err
+	}
 	return endedAt, validateHistoryCompletion(item)
+}
+
+// A row without elapsedMs was written before the field existed and stays as
+// it is. A recorded value outside 0..plannedDurationMs fails closed.
+func validateHistoryElapsed(item timer.HistoryItem) error {
+	if item.ElapsedMs == nil {
+		return nil
+	}
+	if *item.ElapsedMs < 0 || *item.ElapsedMs > item.PlannedDurationMs {
+		return errors.New("timer history elapsed time is outside its planned duration")
+	}
+	return nil
 }
 
 func validateHistoryCompletion(item timer.HistoryItem) error {
@@ -302,7 +317,8 @@ func validateHistoryCompletion(item timer.HistoryItem) error {
 func historyMatchesSession(item timer.HistoryItem, session coreTimerSession) bool {
 	return item.TimerID == session.TimerID && item.TaskID == session.TaskID && item.CommandID == session.TerminalCommandID &&
 		item.Phase == session.Phase && item.Status == session.Status &&
-		item.PlannedDurationMs == session.PlannedDurationMs && coreTimesEqual(item.EndedAt, session.EndedAt)
+		item.PlannedDurationMs == session.PlannedDurationMs && coreTimesEqual(item.EndedAt, session.EndedAt) &&
+		(item.ElapsedMs == nil || *item.ElapsedMs == session.ElapsedAtAnchorMs)
 }
 
 func intentsEqual(left, right *timer.Intent) bool {

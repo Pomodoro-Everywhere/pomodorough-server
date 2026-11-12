@@ -9,6 +9,7 @@ const webDirectory = __dirname;
 const { createI18n, validateCatalogs, resolveLocale, loadBrowserI18n } = require("./i18n.js");
 const english = JSON.parse(fs.readFileSync(path.join(webDirectory, "locales/en.json"), "utf8"));
 const rtl = JSON.parse(fs.readFileSync(path.join(webDirectory, "locales/ar-XB.json"), "utf8"));
+const sync = require("./sync-core.js");
 const applicationScript = [
   "app.js", "app-state.js", "app-storage.js", "app-actions.js", "app-sync.js",
   "app-bootstrap.js", "app-session.js", "app-view.js"
@@ -34,7 +35,7 @@ test("dynamic presentation sinks do not bypass localization", () => {
     "Run cancelled. Start another.",
     "Another device is carrying this timer.",
     "Time not recorded",
-    "Durable timer storage unavailable:"
+    "Storage on this device is unavailable"
   ]) {
     const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const translatedCall = `(?:(?:use\\.)?tr\\(|call\\(application,\\s*"tr",)`;
@@ -48,6 +49,27 @@ test("English and RTL pseudolocale catalogs have matching messages, placeholders
   assert.equal(english.$meta.dir, "ltr");
   assert.equal(rtl.$meta.dir, "rtl");
   assert.ok(Object.keys(english).length >= 70, "practical app surfaces should be resource-backed");
+});
+
+test("bootstrap confirmations use each locale for every strategy without changing confirmation gating", () => {
+  for (const [locale, catalog] of Object.entries({ en: english, "ar-XB": rtl })) {
+    const i18n = createI18n({ catalogs: { en: english, "ar-XB": rtl }, locale, document: null });
+    for (const [strategy, key] of Object.entries({ replace_remote: "keepLocal", keep_remote: "keepRemote", merge: "keepBoth" })) {
+      const confirmation = sync.confirmationFor(strategy, i18n.t);
+      assert.deepEqual(confirmation, {
+        title: catalog[`bootstrap.${key}.confirmTitle`],
+        message: catalog[`bootstrap.${key}.confirmMessage`],
+        confirmLabel: catalog[`bootstrap.${key}`]
+      });
+      assert.equal(sync.canSubmitResolution("choose", false), false);
+      assert.equal(sync.canSubmitResolution("choose", true), true);
+      if (locale === "ar-XB") {
+        for (const value of Object.values(confirmation)) assert.match(value, /[öïëàü]/);
+      }
+    }
+    if (locale === "ar-XB") assert.doesNotMatch(catalog["bootstrap.ownershipChanged"], /Account ownership changed/);
+  }
+  assert.throws(() => sync.confirmationFor("invalid"), /Unknown bootstrap strategy/);
 });
 
 test("catalog validation rejects missing placeholders and plural branches", () => {
@@ -174,7 +196,7 @@ test("browser locale loading honors query selection and applies the selected cat
     }
   }, loadBrowserI18n);
   assert.equal(instance.locale, "ar-XB");
-  assert.deepEqual(requests.map(([url]) => url), ["/locales/en.json?v=4", "/locales/ar-XB.json?v=4"]);
+  assert.deepEqual(requests.map(([url]) => url), ["/locales/en.json?v=6", "/locales/ar-XB.json?v=6"]);
   assert.ok(requests.every(([, options]) => options.cache === "no-cache"));
   assert.ok(attributes.some(([name, value]) => name === "dir" && value === "rtl"));
 });

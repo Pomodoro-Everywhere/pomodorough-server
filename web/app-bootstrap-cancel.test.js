@@ -98,7 +98,6 @@ function cancelFixture({ stateOverrides = {}, dialogView = null } = {}) {
   };
   const use = {
     chooseBootstrapStrategy() {},
-    localBootstrapState: () => ({ history: [] }),
     logout() {},
     retryBootstrapResolution() {},
     tr: (_key, _args, fallback) => fallback,

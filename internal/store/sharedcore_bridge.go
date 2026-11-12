@@ -349,12 +349,9 @@ type coreTaskOperation struct {
 	Title  string `json:"title,omitempty"`
 }
 
-type coreTaskResult struct {
-	Tasks               []task.Task       `json:"tasks"`
-	WinningOperationIDs map[string]string `json:"winningOperationIds"`
-}
-
-func reduceTasksWithSharedCore(ctx context.Context, operations []task.Operation) ([]task.Task, map[string]string, error) {
+// coreTaskOperations is the task.reduce.v1 wire form of the log. A rename
+// carries its new title like an upsert; a delete carries none.
+func coreTaskOperations(operations []task.Operation) []coreTaskOperation {
 	wire := make([]coreTaskOperation, 0, len(operations))
 	for _, operation := range operations {
 		wire = append(wire, coreTaskOperation{
@@ -366,8 +363,17 @@ func reduceTasksWithSharedCore(ctx context.Context, operations []task.Operation)
 			TaskID: operation.TaskID, Type: operation.Type, Title: operation.Title,
 		})
 	}
+	return wire
+}
+
+type coreTaskResult struct {
+	Tasks               []task.Task       `json:"tasks"`
+	WinningOperationIDs map[string]string `json:"winningOperationIds"`
+}
+
+func reduceTasksWithSharedCore(ctx context.Context, operations []task.Operation) ([]task.Task, map[string]string, error) {
 	var output coreTaskResult
-	if err := callAccountSharedCore(ctx, "task.reduce.v1", map[string]any{"operations": wire}, &output); err != nil {
+	if err := callAccountSharedCore(ctx, "task.reduce.v1", map[string]any{"operations": coreTaskOperations(operations)}, &output); err != nil {
 		return nil, nil, err
 	}
 	return taskResultFromCore(output, operations)

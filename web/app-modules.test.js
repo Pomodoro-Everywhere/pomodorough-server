@@ -118,7 +118,7 @@ test("composition facade contains wiring while deep modules own side effects and
 test("responsibility modules expose bounded class composition without blanket exceptions", () => {
   const expectedClasses = new Map([
     ["app-state.js", ["LanguageCatalog", "TrustedClock", "SharedTaskCore", "OwnerStateProjector"]],
-    ["app-storage.js", ["DatabaseConnection", "LocalStateRepository", "MutationRepository"]],
+    ["app-storage.js", ["DatabaseConnection", "LocalStateRepository", "MutationRepository", "PendingTaskDeletionMarkers"]],
     ["app-actions.js", ["CompletionPlanPolicy", "ActionMutations", "TimerLifecycle"]],
     ["app-sync.js", ["SyncResponseReconciler", "SyncCoordinator"]],
     ["app-bootstrap.js", ["BootstrapSubmission", "BootstrapPreparation"]],
@@ -190,11 +190,11 @@ test("HTML loads declared modules before composition and service worker caches e
   const worker = source("sw.js");
   let priorIndex = -1;
   const scriptVersions = {
-    "app.js": 46,
-    "app-state.js": 10,
-    "app-storage.js": 14,
-    "app-actions.js": 12, "app-sync.js": 9, "app-bootstrap.js": 7,
-    "app-session.js": 9, "app-view.js": 12
+    "app.js": 47,
+    "app-state.js": 11,
+    "app-storage.js": 16,
+    "app-actions.js": 13, "app-sync.js": 10, "app-bootstrap.js": 8,
+    "app-session.js": 11, "app-view.js": 15
   };
   for (const file of ["app-runtime.js", "account-operation.js", ...moduleFiles, "app.js"]) {
     const version = scriptVersions[file] || 1;

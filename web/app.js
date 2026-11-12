@@ -16,7 +16,9 @@
     "installButton", "syncStatus", "syncStatusText", "profile", "profileAvatar",
     "logoutButton", "deleteAccountButton", "accountSection", "conflictPanel", "conflictReason",
     "conflictDismiss", "savedClaimRecovery", "savedClaimRecoveryText", "savedClaimDiscard",
-    "savedClaimCancel", "notice", "noticeText", "noticeDismiss", "undoToast", "undoToastText", "undoToastUndo", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
+    "savedClaimCancel", "noticeStack", "notice", "noticeText", "noticeRetry", "noticeDismiss",
+    "undoToast", "undoToastText", "undoToastHint", "undoToastUndo", "undoToastDismiss",
+    "timerDock", "timerDockDisplay", "timerDockToggle", "bootstrapDialog", "bootstrapTitle", "bootstrapSummary",
     "bootstrapChoices", "bootstrapConfirmation", "bootstrapConfirmationTitle",
     "bootstrapConfirmationMessage", "bootstrapConfirm", "bootstrapCancel", "bootstrapError",
     "bootstrapSignOutError", "bootstrapRetry", "bootstrapSignOut", "timerScreen", "tasksScreen", "durationForm",
@@ -54,7 +56,7 @@
     "captureAccountContext", "getWorkspaceReadModel", "fetchSessionPayload", "loadSession", "applySessionPayload", "refreshMutationCsrf", "syncPreflight",
     "scheduleRetry", "retryDelayMsForTest", "persistBootstrapResolution",
     "restartBootstrapForCurrentAccount", "loadBootstrapPreview", "validateBootstrapSubmission",
-    "localBootstrapState", "buildBootstrapPlan", "setFetchForTest", "setStorageMethodForTest",
+    "buildBootstrapPlan", "setFetchForTest", "setStorageMethodForTest",
     "setRevisionStreamForTest", "hasRevisionStreamForTest", "render", "renderTimer", "syncNow",
     "showNotice", "loadLocalState", "loadSharedCore", "setupEvents", "createDialTicks", "dialTickCountFor", "renderDialTicks",
     "renderSyncStatus", "heartbeatTimerOwnership", "timerOwnerHeartbeatMs", "dismissNotice"
@@ -67,6 +69,7 @@
       crypto: root.crypto, sessionStorage: root.sessionStorage, localStorage: root.localStorage,
       performance: root.performance, console: root.console, location: page.location,
       Notification: root.Notification, EventSource: root.EventSource,
+      IntersectionObserver: root.IntersectionObserver, ResizeObserver: root.ResizeObserver,
       AudioContext: root.AudioContext || root.webkitAudioContext,
       fetch: (...args) => root.fetch(...args),
       prompt: (...args) => page.prompt(...args), confirm: (...args) => page.confirm(...args),
@@ -133,8 +136,8 @@
   function reportStorageUnavailable(application, error) {
     application.host.console.warn("Pomodorough durable storage unavailable:", error);
     reportFrontendError(error, "startup.storage.unavailable");
-    call(application, "showNotice", call(application, "tr", "storage.unavailable",
-      { error: error.message }, `Durable timer storage unavailable: ${error.message}`));
+    call(application, "showNotice", call(application, "tr", "notice.storageUnavailable", {},
+      "Storage on this device is unavailable, so changes cannot be saved. Check browser storage, then reload the page."));
     call(application, "renderSyncStatus");
     return false;
   }
@@ -220,7 +223,11 @@
     context = stored.context;
     if (!stored.ready) return { result: false, context };
     context = await call(application, "initializeSession", context) || context;
-    return { result: accountOperation.isCurrent(context), context };
+    const result = accountOperation.isCurrent(context);
+    // A task delete whose undo window ended with the page is issued now that
+    // the workspace and its owner are loaded. Startup does not wait for it.
+    if (result) call(application, "replayPendingTaskDeletions");
+    return { result, context };
   }
 
   function applicationOrchestration(application) {

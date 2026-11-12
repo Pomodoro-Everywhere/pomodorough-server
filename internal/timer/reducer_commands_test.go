@@ -105,8 +105,13 @@ func (state *reductionState) applyTerminal(command Command) {
 	}
 	state.supersedeCurrent(command)
 	if command.Type == "finish" {
+		// A Finish ignores its own observedElapsedMs: a running session ends at
+		// the time measured to occurredAt, any other session keeps its stored
+		// elapsed time.
+		if target.Status == "running" {
+			target.ElapsedAtAnchorMs = elapsedAt(target, command.OccurredAt)
+		}
 		target.Status = "completed"
-		target.ElapsedAtAnchorMs = target.PlannedDurationMs
 	} else {
 		target.Status = "cancelled"
 		target.ElapsedAtAnchorMs = clamp(command.ObservedElapsedMs, 0, target.PlannedDurationMs)

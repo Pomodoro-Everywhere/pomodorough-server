@@ -254,7 +254,7 @@ test("R51-S04 RTL, keyboard focus, and callbacks survive the fold repair", (t) =
     assert.equal(f.elements.logoutButton.type, "button", `${dir} Sign out stays a button`);
     assert.equal(f.elements.deleteAccountButton.type, "button", `${dir} Delete stays a button`);
     assert.match(appCss, /\.profile\s*\{[^}]*border-inline-start/, `${dir} logical divider preserved`);
-    assert.match(appCss, /button:focus-visible,[\s\S]{0,200}?outline:\s*3px solid var\(--signal\)/, `${dir} focus ring preserved`);
+    assert.match(appCss, /button:focus-visible,[\s\S]{0,200}?outline:\s*3px solid var\(--focus-ring\)/, `${dir} focus ring preserved`);
     f.elements.deleteAccountButton.focus();
     assert.equal(f.document.activeElement, f.elements.deleteAccountButton, `${dir} Delete focusable`);
     f.elements.logoutButton.focus();

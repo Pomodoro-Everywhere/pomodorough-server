@@ -29,6 +29,8 @@
   const TIMER_OWNER_LEASE_MS = timingMs("timerOwnerLease", 60_000);
   const PENDING_LOGOUT_KEY = "pomodoroughPendingLogout";
   const PENDING_LOGOUT_OWNER_KEY = "pomodoroughPendingLogoutOwner";
+  const PENDING_TASK_DELETIONS_KEY = "pomodoroughPendingTaskDeletions";
+  const TASK_DELETION_UNDO_LOCK = "pomodorough-task-deletion-undo:";
   const ALL_STORES = Object.freeze([
     META_STORE, PENDING_STORE, TASK_PENDING_STORE, DURATION_PENDING_STORE,
     AUTO_START_PENDING_STORE, SELECTED_TASK_PENDING_STORE
@@ -70,7 +72,7 @@
       "selectedTaskIdForNextFocus", "compareDurationOperations", "compareTimerCommands",
       "clampNumber", "trustedNow", "monotonicNow", "clockContinuityId", "elapsedFor", "rebuildOptimisticState",
       "quarantineOwnerState", "quarantineAccountMismatch", "assertExpectedAccount", "projectOwnerState", "tr", "phaseConfig",
-      "defaultDurationsMs", "tabId", "showNotice"
+      "defaultDurationsMs", "tabId", "showNotice", "controlsBlocked", "deleteTask"
     ],
     provides: [
       "openDatabase", "requestResult", "transactionDone", "settingsValue", "snapshotValue", "captureDatabaseContext",
@@ -81,15 +83,17 @@
       "persistAutoStartOperation", "persistSelectedTaskOperation", "persistDurationOperation",
       "persistRetargetOperation", "persistWorkspaceIntent", "persistWorkspaceCompletion",
       "reloadPersistedState", "clearLocalData", "database", "setDatabaseForTest",
-      "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity"
+      "setInFlightDurationOperationIds", "cleanupIdentity", "assertCleanupIdentity",
+      "markPendingTaskDeletion", "clearPendingTaskDeletion", "clearPendingTaskDeletions",
+      "pendingTaskDeletions", "replayPendingTaskDeletions", "workspaceOwnerId"
     ],
     emits: [],
     listens: []
   });
 
   class DatabaseConnection {
-    constructor(state, external, use) {
-      Object.assign(this, { state, use }, external);
+    constructor(state, external, use, deletionMarkers) {
+      Object.assign(this, { state, use, deletionMarkers }, external);
       this.db = null;
       this.connectionGeneration = 0;
     }
@@ -212,6 +216,9 @@
 
     async clearAuthorizedLocalData(identity, context) {
       this.assertAuthorizedCleanup(identity, context);
+      // A task deletion that waits for replay belongs to the workspace this
+      // cleanup removes. It must never reach the next owner of this browser.
+      this.deletionMarkers.clearPendingTaskDeletions();
       if (!this.db) context = await this.openCleanupDatabase(identity, context);
       this.assertAuthorizedCleanup(identity, context);
       const database = this.db;
@@ -553,15 +560,21 @@
     }
 
     assertDisplayContext(records) {
-      this.state.projectionPending = records.projectionPending ?? null;
+      // While bootstrap quarantines the local owner state, the persisted
+      // projection belongs to the quarantined copy. The reset display state has
+      // no retained queues, so handing it the projection makes every render
+      // fail Core's projection check. Validation below still runs.
+      if (!this.state.quarantinedLocal) this.state.projectionPending = records.projectionPending ?? null;
       if (records.projectionPending == null) return;
       try { this.syncStorage.assertPersistedDisplayContext(records, records.deviceId || this.state.deviceId); }
       catch (error) {
         if (error.name !== "PersistedDisplayContextError") throw error;
-        const message = `Persisted display context needs recovery. ${error.message}`;
+        const message = this.use.tr("notice.savedDataBlocked", {},
+          "Data saved on this device needs recovery. Reload the page.");
         Object.assign(this.state, { workspaceBlocked: true, bootstrapBlocked: true,
           bootstrapError: message, conflict: message });
-        this.use.showNotice(message);
+        // A standing notice: a change refused while it shows leaves it in place.
+        this.use.showNotice(message, { precedence: "standing" });
         throw error;
       }
     }
@@ -723,11 +736,168 @@
     }
   }
 
+  function isPendingTaskDeletion(record) {
+    return typeof record?.taskId === "string" && record.taskId !== ""
+      && (record.ownerId === null || typeof record.ownerId === "string")
+      && typeof record.tabId === "string";
+  }
+
+  // A task delete waits in an undo window and is issued when the window ends.
+  // A page that unloads inside the window cannot finish the asynchronous
+  // delete, so a synchronous marker carries the intent to the next startup.
+  // The page holds a Web Lock for as long as its window is open: a free lock
+  // tells the next startup that no page can still offer Undo for the task.
+  class PendingTaskDeletionMarkers {
+    constructor(state, external, use) {
+      Object.assign(this, { state, use }, external);
+      this.undoWindowLocks = new Map();
+      // Tasks whose undo window, or the delete that follows it, is live in
+      // this page: replay leaves them to the page's own delete.
+      this.liveTaskDeletions = new Set();
+      this.reportedFailureNames = new Set();
+    }
+
+    actions() {
+      return bindActions(this, [
+        "markPendingTaskDeletion", "clearPendingTaskDeletion", "clearPendingTaskDeletions",
+        "pendingTaskDeletions", "replayPendingTaskDeletions", "workspaceOwnerId"
+      ]);
+    }
+
+    workspaceOwnerId() {
+      return this.syncCore.accountOwnerId(this.state.user) || this.state.localOwnerId || null;
+    }
+
+    // An unreadable marker reads as no marker: nothing is deleted from it.
+    pendingTaskDeletions() {
+      try {
+        const records = JSON.parse(this.host.localStorage.getItem(PENDING_TASK_DELETIONS_KEY) || "[]");
+        return Array.isArray(records) ? records.filter(isPendingTaskDeletion) : [];
+      } catch (error) {
+        this.reportMarkerFailure(error);
+        return [];
+      }
+    }
+
+    writePendingTaskDeletions(records) {
+      try {
+        if (records.length) this.host.localStorage.setItem(PENDING_TASK_DELETIONS_KEY, JSON.stringify(records));
+        else this.host.localStorage.removeItem(PENDING_TASK_DELETIONS_KEY);
+        return true;
+      } catch (error) {
+        this.reportMarkerFailure(error);
+        return false;
+      }
+    }
+
+    reportMarkerFailure(error) {
+      const name = ["QuotaExceededError", "SecurityError", "SyntaxError"].includes(error?.name) ? error.name : "StorageError";
+      if (this.reportedFailureNames.has(name)) return;
+      this.reportedFailureNames.add(name);
+      // Storage exceptions can contain stored values; only the failure class is reported.
+      const failure = new Error("Pending task deletion marker storage failed.");
+      failure.name = name;
+      this.host.console?.warn("Pomodorough pending task deletion marker storage failed:", failure);
+      reportFrontendError(failure, "storage.failure");
+    }
+
+    markPendingTaskDeletion(task) {
+      const record = { taskId: task.id, ownerId: this.workspaceOwnerId(), tabId: this.use.tabId() };
+      const others = this.pendingTaskDeletions().filter((item) => item.taskId !== task.id);
+      this.liveTaskDeletions.add(task.id);
+      this.holdUndoWindowLock(task.id);
+      return this.writePendingTaskDeletions([...others, record]);
+    }
+
+    clearPendingTaskDeletion(taskId) {
+      const records = this.pendingTaskDeletions();
+      const others = records.filter((item) => item.taskId !== taskId);
+      if (others.length !== records.length) this.writePendingTaskDeletions(others);
+      this.liveTaskDeletions.delete(taskId);
+      this.releaseUndoWindowLock(taskId);
+    }
+
+    clearPendingTaskDeletions() {
+      this.writePendingTaskDeletions([]);
+      this.liveTaskDeletions.clear();
+      for (const taskId of [...this.undoWindowLocks.keys()]) this.releaseUndoWindowLock(taskId);
+    }
+
+    holdUndoWindowLock(taskId) {
+      const locks = this.host.navigator?.locks;
+      if (!locks || this.undoWindowLocks.has(taskId)) return;
+      let release;
+      const windowEnded = new Promise((resolve) => { release = resolve; });
+      this.undoWindowLocks.set(taskId, release);
+      Promise.resolve(locks.request(TASK_DELETION_UNDO_LOCK + taskId, () => windowEnded))
+        .catch((error) => this.reportMarkerFailure(error));
+    }
+
+    releaseUndoWindowLock(taskId) {
+      this.undoWindowLocks.get(taskId)?.();
+      this.undoWindowLocks.delete(taskId);
+    }
+
+    // Without Web Locks only the tab that wrote a marker replays it, after a
+    // reload: another tab cannot know that the undo window is closed.
+    claimEndedUndoWindow(record, replay) {
+      if (this.liveTaskDeletions.has(record.taskId)) return false;
+      const locks = this.host.navigator?.locks;
+      if (!locks) return record.tabId === this.use.tabId() ? replay() : false;
+      return locks.request(TASK_DELETION_UNDO_LOCK + record.taskId, { ifAvailable: true },
+        (lock) => (lock ? replay() : false));
+    }
+
+    // Replays the markers left by a page that died inside its undo window,
+    // the only way a marker outlives its page. Replay never rejects: startup
+    // does not wait on it.
+    async replayPendingTaskDeletions() {
+      // A workspace in sign-out recovery is being discarded with its markers.
+      // Under any other block each claimed marker is refused like a delete in
+      // view: its marker is cleared and, when the display shows the task, the
+      // refusal notice tells the person the task is still there, so it is
+      // never deleted silently later.
+      if (this.state.logoutRecoveryRequired) {
+        this.clearPendingTaskDeletions();
+        return 0;
+      }
+      let replayed = 0;
+      for (const record of this.pendingTaskDeletions()) {
+        try {
+          if (await this.claimEndedUndoWindow(record, () => this.replayPendingTaskDeletion(record))) replayed += 1;
+        } catch (error) {
+          this.reportMarkerFailure(error);
+        }
+      }
+      return replayed;
+    }
+
+    // Fail closed: a marker another page already settled, a marker of another
+    // workspace owner and a marker for a task that is not in the workspace are
+    // dropped without a notice. Only the task the marker names is ever
+    // deleted, and only deleteTask decides; under blocked controls it refuses
+    // with its notice. A blocked display that holds no tasks yet cannot show
+    // the task exists, so its marker is dropped silently: saying "could not be
+    // deleted" about a task that may already be gone would be false.
+    async replayPendingTaskDeletion(record) {
+      const pending = this.pendingTaskDeletions().some((item) => item.taskId === record.taskId);
+      const owned = pending && record.ownerId === this.workspaceOwnerId();
+      const task = owned ? this.state.tasks.find((item) => item.id === record.taskId) : null;
+      try {
+        if (!task) return false;
+        return await this.use.deleteTask(task) === true;
+      } finally {
+        this.clearPendingTaskDeletion(record.taskId);
+      }
+    }
+  }
+
   function create({ state, external, use }) {
-    const connection = new DatabaseConnection(state, external, use);
+    const deletionMarkers = new PendingTaskDeletionMarkers(state, external, use);
+    const connection = new DatabaseConnection(state, external, use, deletionMarkers);
     const localState = new LocalStateRepository(state, external, use, connection);
     const mutations = new MutationRepository(state, external, use, connection, localState);
-    return { ...connection.actions(), ...localState.actions(), ...mutations.actions() };
+    return { ...connection.actions(), ...localState.actions(), ...mutations.actions(), ...deletionMarkers.actions() };
   }
 
   return Object.freeze({

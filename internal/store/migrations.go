@@ -12,9 +12,13 @@ type immutableTable struct {
 	message string
 }
 
+var taskOperationsImmutable = immutableTable{
+	table: "task_operations", trigger: "task_operations_no_delete", message: "task operations are immutable",
+}
+
 var immutableTables = []immutableTable{
 	{table: "timer_commands", trigger: "timer_commands_no_delete", message: "timer commands are immutable"},
-	{table: "task_operations", trigger: "task_operations_no_delete", message: "task operations are immutable"},
+	taskOperationsImmutable,
 	{table: "duration_operations", trigger: "duration_operations_no_delete", message: "duration operations are immutable"},
 	{table: "auto_start_operations", trigger: "auto_start_operations_no_delete", message: "auto-start operations are immutable"},
 	{table: "selected_task_operations", trigger: "selected_task_operations_no_delete", message: "selected-task operations are immutable"},
@@ -128,13 +132,18 @@ func replaceImmutableDeleteTrigger(ctx context.Context, conn *sql.Conn, immutabl
 	if _, err := conn.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+immutable.trigger); err != nil {
 		return fmt.Errorf("replace immutable trigger %s: %w", immutable.trigger, err)
 	}
-	statement := fmt.Sprintf(`CREATE TRIGGER %s BEFORE DELETE ON %s
-		WHEN NOT EXISTS (SELECT 1 FROM maintenance_flags WHERE name = 'bootstrap_replace')
-		BEGIN SELECT RAISE(ABORT, '%s'); END`, immutable.trigger, immutable.table, immutable.message)
-	if _, err := conn.ExecContext(ctx, statement); err != nil {
+	if _, err := conn.ExecContext(ctx, immutableDeleteTriggerStatement(immutable)); err != nil {
 		return fmt.Errorf("create immutable trigger %s: %w", immutable.trigger, err)
 	}
 	return nil
+}
+
+// immutableDeleteTriggerStatement blocks deletes unless the bootstrap replace
+// maintenance flag is set.
+func immutableDeleteTriggerStatement(immutable immutableTable) string {
+	return fmt.Sprintf(`CREATE TRIGGER %s BEFORE DELETE ON %s
+		WHEN NOT EXISTS (SELECT 1 FROM maintenance_flags WHERE name = 'bootstrap_replace')
+		BEGIN SELECT RAISE(ABORT, '%s'); END`, immutable.trigger, immutable.table, immutable.message)
 }
 
 func commitMigration(ctx context.Context, conn *sql.Conn, action string) error {

@@ -51,7 +51,7 @@
     ],
     provides: [
       "restartBootstrapForCurrentAccount", "queueBootstrapPreparation", "loadBootstrapPreview",
-      "localBootstrapState", "persistBootstrapResolution", "handleResolutionLimit",
+      "persistBootstrapResolution", "handleResolutionLimit",
       "bootstrapConflicts", "bootstrapResponseState", "resetBootstrapState",
       "acceptBootstrapResponse", "validateBootstrapSubmission", "recoverInvalidBootstrapSubmission",
       "sendBootstrapResolution", "submitBootstrapResolution", "retryBootstrapResolution",
@@ -74,7 +74,7 @@
     actions() {
       return bindActions(this, [
         "restartBootstrapForCurrentAccount", "queueBootstrapPreparation", "loadBootstrapPreview",
-        "localBootstrapState", "persistBootstrapResolution", "handleResolutionLimit",
+        "persistBootstrapResolution", "handleResolutionLimit",
         "bootstrapConflicts", "bootstrapResponseState", "resetBootstrapState",
         "acceptBootstrapResponse", "validateBootstrapSubmission", "recoverInvalidBootstrapSubmission",
         "sendBootstrapResolution", "submitBootstrapResolution", "retryBootstrapResolution",
@@ -160,19 +160,6 @@
       context.assertCurrent();
       this.state.clockOffset = clockOffset;
       return payload;
-    }
-
-    localBootstrapState() {
-      const local = this.state.quarantinedLocal || this.state;
-      return {
-        history: local.history, timer: local.timer, tasks: local.tasks,
-        durationsMs: local.durationsMs, autoStartBreaks: local.autoStartBreaks,
-        selectedTaskId: local.selectedTaskId, defaultDurationsMs: this.use.defaultDurationsMs(),
-        commands: local.pending, taskOperations: local.pendingTaskOperations,
-        durationOperations: local.pendingDurationOperations,
-        autoStartOperations: local.pendingAutoStartOperations,
-        selectedTaskOperations: local.pendingSelectedTaskOperations
-      };
     }
 
     async persistBootstrapResolution(strategy, replaceExisting = false, context = this.use.captureAccountContext()) {
@@ -500,7 +487,7 @@
         if (!accountOperation.isCurrent(context)) return;
         if (this.handleResolutionLimit(error)) return;
         reportFrontendError(error, "bootstrap.choice.deferred");
-        this.use.showNotice(error.message || this.use.tr(
+        this.use.showNotice(this.use.tr(
           "notice.historyChoiceFailed", {}, "History choice could not be saved."
         ));
         this.state.bootstrapFocusTarget = this.elements.bootstrapConfirm;

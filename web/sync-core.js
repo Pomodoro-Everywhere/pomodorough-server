@@ -17,25 +17,25 @@
   const MAX_CLOCK_UNCERTAINTY_MS = 30_000;
   const LEGACY_EPOCH = new Date(0).toISOString();
 
-  function confirmationFor(strategy) {
+  function confirmationFor(strategy, tr = (_key, _values, fallback) => fallback) {
     switch (strategy) {
       case "replace_remote":
         return {
-          title: "Confirm Keep Local",
-          message: "Account timer, history, tasks, settings, and queued changes will be replaced by this device's data.",
-          confirmLabel: "Keep Local"
+          title: tr("bootstrap.keepLocal.confirmTitle", {}, "Confirm Keep Local"),
+          message: tr("bootstrap.keepLocal.confirmMessage", {}, "Account timer, history, tasks, settings, and queued changes will be replaced by this device's data."),
+          confirmLabel: tr("bootstrap.keepLocal", {}, "Keep Local")
         };
       case "keep_remote":
         return {
-          title: "Confirm Keep Remote",
-          message: "This device's timer, history, tasks, settings, and queued changes will be replaced by account data.",
-          confirmLabel: "Keep Remote"
+          title: tr("bootstrap.keepRemote.confirmTitle", {}, "Confirm Keep Remote"),
+          message: tr("bootstrap.keepRemote.confirmMessage", {}, "This device's timer, history, tasks, settings, and queued changes will be replaced by account data."),
+          confirmLabel: tr("bootstrap.keepRemote", {}, "Keep Remote")
         };
       case "merge":
         return {
-          title: "Confirm Keep Both",
-          message: "Queued local changes will be merged into account data. Conflicts or rejected changes are possible.",
-          confirmLabel: "Keep Both"
+          title: tr("bootstrap.keepBoth.confirmTitle", {}, "Confirm Keep Both"),
+          message: tr("bootstrap.keepBoth.confirmMessage", {}, "Queued local changes will be merged into account data. Conflicts or rejected changes are possible."),
+          confirmLabel: tr("bootstrap.keepBoth", {}, "Keep Both")
         };
       default:
         throw new Error(`Unknown bootstrap strategy: ${strategy}`);
@@ -263,7 +263,9 @@
       hlcWallMs: operation.hlcWallMs,
       hlcCounter: operation.hlcCounter
     };
-    if (operation.type === "upsert") result.title = operation.title;
+    // Upsert and rename carry a title: a rename's is the new title. A delete
+    // has none on the wire.
+    if (operation.type === "upsert" || operation.type === "rename") result.title = operation.title;
     return result;
   }
 
@@ -499,6 +501,14 @@
     }
   }
 
+  // A row stored before Core recorded elapsed time has no elapsedMs, and an
+  // explicit null means the same. Core decides what such a row ran; the client
+  // keeps it absent instead of writing a default.
+  function validHistoryElapsed(item) {
+    if (item.elapsedMs === undefined || item.elapsedMs === null) return true;
+    return validInteger(item.elapsedMs, 0, item.plannedDurationMs);
+  }
+
   function validateHistory(history) {
     if (!Array.isArray(history)) throw new Error("Bootstrap response omitted history.");
     const ids = new Set();
@@ -517,7 +527,8 @@
         || item.taskId !== undefined && typeof item.taskId !== "string"
         || item.commandId !== undefined && typeof item.commandId !== "string"
         || item.completedAt !== undefined && !validDateTime(item.completedAt)
-        || item.endedAt !== undefined && !validDateTime(item.endedAt)) {
+        || item.endedAt !== undefined && !validDateTime(item.endedAt)
+        || !validHistoryElapsed(item)) {
         throw new Error("Bootstrap response returned invalid history.");
       }
       ids.add(item.id);

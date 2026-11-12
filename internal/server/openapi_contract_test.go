@@ -238,6 +238,34 @@ func TestOpenAPIReferencesAndPreferenceContractsMatchServer(t *testing.T) {
 	}
 }
 
+// The spec's TaskOperationType enum must list exactly the operation types the
+// sync parser accepts, so a new wire type cannot ship undocumented.
+func TestOpenAPITaskOperationTypeEnumMatchesServer(t *testing.T) {
+	schemas := openAPIMap(t, openAPIMap(t, loadOpenAPIDocument(t), "components"), "schemas")
+	operationType := openAPIMap(t, schemas, "TaskOperationType")
+	enum, ok := operationType["enum"].([]any)
+	if !ok {
+		t.Fatalf("TaskOperationType enum = %#v", operationType["enum"])
+	}
+	documented := make([]string, 0, len(enum))
+	for _, value := range enum {
+		name, ok := value.(string)
+		if !ok {
+			t.Fatalf("TaskOperationType enum value = %#v", value)
+		}
+		documented = append(documented, name)
+	}
+	accepted := make([]string, 0, len(validTaskOperationTypes))
+	for name := range validTaskOperationTypes {
+		accepted = append(accepted, name)
+	}
+	sort.Strings(documented)
+	sort.Strings(accepted)
+	if !reflect.DeepEqual(documented, accepted) {
+		t.Fatalf("TaskOperationType enum = %v, server accepts %v", documented, accepted)
+	}
+}
+
 func loadOpenAPIDocument(t *testing.T) map[string]any {
 	t.Helper()
 	encoded, err := os.ReadFile(filepath.Join("..", "..", "web", "openapi.yaml"))

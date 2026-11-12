@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.54.0"
+	readinessCoreVersion   = "0.56.0"
 )
 
 type readinessAsset struct {
@@ -42,40 +42,40 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "7b1a0a79eca7c030ffa30a044ee8b0c44f9af0d3b52de84e32f51efcf4e899d0", false},
+	{"index.html", "a58a07be3cfdd6ad84a3aae165ca8dc5b4d8a576f5278f1e5658cf88778e4848", false},
 	{"privacy.html", "65ebff33710f5322d0e63d57de9f7ceec79e58ec5de964d587c3edce2fde6fa3", false},
 	{"landing.css", "b70b369419fbc6476cd5a04ff3155b320dd00bcb148bafc4948b2860675c9086", false},
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "69456dfbb496ce84df451daa89ddbca2933ccaa4d42c0d159ca689727713266f", false},
-	{"sentry-client.js", "383f010651e1fc010e25b7c6ba10a12a13f781acdb5bc44ec2be32b90c638d3f", false},
-	{"app.html", "58c341d3aa2296f675a6c87db31cb485960b55b0c80739e7d31bcf046aa7c741", false},
-	{"app.css", "dfb47e859a1432827950b7a335678e7597453b827c9d7a80cb767096ee75b055", false},
+	{"sentry-client.js", "caa4f9f8051ce925d45ab9cf326b7dabac3f5b7e4174e445e88bb7a5ed64c9a6", false},
+	{"app.html", "dca2f511973f0b6e831f6f898f995269534e6096cce402c76fc38c652493ba23", false},
+	{"app.css", "31e8b5ba9e032f59ebb6c034d69c5212f6971f3b09df70cd4d59f0b28c7259ee", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "5942df8a91d28d2001889068cd173b6956b17765a01c046627a9050de732f8f1", true},
-	{"sync-core.js", "cb2e919e9552db0e61ce5f29612d5fa112a8e8212a03ddca4771b70a51188a37", false},
+	{"pomodorough_core.wasm", "f57b411f47ef614e78ebb1ed4aea9ae58e0f1156b385c25222ee5c006837ebfd", true},
+	{"sync-core.js", "7a40c1c0e0a47cb944d2f22c586f6982dfba0d8745001f877cc246ecba0eda3f", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
 	{"workspace-core.js", "a3e0281f194b3f761ac0b2726352902a80f36c7a2b3e4ac63a011a5603d040bb", false},
 	{"workspace-transaction.js", "ef38040371afe408691d8e6d485dc233ed581a6eb53bdbafbfa037236c73d574", false},
-	{"sync-storage.js", "938ce6df5826b51046712c09a12ba054945f59ebd761e639ad61447504b5717a", false},
-	{"i18n.js", "6f87f80507be943e91dae7532010b1ac557199cd99e870a2e4bc49c0837b603d", false},
-	{"locales/en.json", "3d8e53020f170dc6424d45be207b918086b156aa1baf4bee96436bde18df9cc8", false},
-	{"locales/ar-XB.json", "208dc352c61d125d2468c36be3e81a2ce034c9fe76d05f5a4c2fd9449d1b2d54", false},
+	{"sync-storage.js", "547ee3c000c4d4d6ad68d2e4fbf9bdd571b3800bc4fd782a27abc2515589c3cb", false},
+	{"i18n.js", "76516dc512427576144bb4ab0fc0d2ffdfdb0568a18a102d00fe9922125a5c2a", false},
+	{"locales/en.json", "7543b1c312fb0cb08a4168be48900a08c5a5c31783a26e2939ecb6b4d3374c00", false},
+	{"locales/ar-XB.json", "e2cecfbaa8c85dab30df4beec641b8c97c3756b12d13d2ca11a3deac3e3ae4d9", false},
 	{"app-runtime.js", "8193392c8dd148a709935a3fa76f020fe84afcb93a6ae0aa5a195d978377b351", false},
 	{"account-operation.js", "10b7912df48b013b5ea0adc5dd71ac889f00f50a85c27039a15c6b065ec4ab33", false},
-	{"app-state.js", "fc54e8059f60e5a3a94b7b5b9ee1635d1fc53969dbb6ff1fcabeb6735f501314", false},
-	{"app-storage.js", "89ca293ead1ba74f9d581a1dce1a7a42b1a2e68148808d0af5c8e7d41b6751f9", false},
-	{"app-actions.js", "46486d92f01ef4e73a05a52a690ee7ee9f157304627a5bd8ba07fc72c01ecde5", false},
-	{"app-sync.js", "ee15aa51d20dcc986853f07783296f5b2f4ade3f669ab608eb4faeb5deaf641c", false},
-	{"app-bootstrap.js", "2c8c003279110b3dd7900b3962ed403118550bd1561f17996cf9b29532963e75", false},
-	{"app-session.js", "c33d4daeb7a44c744b479ece0255e890b4786e35cce2e230d80dfee4460f8755", false},
-	{"app-view.js", "85c644eb6f2c8774cef568f3e8182e51a92e9e42c874af5e9bd65c75057ae421", false},
-	{"app.js", "a2a72a30e9e619951fa0dfb12bff2328d4b5f73eb8ebfa0e973ce38255195763", false},
+	{"app-state.js", "c2a42a6075dda4d32594907371b51ef0fb6ca0805a1c3596ac8e8482be632874", false},
+	{"app-storage.js", "91be8bd0cf9ae3c1df37f3acd6d6f39cb6bdfaa3dd1e7f97716700908dce36f3", false},
+	{"app-actions.js", "28ccc7b9171c6a128ff0d0446d08114c9f05adfdff4650ab2f8b0a53831c6aab", false},
+	{"app-sync.js", "8346222772c36ecb4a1073ba6afac5907761a835b8f49fadeb9abc72a955c421", false},
+	{"app-bootstrap.js", "d7c24c75281b94325397c883295c0c1478cc29a234adf8a4a842ccf5b001b41d", false},
+	{"app-session.js", "2d5484382b1ca827de3c9fedb1407a5fa20f6747750e21e0ec0a29630f975b97", false},
+	{"app-view.js", "8f52235cfc9511db674ea45a2506d9271fd62c21eaeff57deff93a87eaec63b3", false},
+	{"app.js", "eb9d930d0f3367859135c842e6e6c5da31080513a7f44878e2610d99d1ddcfb9", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "4792ed72c33ad67155c66c7ad6b34d161a094286fc28f8c25c53ecc4c027ce45", false},
-	{"openapi.yaml", "a3e13e788039ac2de6288e10b3baff0a70b6c3e1f673654aadae44e8073895a8", false},
+	{"sw.js", "905f43fd271bdfc078794c95a5ae5fcce86cdf96e88dfa0045ce9f32b6627a27", false},
+	{"openapi.yaml", "5d3e3adf6421776e90b5e6bf39955cb16aa577097ae6b6568cf2d5ce5c563cc0", false},
 }
 
 func readinessKeyDigest(secret []byte) [sha256.Size]byte {

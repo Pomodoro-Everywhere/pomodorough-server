@@ -54,7 +54,6 @@ function viewFixture({ state: stateOverrides = {}, tr, plan = null } = {}) {
     confirmationFor: () => ({ title: "Confirm", message: "Apply?", confirmLabel: "Apply" })
   };
   const use = {
-    localBootstrapState: () => ({ history: [] }),
     logout: () => {}, deleteAccount: () => {}, retryPendingLogout: () => {},
     redirectToLogin: () => {}, closeRevisionStreamForIdentityChange: () => {},
     clearLocalData: async () => {},

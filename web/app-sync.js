@@ -47,7 +47,7 @@
       "reloadPersistedState", "database", "setInFlightDurationOperationIds", "stopCompletionAlert",
       "closeRevisionStream", "quarantineOwnerState", "render", "renderSyncStatus", "tr",
       "postMutation", "redirectToLogin", "queueSessionRevalidation", "restoreSessionAndSync",
-      "compareDurationOperations", "rebuildOptimisticState"
+      "settleDeferredSession", "compareDurationOperations", "rebuildOptimisticState"
     ],
     provides: [
       "mergeServerHlc", "responseClockOffset", "rejectedSyncAcknowledgements",
@@ -620,7 +620,12 @@
       this.host.clearTimeout(this.retryTimer);
       this.retryTimer = this.host.setTimeout(() => {
         if (!this.isCurrent(context)) return;
-        if (this.state.authenticated && this.state.csrfToken && !this.needsBootstrapResolution()) return this.syncNow(false, context);
+        if (this.state.authenticated && this.state.csrfToken && !this.needsBootstrapResolution()) {
+          // The session is known here, so a notice that said the account
+          // could not be reached is no longer true; sync reports its own state.
+          this.use.settleDeferredSession();
+          return this.syncNow(false, context);
+        }
         return this.use.restoreSessionAndSync(context);
       }, this.retryDelayMs);
       this.retryDelayMs = Math.min(this.retryDelayMs * 2, RETRY_MAX_MS);

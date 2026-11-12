@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -292,6 +291,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		r = r.WithContext(context.WithValue(r.Context(), responseDiagnosticsKey{}, s))
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		duration := time.Since(started)
@@ -311,7 +311,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				s.logger.Error("panic serving request", "error", recovered, "stack", string(debug.Stack()))
+				s.logger.Error("panic serving request", "cause", "panic")
 				reportPanicToErrorMonitoring(recovered, r)
 				if strings.HasPrefix(r.URL.Path, "/api/") {
 					writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
@@ -367,8 +367,12 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		slog.Default().Warn("encode JSON response", "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "encode JSON response")
+		var logger *slog.Logger
+		var metrics *requestMetrics
+		if server, ok := r.Context().Value(responseDiagnosticsKey{}).(*Server); ok {
+			logger, metrics = server.logger, server.metrics
+		}
+		recordRequestFailure(logger, metrics, r, "encode JSON response", err, slog.LevelWarn)
 	}
 }
 

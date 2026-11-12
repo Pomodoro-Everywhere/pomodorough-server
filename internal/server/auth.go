@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -846,14 +847,12 @@ func clearSessionCookies(w http.ResponseWriter) {
 }
 
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, operation string, err error) {
-	s.logger.Error(operation, "cause", monitoringCause(err))
-	reportInternalErrorToErrorMonitoring(err, r, operation)
+	recordRequestFailure(s.logger, s.metrics, r, operation, err, slog.LevelError)
 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }
 
 func (s *Server) internalAPIError(w http.ResponseWriter, r *http.Request, operation string, err error) {
-	s.logger.Error(operation, "cause", monitoringCause(err))
-	reportInternalErrorToErrorMonitoring(err, r, operation)
+	recordRequestFailure(s.logger, s.metrics, r, operation, err, slog.LevelError)
 	echoIdempotencyKey(w, r)
 	writeAPIError(w, r, http.StatusInternalServerError, "internal server error")
 }

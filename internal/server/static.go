@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -32,8 +33,7 @@ var entrypointAttributeEscaper = strings.NewReplacer(
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	file, info, err := s.openWebFile("openapi.yaml")
 	if err != nil {
-		s.logger.Error("open OpenAPI specification", "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "open OpenAPI specification")
+		recordRequestFailure(s.logger, s.metrics, r, "open OpenAPI specification", err, slog.LevelError)
 		http.Error(w, "OpenAPI specification unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -101,8 +101,7 @@ func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, re
 		if err == nil {
 			return file, info, "app.html", true
 		}
-		s.logger.Error("open SPA entrypoint", "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "open SPA entrypoint")
+		recordRequestFailure(s.logger, s.metrics, r, "open SPA entrypoint", err, slog.LevelError)
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 		return nil, nil, "", false
 	}
@@ -110,8 +109,7 @@ func (s *Server) openRequestedWebFile(w http.ResponseWriter, r *http.Request, re
 		return file, info, relative, true
 	}
 	if entrypoint {
-		s.logger.Error("open web entrypoint", "path", relative, "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "open web entrypoint")
+		recordRequestFailure(s.logger, s.metrics, r, "open web entrypoint", err, slog.LevelError)
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 	} else {
 		http.NotFound(w, r)
@@ -129,8 +127,7 @@ func isServedEntrypoint(relative string) bool {
 func (s *Server) serveEntrypoint(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, relative string) {
 	encoded, err := io.ReadAll(file)
 	if err != nil {
-		s.logger.Error("read web entrypoint", "path", relative, "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "read web entrypoint")
+		recordRequestFailure(s.logger, s.metrics, r, "read web entrypoint", err, slog.LevelError)
 		http.Error(w, "Application unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -186,8 +183,7 @@ func (s *Server) authenticateWeb(r *http.Request) (principal, error) {
 	}
 	identity, err := s.authenticate(r)
 	if err != nil && !isUnauthorized(err) {
-		s.logger.Error("authenticate web request", "error", err)
-		reportInternalErrorToErrorMonitoring(err, r, "authenticate web request")
+		recordRequestFailure(s.logger, s.metrics, r, "authenticate web request", err, slog.LevelError)
 	}
 	return identity, err
 }

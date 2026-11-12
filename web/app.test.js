@@ -1370,7 +1370,7 @@ test("optimistic reducer matches canonical convergence corpus in every arrival o
   const data = fs.readFileSync(fixturePath);
   assert.equal(
     crypto.createHash("sha256").update(data).digest("hex"),
-    "51c357d8fd63e7200c1316ef36fc45821bea9ac2fbe11f255832fa21110ea104"
+    "60ee91bed591a89fb728e6d252cfc47a202ca87cac3adc7f4c4bfab3de7038f3"
   );
   const fixture = JSON.parse(data);
   assert.equal(fixture.version, 2);
@@ -2425,6 +2425,7 @@ function normalizeFixtureProjection(timer, history, epochMs) {
         status: item.status,
         phase: item.phase,
         durationMs: item.plannedDurationMs,
+        elapsedMs: item.elapsedMs,
         endedMs: Date.parse(item.endedAt) - epochMs
       };
       if (item.commandId) normalized.commandId = item.commandId;

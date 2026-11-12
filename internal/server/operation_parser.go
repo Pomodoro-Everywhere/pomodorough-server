@@ -188,13 +188,39 @@ func parseTaskOperations(ctx context.Context, deviceID string, inputs []syncTask
 			}
 			title = identity.Title
 		}
+		if input.Type == "rename" {
+			title = input.Title
+		}
 		operation, err := parseTaskOperation(deviceID, input, title, now)
 		if err != nil {
 			return nil, err
 		}
 		operations = append(operations, operation)
 	}
+	if err := checkTaskRenames(ctx, operations); err != nil {
+		return nil, err
+	}
 	return operations, nil
+}
+
+// checkTaskRenames lets Core judge each rename alone: the parser checks only
+// that a rename carries a title, and Core decides whether that title is
+// normalized and moves the task to a different identity.
+func checkTaskRenames(ctx context.Context, operations []task.Operation) error {
+	renames := make([]task.Operation, 0)
+	for _, operation := range operations {
+		if operation.Type == "rename" {
+			renames = append(renames, operation)
+		}
+	}
+	err := task.CheckSharedRenames(ctx, renames)
+	if task.IsSharedIdentityRuntimeError(err) {
+		return &requestRuntimeError{cause: err}
+	}
+	if err != nil {
+		return fmt.Errorf("invalid task rename")
+	}
+	return nil
 }
 
 func validateTaskOperationInputs(deviceID string, inputs []syncTaskOperationJSON) ([]string, error) {
@@ -214,9 +240,14 @@ func validateTaskOperationInputs(deviceID string, inputs []syncTaskOperationJSON
 		if _, valid := validTaskOperationTypes[input.Type]; !valid {
 			return nil, fmt.Errorf("invalid task operation type")
 		}
-		if input.Type == "upsert" {
+		switch {
+		case input.Type == "upsert":
 			titles = append(titles, input.Title)
-		} else if input.Title != "" {
+		case input.Type == "rename" && input.Title == "":
+			// The request type cannot tell a missing title from an empty
+			// one; both are shape errors before Core sees the rename.
+			return nil, fmt.Errorf("rename task operation has no title")
+		case input.Type == "delete" && input.Title != "":
 			return nil, fmt.Errorf("delete task operation has title")
 		}
 	}

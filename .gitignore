@@ -76,4 +76,5 @@ Thumbs.db
 build/
 .pytest_cache/
 .venv/
-/scratch/
+/scratch/*
+!/scratch/go.mod
