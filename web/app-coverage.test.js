@@ -64,8 +64,10 @@ test("action persistence serializes writes, updates queues, and unlocks after fa
   assert.equal(client.state.actionLocked, false);
   // UX round 2 (B4): a command made while the lock is held waits for it
   // instead of being dropped. Pause without a running timer is then refused,
-  // because core no longer offers it.
-  client.external.host.setTimeout = (callback, delay) => { const handle = setTimeout(callback, delay); handle.unref(); return handle; };
+  // because core no longer offers it. The wait timer stays referenced: on
+  // Node 22 an unreferenced timer is the only pending work, so the event loop
+  // ends and the runner cancels the rest of the file.
+  client.external.host.setTimeout = (callback, delay) => setTimeout(callback, delay);
   client.state.actionLocked = true;
   const waiting = client.use.issueCommand("pause");
   client.state.actionLocked = false;

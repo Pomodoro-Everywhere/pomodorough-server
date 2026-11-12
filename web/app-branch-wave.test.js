@@ -428,8 +428,10 @@ test("durable action mutations cover writes, no-ops, and translated failures", a
   await workspaceFixture.startFocus(client);
   assert.equal(await client.use.issueCommand("pause"), true);
   // UX round 2 (B4): changes made while the lock is held wait for it and run
-  // in order once it is released, instead of being dropped.
-  client.external.host.setTimeout = (callback, delay) => { const handle = setTimeout(callback, delay); handle.unref(); return handle; };
+  // in order once it is released, instead of being dropped. The wait timer
+  // stays referenced: on Node 22 an unreferenced timer is the only pending
+  // work, so the event loop ends and the runner cancels the rest of the file.
+  client.external.host.setTimeout = (callback, delay) => setTimeout(callback, delay);
   client.state.actionLocked = true;
   const deleting = client.use.issueTaskOperation("delete", task);
   const resuming = client.use.issueCommand("resume");

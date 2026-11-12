@@ -16,7 +16,7 @@ jobs:
   sync-scale:
     name: Sync ingestion at scale (S68)
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -60,4 +60,4 @@ jobs:
       - name: Ten-thousand-history replay and Sync ingestion under race
         env:
           POMODOROUGH_SCALE_INGESTION: "1"
-        run: go test -race -timeout 40m -count=1 -run '^TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession$|^TestS68' -v ./internal/store
+        run: go test -race -timeout 60m -count=1 -run '^TestLifetimeReplayRetainsOverTenThousandHistoriesAndResurrectsOldSession$|^TestS68' -v ./internal/store

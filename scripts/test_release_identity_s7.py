@@ -236,7 +236,7 @@ def gate_errors(workflow: str) -> list[str]:
     race = job_text(workflow, "verify-race")
     if "go test -race" in fast:
         errors.append("verify-fast contains race")
-    if "go test -race -timeout 20m ./..." not in race:
+    if "go test -race -timeout 45m ./..." not in race:
         errors.append("verify-race missing race")
     if "go test ./..." not in fast:
         errors.append("verify-fast missing fast tests")

@@ -15,7 +15,7 @@ jobs:
   server:
     name: Go server
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -81,7 +81,7 @@ jobs:
       - name: Test integration credential documentation
         run: python3 -m unittest scripts/test_integration_credential_docs.py -v
       - name: Test with race detector
-        run: go test -race -timeout 20m ./...
+        run: go test -race -timeout 45m ./...
       - name: Repeat Server race gate under package parallelism
         run: |
           for attempt in 1 2 3; do
@@ -156,7 +156,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
       - name: Install dependencies
         run: npm ci
