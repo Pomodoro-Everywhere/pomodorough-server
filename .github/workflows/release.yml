@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Pomodoro-Everywhere/pomodorough-core
-          ref: 78888ca92c4866fc3ec6928ba52022eab9e13371
+          ref: a5275096659eb31fc1eeed8666a7a9914a9cfdd8
           path: shared-core
           persist-credentials: false
       - name: Restore Rust toolchain and cargo cache
@@ -65,9 +65,9 @@ jobs:
           python3 shared-core/scripts/verify_wasm_artifact.py "$rebuilt"
           python3 shared-core/scripts/verify_wasm_artifact.py \
             internal/sharedcore/pomodorough_core.wasm \
-            --sha256 2699e1eaad02fa6819fdd9ef5452b51965a046c326543f4feca9eb2ecfe07789
+            --sha256 d8d9cb553aa719bf1c7fe6ece1dc7fee28afc23ddeebc040e2a76d45938a8a75
           python3 scripts/verify_shared_core_provenance.py \
-            --sha256 2699e1eaad02fa6819fdd9ef5452b51965a046c326543f4feca9eb2ecfe07789 \
+            --sha256 d8d9cb553aa719bf1c7fe6ece1dc7fee28afc23ddeebc040e2a76d45938a8a75 \
             "$rebuilt" \
             internal/sharedcore/pomodorough_core.wasm \
             web/pomodorough_core.wasm

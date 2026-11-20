@@ -1,13 +1,13 @@
 "use strict";
 
-importScripts("/shared-core-metadata.js?v=7");
+importScripts("/shared-core-metadata.js?v=8");
 
 const CORE_METADATA = self.PomodoroughSharedCoreMetadata;
 if (!CORE_METADATA) throw new Error("Shared core metadata is unavailable");
 // Service-worker fetch failures stay silent by design: the worker has no
 // document/DSN context and must never phone error monitoring itself. Pages
 // report through the frontend error wrapper; offline fallbacks below serve cache.
-const CACHE_NAME = `pomodorough-shell-v77-${CORE_METADATA.cacheVersion}`;
+const CACHE_NAME = `pomodorough-shell-v78-${CORE_METADATA.cacheVersion}`;
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
@@ -18,7 +18,7 @@ const SHELL = [
   "/landing.js?v=2",
   "/app",
   "/app.css?v=24",
-  "/shared-core-metadata.js?v=7",
+  "/shared-core-metadata.js?v=8",
   "/shared-core.js?v=7",
   CORE_METADATA.wasmURL,
   "/sync-core.js?v=30",

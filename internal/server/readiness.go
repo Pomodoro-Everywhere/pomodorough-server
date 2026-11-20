@@ -20,7 +20,7 @@ import (
 const (
 	readinessCheckTimeout  = 2 * time.Second
 	readinessAssetMaxBytes = 4 << 20
-	readinessCoreVersion   = "0.57.0"
+	readinessCoreVersion   = "0.57.1"
 )
 
 type readinessAsset struct {
@@ -42,7 +42,7 @@ func (failure *readinessFailure) Error() string { return failure.err.Error() }
 func (failure *readinessFailure) Unwrap() error { return failure.err }
 
 var readinessAssets = []readinessAsset{
-	{"index.html", "36247f56654cc54f8cc4aa11a8feb9c173258947bbe339fae79637cd37bcbe3e", false},
+	{"index.html", "96e83b61e0bc3a2803ffb8e3ed6737c5968da7bb92a4bf58bb49875cf674d18b", false},
 	{"privacy.html", "3e376d370a2c09a3ef8a7f46f444304722b1b27e162fd01411692923994ff89c", false},
 	{"signed-out.html", "ff8bb3060db498e79c0dee7cd86b5f770882a5064b39d30e9dc5f9e70875fb5c", false},
 	{"not-found.html", "7dd5ed06fad55a63c490420e6931b357f1b8a4c49217a4b6904d0ab6e578df63", false},
@@ -50,11 +50,11 @@ var readinessAssets = []readinessAsset{
 	{"platform-selector.js", "e53063090e5bbcdb8aa771c251c8226a023414154e1f4b22c2d4f510188e3e7d", false},
 	{"landing.js", "ab72f95f879d25b6a45dc6c1f4e8fe1d9091ce3bd42ff272b233fa12a41ab3dc", false},
 	{"sentry-client.js", "caa4f9f8051ce925d45ab9cf326b7dabac3f5b7e4174e445e88bb7a5ed64c9a6", false},
-	{"app.html", "1550f72e96160971743a13f931f416b9be70a874300679af0880e4eddfda797a", false},
+	{"app.html", "bf5eb71ddfc08a6313b01706314bd788a5ea999ee9e7fdf54a7c389ec2885a3e", false},
 	{"app.css", "ce40e9be6483fd8e3c31d40c7669f8e6151b9e72176312a720584f06bac6169a", false},
 	{"shared-core-metadata.js", readinessSharedCoreMetadataDigest, true},
 	{"shared-core.js", "1217749ded7521a9be4a3e635d6b10fab32fca48dd5a033ffc0b5e255ece7e50", false},
-	{"pomodorough_core.wasm", "2699e1eaad02fa6819fdd9ef5452b51965a046c326543f4feca9eb2ecfe07789", true},
+	{"pomodorough_core.wasm", "d8d9cb553aa719bf1c7fe6ece1dc7fee28afc23ddeebc040e2a76d45938a8a75", true},
 	{"sync-core.js", "b4d49da7537e0858d5e93964f7121324cf0608332bcf5f4505fb382dcf24f3d4", false},
 	{"sync-authority.js", "56c505663ec47ad1980976b65164da73c7d127be0272dc55bb4d35127af515d4", false},
 	{"sync-storage-uuid.js", "be52474ddd6ccb52b9e67d56c4a92da49e42e178eb24e19838fac2a0209a4b51", false},
@@ -76,7 +76,7 @@ var readinessAssets = []readinessAsset{
 	{"app.js", "66aa47641a813fb683ae85dee7cfc90b25810b1f0d0f6a7069866eb61d1e438d", false},
 	{"manifest.webmanifest", "56212a7cac1484e2bf9f48cfef67113577290a15dcb3ad082c7eedec6993cef2", false},
 	{"icon.svg", "d04344ef9affa400fb6bbf287599dc479d14bdd6dfc907a80342d9b29be0333a", false},
-	{"sw.js", "bf3d462278bf1fc55c42393aa4e13492b8ed6a5665330a6369a00db03ac0d7ed", false},
+	{"sw.js", "73e7e1bb190a08fe171105cf3f831c9abcf0b75493dc35184fc805041703a575", false},
 	{"openapi.yaml", "71cbe5772ddb5c990a94c7fec556a20d35f2f99969d2c4f7ab6e1eaaf4b59284", false},
 }
 

@@ -39,7 +39,7 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
     Promise,
     fetch: () => Promise.reject(new Error("Unexpected fetch.")),
     importScripts(url) {
-      assert.equal(url, "/shared-core-metadata.js?v=7");
+      assert.equal(url, "/shared-core-metadata.js?v=8");
       context.self.PomodoroughSharedCoreMetadata = sharedCoreMetadata;
     },
     caches: {
@@ -108,9 +108,9 @@ test("shell entry assets use cache-busting version URLs", () => {
   }
   assert.match(appSource, /\/app\.js\?v=48/);
   assert.match(workerSource, /\/app\.js\?v=48/);
-  assert.match(appSource, /\/shared-core-metadata\.js\?v=7/);
+  assert.match(appSource, /\/shared-core-metadata\.js\?v=8/);
   assert.match(appSource, /\/shared-core\.js\?v=7/);
-  assert.match(workerSource, /\/shared-core-metadata\.js\?v=7/);
+  assert.match(workerSource, /\/shared-core-metadata\.js\?v=8/);
   assert.match(workerSource, /\/shared-core\.js\?v=7/);
   assert.doesNotMatch(workerSource, /aec9688661f39b92f21de8a26231419f0a2839ab7629bd158af5a46d49632ddf/);
   assert.match(appScriptSource, /sharedCoreHost\.SharedCore\.load/);
@@ -138,7 +138,7 @@ test("shell entry assets use cache-busting version URLs", () => {
     assert.match(appSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v77-/);
+  assert.match(workerSource, /pomodorough-shell-v78-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);

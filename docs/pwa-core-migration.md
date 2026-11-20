@@ -1,12 +1,12 @@
 # PWA Core migration status
 
-Updated 2026-11-20. The PWA embeds official Core 0.57.0. Workspace decisions, legacy preference and dependency migration, completion lifecycle, and ownership release use Core planners. This inventory replaces the historical Core 0.46 snapshot; it is not independent release acceptance.
+Updated 2026-11-21. The PWA embeds official Core 0.57.1. Workspace decisions, legacy preference and dependency migration, completion lifecycle, and ownership release use Core planners. This inventory replaces the historical Core 0.46 snapshot; it is not independent release acceptance.
 
 ## Embedded artifact
 
-- Release: `v0.57.0` from `Pomodoro-Everywhere/pomodorough-core`.
-- Source commit: `78888ca92c4866fc3ec6928ba52022eab9e13371`.
-- Both `web/pomodorough_core.wasm` and `internal/sharedcore/pomodorough_core.wasm` have SHA-256 `2699e1eaad02fa6819fdd9ef5452b51965a046c326543f4feca9eb2ecfe07789`.
+- Release: `v0.57.1` from `Pomodoro-Everywhere/pomodorough-core`.
+- Source commit: `a5275096659eb31fc1eeed8666a7a9914a9cfdd8`.
+- Both `web/pomodorough_core.wasm` and `internal/sharedcore/pomodorough_core.wasm` have SHA-256 `d8d9cb553aa719bf1c7fe6ece1dc7fee28afc23ddeebc040e2a76d45938a8a75`.
 - `internal/sharedcore/CORE_COMMIT`, generated browser metadata, and readiness provenance identify the bundled artifact. Run `python3 scripts/generate_shared_core_metadata.py --check` and the configured provenance checks when changing it.
 
 Do not substitute a local build or update provenance independently of the artifact. The application version and Core version remain separate contracts.
