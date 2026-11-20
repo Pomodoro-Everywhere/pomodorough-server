@@ -69,8 +69,8 @@ test("an early Finish shows its real time in the history row and the task total"
   assert.equal(model.cadence.completedFocusTodayElapsedMs, SEVEN_MINUTES_MS);
   assert.deepEqual(model.tasks.completedFocusTodayByTask[taskId], { count: 1, elapsedMs: SEVEN_MINUTES_MS });
   const stats = [...rowFor(current.elements, taskId).querySelectorAll(".task-stat")];
-  assert.deepEqual(stats.map((cell) => cell.textContent), ["1", "7 min"]);
-  assert.equal(stats[1].getAttribute("aria-label"), "7 min spent today");
+  assert.deepEqual(stats.map((cell) => cell.querySelector(".task-stat-value").textContent), ["1", "7 min"]);
+  assert.equal(stats[1].querySelector(".visually-hidden").textContent, "7 min spent today");
 });
 
 
@@ -91,7 +91,7 @@ async function focusRunFor(t, current, startMs, minutes) {
 }
 
 function taskStats(current, taskId) {
-  return [...rowFor(current.elements, taskId).querySelectorAll(".task-stat")].map((cell) => cell.textContent);
+  return [...rowFor(current.elements, taskId).querySelectorAll(".task-stat-value")].map((cell) => cell.textContent);
 }
 
 test("the Tasks screen shows each task's real time today from Core's elapsedMs", async (t) => {

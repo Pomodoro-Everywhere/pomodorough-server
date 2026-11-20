@@ -61,10 +61,17 @@ func TestHLCStreamIncludesMaximumFromEveryDomainAndRequest(t *testing.T) {
 			reduction.commands = append(padding, reduction.commands...)
 			clocks := domainClockPointers(&reduction, &request)
 			*clocks[domain][0], *clocks[domain][1] = 999, 77
-			head, err := serverHLCFromReductionWithCore(context.Background(), callAccountSharedCore,
+			heads, err := responseHLCHeadsWithCore(context.Background(), callAccountSharedCore,
 				reduction, time.UnixMilli(100), &request)
-			if err != nil || head != (coreHLC{WallMs: 999, Counter: 77}) {
-				t.Fatalf("domain %d: head=%#v, err=%v", domain, head, err)
+			if err != nil || heads.server != (coreHLC{WallMs: 999, Counter: 77}) {
+				t.Fatalf("domain %d: heads=%#v, err=%v", domain, heads, err)
+			}
+			wantCanonical := coreHLC{WallMs: 999, Counter: 77}
+			if domain >= 5 {
+				wantCanonical = coreHLC{WallMs: 105, Counter: 5}
+			}
+			if heads.canonical != wantCanonical {
+				t.Fatalf("domain %d: canonical=%#v, want %#v", domain, heads.canonical, wantCanonical)
 			}
 		})
 	}

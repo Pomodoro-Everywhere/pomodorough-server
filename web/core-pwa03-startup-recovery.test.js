@@ -410,6 +410,32 @@ test("CORE-PWA03 unavailable revocation after Core retry retains visible marker 
   assert.deepEqual(after.pendingDurations, []);
 });
 
+// PWA-06: the dialog covers the page notice, so the retry reports progress
+// and an unfinished outcome in the dialog's own status line.
+test("PWA-06 unavailable revocation retry says busy then why recovery is unfinished inside the dialog", async (t) => {
+  const current = await prepared(t);
+  await current.window.PomodoroughApp.initialize();
+  const status = current.window.document.getElementById("logoutRecoveryStatus");
+  assert.equal(status.closest("#logoutRecovery") !== null, true);
+  assert.equal(status.getAttribute("role"), "status");
+  current.control.status = 503;
+  current.online(true);
+  current.window.document.getElementById("logoutRecoveryRetry").dispatchEvent(new current.window.MouseEvent("click", { bubbles: true }));
+  assert.equal(status.hidden, false);
+  assert.equal(status.textContent, "Retrying sign-out cleanup…");
+  await settle(current);
+  assert.equal(current.state.logoutRecoveryRequired, true);
+  assert.equal(status.hidden, false);
+  assert.equal(status.dataset.state, "failed");
+  assert.equal(status.textContent,
+    "Sign-out cleanup did not finish. Check the connection, or sign in to recover, then try again.");
+  current.online(false);
+  current.window.document.getElementById("logoutRecoveryRetry").dispatchEvent(new current.window.MouseEvent("click", { bubbles: true }));
+  await settle(current);
+  assert.equal(current.state.logoutRecoveryRequired, true);
+  assert.equal(status.textContent, "Sign-out cleanup needs a connection. Connect, then try again.");
+});
+
 async function replace401Workspace(current, t, closeAgain = false) {
   const previous = current.use.database();
   if (previous) t.after(() => previous.close());

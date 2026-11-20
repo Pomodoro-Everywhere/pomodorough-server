@@ -14,24 +14,33 @@ import (
 func TestServerHLCDelegatesAllObservationsToSharedCore(t *testing.T) {
 	now := time.UnixMilli(100).UTC()
 	reduction, request := completeHLCInputs()
+	reduction.canonicalFloor = coreHLC{WallMs: 90, Counter: 4}
+	wantInputs := []coreHLCHeadInput{
+		{PhysicalNowMs: 0, Observed: append([]coreHLC{{WallMs: 90, Counter: 4}}, expectedHLCObservations()[:5]...)},
+		{PhysicalNowMs: 100, Observed: append([]coreHLC{{WallMs: 105, Counter: 5}}, expectedHLCObservations()[5:]...)},
+	}
+	outputs := []string{`{"ok":true,"value":{"wallMs":105,"counter":5}}`, `{"ok":true,"value":{"wallMs":110,"counter":9}}`}
+	calls := 0
 	call := func(_ context.Context, operation string, input, output any) error {
-		if operation != "hlc.head.v1" {
-			t.Fatalf("operation = %q", operation)
+		if operation != "hlc.head.v1" || calls >= len(wantInputs) {
+			t.Fatalf("operation = %q, call %d", operation, calls)
 		}
-		got := input.(coreHLCHeadInput)
-		want := coreHLCHeadInput{PhysicalNowMs: 100, Observed: expectedHLCObservations()}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("input = %#v, want %#v", got, want)
+		if got := input.(coreHLCHeadInput); !reflect.DeepEqual(got, wantInputs[calls]) {
+			t.Fatalf("call %d input = %#v, want %#v", calls, got, wantInputs[calls])
 		}
-		return decodeCoreEnvelope(operation, []byte(`{"ok":true,"value":{"wallMs":110,"counter":9}}`), output)
+		calls++
+		return decodeCoreEnvelope(operation, []byte(outputs[calls-1]), output)
 	}
 
 	result, err := resultFromReductionWithCore(context.Background(), call, reduction, 7, now, &request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ServerHLCWallMs != 110 || result.ServerHLCCounter != 9 {
-		t.Fatalf("server HLC = (%d,%d)", result.ServerHLCWallMs, result.ServerHLCCounter)
+	if result.ServerHLCWallMs != 110 || result.ServerHLCCounter != 9 || calls != 2 {
+		t.Fatalf("server HLC = (%d,%d) after %d calls", result.ServerHLCWallMs, result.ServerHLCCounter, calls)
+	}
+	if result.CanonicalHLCWallMs != 105 || result.CanonicalHLCCounter != 5 {
+		t.Fatalf("canonical HLC = (%d,%d)", result.CanonicalHLCWallMs, result.CanonicalHLCCounter)
 	}
 }
 

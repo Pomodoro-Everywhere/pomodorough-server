@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	schemaVersion   = 8
+	schemaVersion   = 9
 	MaxSafeRevision = int64(9_007_199_254_740_991)
 )
 

@@ -96,7 +96,7 @@ function todayOn(current, taskId) {
 }
 
 function statsOn(current, taskId) {
-  return [...rowFor(current.elements, taskId).querySelectorAll(".task-stat")].map((cell) => cell.textContent);
+  return [...rowFor(current.elements, taskId).querySelectorAll(".task-stat-value")].map((cell) => cell.textContent);
 }
 
 // C04: Core 0.56.0 carries finished history to the new task identity, so a
@@ -254,18 +254,49 @@ test("a rename draft with edge spaces is sent as typed", async (t) => {
   assert.deepEqual(current.requests.map((request) => request.intent), [{ kind: "renameTask", taskId: alpha.id, title: " Alpha " }]);
 });
 
-test("blur commits a changed draft and cancels an unchanged one", async (t) => {
+// PWA-19 (formerly "blur commits a changed draft"): a stray tap must not
+// save a half-typed name, so blur leaves the editor and its draft open.
+test("blur keeps the editor and its draft without sending a rename", async (t) => {
   const current = await renameFixture(t);
-  const [alpha, beta] = current.state.tasks;
-  let input = beginRename(current, alpha);
+  const [alpha] = current.state.tasks;
+  const input = beginRename(current, alpha);
+  type(current, input, "Alpha half");
   input.dispatchEvent(new current.window.FocusEvent("blur"));
   await settle();
   assert.equal(current.renames.length, 0);
-  assert.ok(rowFor(current.elements, alpha.id).querySelector("strong.task-name"));
+  const editor = rowFor(current.elements, alpha.id).querySelector(".task-rename-input");
+  assert.ok(editor, "the editor stays open");
+  assert.equal(editor.value, "Alpha half");
+});
+
+test("PWA-19 the editing row shows Save and Cancel in place of Rename and Delete", async (t) => {
+  const current = await renameFixture(t);
+  const [alpha, beta] = current.state.tasks;
+  beginRename(current, alpha);
+  const row = rowFor(current.elements, alpha.id);
+  const actions = [...row.querySelector(".task-actions").children];
+  assert.deepEqual(actions.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")]), [
+    ["task-rename-save", "Save", "Save the new name for Alpha"],
+    ["task-rename-cancel", "Cancel", "Keep the name Alpha"],
+  ]);
+  assert.ok(actions.every((button) => button.type === "button"));
+  assert.ok(rowFor(current.elements, beta.id).querySelector(".task-rename"), "other rows keep Rename");
+});
+
+test("PWA-19 Save sends the typed title and Cancel keeps the old one", async (t) => {
+  const current = await renameFixture(t);
+  const [alpha, beta] = current.state.tasks;
+  let input = beginRename(current, alpha);
+  type(current, input, "Alpha two");
+  rowFor(current.elements, alpha.id).querySelector(".task-rename-cancel").click();
+  await settle();
+  assert.equal(current.renames.length, 0);
+  assert.equal(rowFor(current.elements, alpha.id).querySelector("strong.task-name").textContent, "Alpha");
+  assert.equal(current.document.activeElement, rowFor(current.elements, alpha.id).querySelector(".task-rename"));
   input = beginRename(current, beta);
   type(current, input, "Beta two");
-  input.dispatchEvent(new current.window.FocusEvent("blur"));
-  await waitFor(() => current.renames.length === 1, "rename intent after blur");
+  rowFor(current.elements, beta.id).querySelector(".task-rename-save").click();
+  await waitFor(() => current.renames.length === 1, "rename intent after Save");
   await current.renames[0].result;
   assert.deepEqual(current.requests.map((request) => request.intent), [{ kind: "renameTask", taskId: beta.id, title: "Beta two" }]);
 });

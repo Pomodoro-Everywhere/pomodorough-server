@@ -133,7 +133,11 @@ test("R43-S06 history filters and accessible task summaries survive focus restor
   f.view.renderTasks();
   assert.equal(f.document.activeElement, f.buttons()[1]);
   const stats = [...f.elements.taskList.children[1].querySelectorAll(".task-stat")];
-  assert.deepEqual(stats.map((el) => el.textContent), ["1", "25 min"]);
-  assert.deepEqual(stats.map((el) => el.getAttribute("aria-label")),
+  assert.deepEqual(stats.map((el) => el.querySelector(".task-stat-value").textContent), ["1", "25 min"]);
+  // PWA-14: a role-less span's aria-label is often skipped, so the sentence
+  // is hidden text and the bare number is hidden from screen readers.
+  assert.deepEqual(stats.map((el) => el.querySelector(".visually-hidden").textContent),
     ["1 finished pomodoros today", "25 min spent today"]);
+  assert.deepEqual(stats.map((el) => el.getAttribute("aria-label")), [null, null]);
+  assert.deepEqual(stats.map((el) => el.querySelector(".task-stat-value").getAttribute("aria-hidden")), ["true", "true"]);
 });

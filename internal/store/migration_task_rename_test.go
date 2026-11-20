@@ -164,8 +164,8 @@ func TestMigrateVersionSevenWidensTaskOperationTypes(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE '%_v8'`).Scan(&leftovers); err != nil || leftovers != 0 {
 		t.Fatalf("v8 rebuild objects left = %d, %v", leftovers, err)
 	}
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version != 8 {
-		t.Fatalf("schema version = %d, %v; want 8", version, err)
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("schema version = %d, %v; want %d", version, err, schemaVersion)
 	}
 }
 

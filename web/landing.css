@@ -208,6 +208,20 @@ main {
   padding: clamp(4rem, 8vw, 8rem) clamp(1rem, 5vw, 5rem);
 }
 
+/* Signed-out and not-found pages hold only the copy column. */
+.hero-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.hero-single .primary-actions {
+  padding-inline: 0;
+}
+
+/* Narrow screens turn .hero-copy into two columns; keep this copy stacked. */
+.hero-single .hero-copy > * {
+  grid-column: 1 / -1;
+}
+
 .hero::before {
   content: "25";
   position: absolute;
@@ -542,11 +556,19 @@ footer {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
+  align-items: center;
   gap: 1.5rem;
   padding: 1.4rem max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-right, 0px)) calc(1.4rem + env(safe-area-inset-bottom, 0px)) max(clamp(1rem, 5vw, 5rem), env(safe-area-inset-left, 0px));
   color: var(--track);
   background: var(--ticket);
   font-size: 0.62rem;
+}
+
+/* PWA-10: a footer link is a touch target, so it gets the 44 px minimum. */
+footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
 }
 
 @keyframes signal-pulse {
@@ -643,6 +665,7 @@ footer {
 
   footer {
     flex-direction: column;
+    align-items: flex-start;
   }
 }
 

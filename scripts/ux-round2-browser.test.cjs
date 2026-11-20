@@ -342,6 +342,16 @@ async function shownNotice(page, label) {
   return state;
 }
 
+// The top of the timer dock while it overlays the bottom edge, else null.
+function shownDockTop(page) {
+  return page.evaluate(() => {
+    const dock = document.getElementById("timerDock");
+    const overlays = !dock.hidden && !dock.classList.contains("timer-dock-inline")
+      && getComputedStyle(dock).visibility !== "hidden";
+    return overlays ? dock.getBoundingClientRect().top : null;
+  });
+}
+
 async function checkDurationNotice(page, scene) {
   await page.focus("#focusDuration");
   await page.fill("#focusDuration", "0");
@@ -350,7 +360,13 @@ async function checkDurationNotice(page, scene) {
   assert.match(rejected.text, DURATION_SENTENCE);
   assert.equal(rejected.retry, false);
   assert.equal(await page.getAttribute("#focusDuration", "aria-invalid"), "true");
-  assert.ok(await seen(page, ":focus"), "the rejected field stays in view under the notice");
+  const rejectedField = await seen(page, ":focus");
+  assert.ok(rejectedField, "the rejected field stays in view under the notice");
+  const dockTop = await shownDockTop(page);
+  if (dockTop !== null) {
+    assert.ok(rejectedField.bottom <= dockTop + 0.5,
+      `the timer dock lies over the rejected field (field bottom ${rejectedField.bottom}, dock top ${dockTop})`);
+  }
   await shot(page, scene, "notice-duration");
   const next = await page.evaluate(() => (Number(document.getElementById("focusDuration").min) + 25
     + (Date.now() % 20)));
@@ -625,7 +641,7 @@ function taskStats(page, taskId) {
   return page.evaluate((id) => {
     const row = document.querySelector(`#taskList .task-row[data-task-id="${id}"]`);
     return row && { title: row.querySelector(".task-name").textContent,
-      count: row.querySelector(".task-stat").textContent };
+      count: row.querySelector(".task-stat .task-stat-value").textContent };
   }, taskId);
 }
 
@@ -686,27 +702,30 @@ async function checkRenameScene(browser, scene) {
   await context.close();
 }
 
-// The sign-in page is not part of this leg: the navigation that follows a
-// completed sign-out ends on a blank page of the same origin.
+// The sign-in page is not part of this leg. A sign-out the server confirmed
+// ends on the server's signed-out page; this stub only keeps a sign-out the
+// server did not confirm from reaching the real sign-in provider.
 async function stubSignInStart(context) {
   await context.route((url) => url.pathname === "/auth/google/start",
     (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>signed out</title>" }));
 }
 
-// A user who is asked about changes that still wait to sync answers no, waits
-// for the sync and signs out again. Returns how often the question was asked.
+// A user who is asked about changes that still wait to sync answers Cancel in
+// the in-page question, waits for the sync and signs out again. Returns how
+// often the question was asked.
 async function signOutKeepingChanges(page) {
-  let asked = 0;
-  page.on("dialog", (dialog) => { asked += 1; dialog.dismiss(); });
-  const signedOut = (timeout) => page.waitForURL((url) => url.pathname === "/auth/google/start", { timeout })
-    .then(() => true, () => false);
+  const shown = (selector, timeout, name) => page.locator(selector).waitFor({ state: "visible", timeout })
+    .then(() => name, () => null);
   await page.locator("#logoutButton").click();
-  if (await signedOut(5000)) return asked;
-  assert.equal(asked, 1, "sign-out neither finished nor asked about the unsynced delete");
+  const first = await Promise.race([shown("#signedOut-title", 5000, "signed out"),
+    shown("#logoutConfirmation", 5000, "asked")]);
+  if (first === "signed out") return 0;
+  assert.equal(first, "asked", "sign-out neither finished nor asked about the unsynced delete");
+  await page.locator("#logoutConfirmation .confirmation-cancel").click();
   await synchronized(page, "after the sign-out question");
   await page.locator("#logoutButton").click();
-  assert.equal(await signedOut(20000), true, "the second sign-out did not finish");
-  return asked;
+  assert.equal(await shown("#signedOut-title", 20000, "signed out"), "signed out", "the second sign-out did not finish");
+  return 1;
 }
 
 async function signInAgain(context, page) {

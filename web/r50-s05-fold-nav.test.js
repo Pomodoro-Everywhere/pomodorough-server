@@ -197,7 +197,7 @@ test("R50-S05 skip-link still reveals and focuses the timer workbench", async (t
 });
 
 test("R50-S05 tab identity, selection style, and narrow fallback are preserved", () => {
-  assert.match(appHtml, /<nav class="screen-nav" aria-label="Pomodorough screens">/);
+  assert.match(appHtml, /<nav class="screen-nav" aria-label="Pomodorough screens" data-i18n-aria-label="nav.screens">/);
   assert.match(appHtml, /<div role="tablist" aria-label="Workspace"/);
   assert.match(appHtml, /id="timerTab"[^>]*role="tab"[^>]*aria-selected="true"[^>]*aria-controls="timerScreen"/);
   assert.match(appHtml, /id="tasksTab"[^>]*role="tab"[^>]*aria-selected="false"[^>]*aria-controls="tasksScreen"/);

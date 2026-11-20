@@ -148,6 +148,31 @@ function dialogElement(tag) {
   };
 }
 
+function findDialogPart(node, tag) {
+  if (node?.tag === tag) return node;
+  for (const child of node?.children || []) {
+    const found = findDialogPart(child, tag);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Answers the in-page sign-out question once logout() has opened it: the
+// form's submit confirms, the type=button cancel declines.
+async function answerSignOutQuestion(fixture, confirmed) {
+  for (let turn = 0; turn < 50; turn += 1) {
+    const dialog = fixture.host.document.created.find((node) => node.tag === "dialog" && node.open);
+    if (dialog) {
+      const form = findDialogPart(dialog, "form");
+      const cancel = form.children.at(-1).children.find((node) => node.type === "button");
+      if (confirmed) form.click("submit"); else cancel.click();
+      return;
+    }
+    await new Promise(setImmediate);
+  }
+  throw new Error("logout never asked about pending changes");
+}
+
 function dialogDocument() {
   const created = [];
   const body = { appended: [], append(node) { this.appended.push(node); } };
@@ -320,7 +345,7 @@ test("account deletion dialog, validation, HTTP failure, and cleanup retry prese
   await opened.actions.deleteAccount();
   const dialog = opened.host.document.body.appended[0];
   assert.equal(dialog.open, true);
-  assert.match(dialog.children[1].textContent, /Type DELETE/);
+  assert.match(findDialogPart(dialog, "p").textContent, /Type DELETE/);
   assert.ok(opened.calls.some((entry) => entry[0] === "timeout"));
   await opened.actions.cancelDeleteAccount();
   assert.equal(dialog.open, false);
@@ -346,14 +371,16 @@ test("account deletion dialog, validation, HTTP failure, and cleanup retry prese
 
   const confirmed = sessionFixture({ host: { fetch: async () => ({ ok: true }) } });
   await confirmed.actions.deleteAccount();
-  confirmed.host.document.body.appended[0].children[2].value = "DELETE";
+  findDialogPart(confirmed.host.document.body.appended[0], "input").value = "DELETE";
   await confirmed.actions.confirmDeleteAccount();
   assert.ok(confirmed.calls.some((entry) => entry[0] === "assign"));
 });
 
 test("logout cancellation and deferred revocation retain the durable retry marker", async () => {
-  const cancelled = sessionFixture({ state: { pending: [{}] }, host: { confirm: () => false } });
-  await cancelled.actions.logout();
+  const cancelled = sessionFixture({ state: { pending: [{}] } });
+  const cancelling = cancelled.actions.logout();
+  await answerSignOutQuestion(cancelled, false);
+  await cancelling;
   assert.equal(cancelled.elements.logoutButton.disabled, false);
   assert.equal(cancelled.localStorage.getItem("pomodoroughPendingLogout"), null);
 

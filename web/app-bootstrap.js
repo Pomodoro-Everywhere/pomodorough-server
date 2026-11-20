@@ -244,6 +244,7 @@
         },
         clockOffset,
         serverHlc: { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) },
+        canonicalHead: this.syncCore.responseCanonicalHead(payload),
         hlc: this.use.mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter, clockOffset)
       };
     }
@@ -280,7 +281,7 @@
         };
         const outcome = await this.syncStorage.applyResolution(this.use.database(), { ...pending, queueIds }, {
           assertCurrent: context.assertCurrent,
-          snapshot: next.snapshot, hlc: next.hlc, serverHlc: next.serverHlc,
+          snapshot: next.snapshot, hlc: next.hlc, serverHlc: next.serverHlc, canonicalHead: next.canonicalHead,
           clockOffset: next.clockOffset,
           timerOwnerClaim: {
             deviceId: this.state.deviceId, tabId: this.use.tabId(), nowMs: Date.now(),

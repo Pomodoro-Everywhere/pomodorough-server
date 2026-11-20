@@ -206,17 +206,24 @@ func TestOpenAPIReferencesAndPreferenceContractsMatchServer(t *testing.T) {
 		}
 	}
 	for name, property := range map[string]map[string]any{
-		"lastRevision":     openAPIMap(t, openAPIMap(t, syncRequest, "properties"), "lastRevision"),
-		"expectedRevision": openAPIMap(t, openAPIMap(t, bootstrapRequest, "properties"), "expectedRevision"),
-		"revision":         openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "revision"),
-		"serverHlcWallMs":  openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "serverHlcWallMs"),
-		"serverHlcCounter": openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "serverHlcCounter"),
+		"lastRevision":        openAPIMap(t, openAPIMap(t, syncRequest, "properties"), "lastRevision"),
+		"expectedRevision":    openAPIMap(t, openAPIMap(t, bootstrapRequest, "properties"), "expectedRevision"),
+		"revision":            openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "revision"),
+		"serverHlcWallMs":     openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "serverHlcWallMs"),
+		"serverHlcCounter":    openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "serverHlcCounter"),
+		"canonicalHlcWallMs":  openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "canonicalHlcWallMs"),
+		"canonicalHlcCounter": openAPIMap(t, openAPIMap(t, syncResponse, "properties"), "canonicalHlcCounter"),
 	} {
 		if property["maximum"] != maxSafeRevision {
 			t.Fatalf("%s maximum = %#v, want %d", name, property["maximum"], maxSafeRevision)
 		}
 	}
 	responseProperties := openAPIMap(t, syncResponse, "properties")
+	for _, field := range []string{"canonicalHlcWallMs", "canonicalHlcCounter"} {
+		if openAPIRequired(syncResponse, field) || openAPIMap(t, responseProperties, field)["minimum"] != 0 {
+			t.Fatalf("SyncResponse %s must be optional with minimum 0: %#v", field, openAPIMap(t, responseProperties, field))
+		}
+	}
 	acknowledgements := openAPIMap(t, responseProperties, "autoStartAcknowledgements")
 	if openAPIMap(t, acknowledgements, "items")["$ref"] != "#/components/schemas/AutoStartAcknowledgement" {
 		t.Fatalf("autoStartAcknowledgements schema = %#v", acknowledgements)

@@ -102,7 +102,7 @@
   function createState(host = globalThis) {
     return {
       ready: false, authenticated: false, sessionIdentityValidated: false,
-      logoutRecoveryRequired: false, logoutRecoveryBusy: false,
+      logoutRecoveryRequired: false, logoutRecoveryBusy: false, logoutRecoveryFailure: null,
       offlineOwnerMode: false, user: null, csrfToken: null, deviceId: null,
       deviceSequence: 0, hlcWallMs: 0, hlcCounter: 0, clockOffset: null,
       activeScreen: "timer", syncing: false, retrying: false, conflict: null, savedClaimRecovery: null,

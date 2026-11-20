@@ -1,6 +1,7 @@
 package store
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,6 @@ func TestSharedCoreTaskAndDurationOutputsRejectInvalidAuthorityData(t *testing.T
 		{"empty task", coreTaskResult{Tasks: []task.Task{{}}, WinningOperationIDs: map[string]string{"task-a": "op-a"}}, "invalid task"},
 		{"duplicate task", coreTaskResult{Tasks: []task.Task{{ID: "task-a", Title: "Alpha"}, {ID: "task-a", Title: "Alpha"}}, WinningOperationIDs: map[string]string{"task-a": "op-a"}}, "duplicates task"},
 		{"task without winner", coreTaskResult{Tasks: []task.Task{{ID: "task-b", Title: "Beta"}}, WinningOperationIDs: map[string]string{"task-a": "op-a"}}, "has no winning operation"},
-		{"unordered tasks", coreTaskResult{Tasks: []task.Task{{ID: "task-b", Title: "Beta"}, {ID: "task-a", Title: "Alpha"}}, WinningOperationIDs: map[string]string{"task-a": "op-a", "task-b": "op-b"}}, "not strictly ordered"},
 	}
 	for _, scenario := range taskCases {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -178,6 +178,51 @@ func TestSharedCoreTaskAndDurationOutputsRejectInvalidAuthorityData(t *testing.T
 			}
 		})
 	}
+}
+
+// The task list order is SharedCore's decision. The server must accept the order
+// SharedCore returns and pass it on unchanged, whatever rule produced it.
+func TestSharedCoreTaskOutputKeepsCoreTaskListOrder(t *testing.T) {
+	cases := []struct {
+		name   string
+		titles []string
+	}{
+		{"numbers by value", []string{"Bulk task 2", "Bulk task 10"}},
+		{"case folded", []string{"apple", "Banana"}},
+		{"bytewise", []string{"Banana", "apple"}},
+	}
+	for _, scenario := range cases {
+		t.Run(scenario.name, func(t *testing.T) {
+			output, operations := coreTaskOutputInOrder(scenario.titles)
+			got, _, err := taskResultFromCore(output, operations)
+			if err != nil {
+				t.Fatalf("taskResultFromCore rejected SharedCore task order %q: %v", scenario.titles, err)
+			}
+			if !reflect.DeepEqual(got, output.Tasks) || !reflect.DeepEqual(taskTitles(got), scenario.titles) {
+				t.Fatalf("taskResultFromCore order = %q, want %q", taskTitles(got), scenario.titles)
+			}
+		})
+	}
+}
+
+func coreTaskOutputInOrder(titles []string) (coreTaskResult, []task.Operation) {
+	output := coreTaskResult{Tasks: []task.Task{}, WinningOperationIDs: map[string]string{}}
+	operations := make([]task.Operation, 0, len(titles))
+	for _, title := range titles {
+		taskID, operationID := "task:"+title, "op:"+title
+		output.Tasks = append(output.Tasks, task.Task{ID: taskID, Title: title})
+		output.WinningOperationIDs[taskID] = operationID
+		operations = append(operations, task.Operation{ID: operationID, TaskID: taskID, Type: "upsert", Title: title})
+	}
+	return output, operations
+}
+
+func taskTitles(tasks []task.Task) []string {
+	titles := make([]string, 0, len(tasks))
+	for _, current := range tasks {
+		titles = append(titles, current.Title)
+	}
+	return titles
 }
 
 func TestStoredSyncNormalizationRejectsUntrustedLegacyClock(t *testing.T) {

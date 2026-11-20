@@ -153,9 +153,10 @@ test("R52-S04 home and contact boxes avoid the strip (model check pinned to prod
 });
 
 test("R52-S04 wording, links, and keyboard path preserved", (t) => {
-  assert.match(landingHtml, /<a class="wordmark" href="\/" aria-label="Pomodorough home">/);
+  // PWA-14: no aria-label, so the accessible name is the visible wordmark text.
+  assert.match(landingHtml, /<a class="wordmark" href="\/">/);
   assert.match(landingHtml, /<strong>Pomodorough<\/strong>/);
-  assert.match(landingHtml, /<small>Time, in transit<\/small>/);
+  assert.match(landingHtml, /<small data-i18n="landing.tagline">Time, in transit<\/small>/);
   assert.match(privacyHtml, /<a href="\/">Pomodorough<\/a>/);
   assert.match(privacyHtml, /<a href="https:\/\/github\.com\/Pomodoro-Everywhere\/pomodorough-server\/issues">Contact via GitHub Issues<\/a>/);
   for (const [html, url, selector, dir] of [

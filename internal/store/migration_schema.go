@@ -182,6 +182,31 @@ var incrementalMigrations = []schemaMigration{
 		`INSERT INTO account_metadata(singleton, generation) VALUES (1, 1)`,
 	}},
 	{version: 8, statements: taskOperationRenameStatements()},
+	{version: 9, statements: canonicalHLCHeadStatements()},
+}
+
+// canonicalHLCHeadStatements add the persisted canonical HLC head. Bootstrap
+// replace_remote deletes operations, so the head cannot be recomputed from
+// the retained rows without moving backwards. The backfill takes the maximum
+// over every operation the database still holds, so the first response after
+// the upgrade covers everything the server ordered before it.
+func canonicalHLCHeadStatements() []string {
+	return []string{
+		`ALTER TABLE account_state ADD COLUMN canonical_hlc_wall_ms INTEGER NOT NULL DEFAULT 0
+			CHECK (canonical_hlc_wall_ms BETWEEN 0 AND 9007199254740991)`,
+		`ALTER TABLE account_state ADD COLUMN canonical_hlc_counter INTEGER NOT NULL DEFAULT 0
+			CHECK (canonical_hlc_counter BETWEEN 0 AND 9007199254740991)`,
+		`UPDATE account_state SET (canonical_hlc_wall_ms, canonical_hlc_counter) = (
+			SELECT hlc_wall_ms, hlc_counter FROM (
+				SELECT 0 AS hlc_wall_ms, 0 AS hlc_counter
+				UNION ALL SELECT hlc_wall_ms, hlc_counter FROM timer_commands
+				UNION ALL SELECT hlc_wall_ms, hlc_counter FROM task_operations
+				UNION ALL SELECT hlc_wall_ms, hlc_counter FROM duration_operations
+				UNION ALL SELECT hlc_wall_ms, hlc_counter FROM auto_start_operations
+				UNION ALL SELECT hlc_wall_ms, hlc_counter FROM selected_task_operations
+			) ORDER BY hlc_wall_ms DESC, hlc_counter DESC LIMIT 1
+		) WHERE singleton = 1`,
+	}
 }
 
 // taskOperationRenameStatements admits the Core 0.56.0 `rename` task

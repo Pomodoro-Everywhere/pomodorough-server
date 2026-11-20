@@ -36,6 +36,8 @@ function remoteHistory(account) {
 // `control.online` is what navigator.onLine reports; an offline fetch fails the
 // way a browser's does. `control.meStatus` is the session check's HTTP status.
 // `control.accountDeleteStatus` is the account deletion request's HTTP status.
+// `control.logoutStatus` is the session revocation's HTTP status.
+// `control.navigations` lists the addresses the page navigated to.
 // `control.historyResolveStatus` is the history resolution's HTTP status: the
 // workspace stays blocked until a resolution succeeds.
 function serve(control, account) {
@@ -46,7 +48,7 @@ function serve(control, account) {
       if (control.meStatus !== 200) return { ok: false, status: control.meStatus };
       return { ok: true, status: 200, json: async () => ({ user: accountUser(account), csrfToken: "csrf-ux" }) };
     }
-    if (url === "/api/v1/auth/logout") return { ok: false, status: 503 };
+    if (url === "/api/v1/auth/logout") return { ok: control.logoutStatus === 200, status: control.logoutStatus };
     if (url === "/api/v1/account") return { ok: control.accountDeleteStatus === 200, status: control.accountDeleteStatus };
     if (url === "/api/v1/bootstrap") return { ok: true, status: 200, json: async () => remoteHistory(account) };
     if (url === "/api/v1/bootstrap/resolve" && control.historyResolveStatus === 200) {
@@ -91,7 +93,8 @@ async function openApp(t, { online = true, meStatus = 200, storage = {}, account
   const dom = new JSDOM(sources.get("app.html"), { url: "https://local.test/app", runScripts: "outside-only" });
   const { window } = dom;
   t.after(() => window.close());
-  const control = { requests: [], warnings: [], reports: [], online, meStatus, accountDeleteStatus: 503, historyResolveStatus };
+  const control = { requests: [], warnings: [], reports: [], navigations: [], online, meStatus, accountDeleteStatus: 503,
+    logoutStatus: 503, historyResolveStatus };
   prepareWindow(window, control, storage, indexedDB);
   if (tabId) window.sessionStorage.setItem("pomodoroughTabId", tabId);
   for (const name of scripts.slice(0, -1)) window.eval(sources.get(name));
@@ -99,7 +102,8 @@ async function openApp(t, { online = true, meStatus = 200, storage = {}, account
   window.PomodoroughSharedCore.SharedCore.load = async () => loaded;
   const runtime = window.PomodoroughAppRuntime.createRuntime;
   window.PomodoroughAppRuntime = { ...window.PomodoroughAppRuntime, createRuntime: (input) => {
-    input.externals.host.location = { href: window.location.href, pathname: "/app", search: "", assign() {}, replace() {} };
+    input.externals.host.location = { href: window.location.href, pathname: "/app", search: "",
+      assign(address) { control.navigations.push(address); }, replace() {} };
     return runtime(input);
   } };
   window.fetch = serve(control, account);
@@ -119,4 +123,23 @@ function shownNotice(current) {
   return { text: current.element("noticeText").textContent, retry: current.element("noticeRetry")?.hidden === false };
 }
 
-module.exports = { openApp, settle, waitFor, shownNotice };
+// Answers every in-page sign-out question the way a person would: it records
+// the question text, then presses the confirm or cancel button on a later turn.
+// `answer(message)` returns true to sign out and discard.
+function answerSignOutQuestions(window, answer) {
+  const asked = [];
+  const showModal = window.HTMLDialogElement.prototype.showModal;
+  window.HTMLDialogElement.prototype.showModal = function () {
+    showModal.call(this);
+    if (this.id !== "logoutConfirmation") return;
+    const message = this.querySelector(".bootstrap-dialog-message").textContent;
+    asked.push(message);
+    const confirmed = answer(message);
+    setImmediate(() => (confirmed
+      ? this.querySelector("form").requestSubmit()
+      : this.querySelector(".confirmation-cancel").click()));
+  };
+  return asked;
+}
+
+module.exports = { openApp, settle, waitFor, shownNotice, answerSignOutQuestions };

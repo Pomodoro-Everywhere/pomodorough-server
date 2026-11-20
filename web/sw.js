@@ -1,45 +1,45 @@
 "use strict";
 
-importScripts("/shared-core-metadata.js?v=6");
+importScripts("/shared-core-metadata.js?v=7");
 
 const CORE_METADATA = self.PomodoroughSharedCoreMetadata;
 if (!CORE_METADATA) throw new Error("Shared core metadata is unavailable");
 // Service-worker fetch failures stay silent by design: the worker has no
 // document/DSN context and must never phone error monitoring itself. Pages
 // report through the frontend error wrapper; offline fallbacks below serve cache.
-const CACHE_NAME = `pomodorough-shell-v75-${CORE_METADATA.cacheVersion}`;
+const CACHE_NAME = `pomodorough-shell-v77-${CORE_METADATA.cacheVersion}`;
 const CACHE_PREFIX = "pomodorough-shell-";
 const SHELL = [
   "/",
   "/index.html",
   "/privacy",
-  "/landing.css?v=2",
+  "/landing.css?v=3",
   "/platform-selector.js?v=1",
-  "/landing.js?v=1",
+  "/landing.js?v=2",
   "/app",
-  "/app.css?v=23",
-  "/shared-core-metadata.js?v=6",
+  "/app.css?v=24",
+  "/shared-core-metadata.js?v=7",
   "/shared-core.js?v=7",
   CORE_METADATA.wasmURL,
-  "/sync-core.js?v=29",
+  "/sync-core.js?v=30",
   "/sync-authority.js?v=1",
   "/sync-storage-uuid.js?v=1",
   "/workspace-core.js?v=2",
   "/workspace-transaction.js?v=4",
-  "/sync-storage.js?v=36",
-  "/i18n.js?v=7",
-  "/locales/en.json?v=6",
-  "/locales/ar-XB.json?v=6",
+  "/sync-storage.js?v=37",
+  "/i18n.js?v=8",
+  "/locales/en.json?v=7",
+  "/locales/ar-XB.json?v=7",
   "/app-runtime.js?v=1",
   "/account-operation.js?v=1",
-  "/app-state.js?v=11",
+  "/app-state.js?v=12",
   "/app-storage.js?v=16",
   "/app-actions.js?v=13",
-  "/app-sync.js?v=10",
-  "/app-bootstrap.js?v=8",
-  "/app-session.js?v=11",
-  "/app-view.js?v=15",
-  "/app.js?v=47",
+  "/app-sync.js?v=11",
+  "/app-bootstrap.js?v=9",
+  "/app-session.js?v=12",
+  "/app-view.js?v=16",
+  "/app.js?v=48",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

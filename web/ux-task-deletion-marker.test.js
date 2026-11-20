@@ -10,7 +10,7 @@ const assert = require("node:assert/strict");
 const { IDBFactory } = require("fake-indexeddb");
 const { viewFixture, setVisibility, settle, waitFor, spy, rowFor } = require("./test/ux-view-fixture.js");
 const { deferred } = require("./test/account-ownership-fixture.js");
-const { openApp, waitFor: waitForApp } = require("./test/ux-round2-app-fixture.js");
+const { openApp, waitFor: waitForApp, answerSignOutQuestions } = require("./test/ux-round2-app-fixture.js");
 
 const MARKER_KEY = "pomodoroughPendingTaskDeletions";
 const LOCK_PREFIX = "pomodorough-task-deletion-undo:";
@@ -533,9 +533,9 @@ test("a marker that survives to a sign-out recovery startup is dropped with the 
 // refuses every sync, so the add and the delete both wait to sync; sign-out
 // must count both before it asks.
 test("sign-out during the undo window completes the delete and counts it before it asks", async (t) => {
-  const asked = [];
+  let asked = [];
   const current = await openWorkspace(t, { prepare: (window) => {
-    window.confirm = (message) => { asked.push(String(message)); return false; };
+    asked = answerSignOutQuestions(window, () => false);
   } });
   const alpha = await addTaskInApp(current, "Alpha");
   current.element("logoutButton").click();

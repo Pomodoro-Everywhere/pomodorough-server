@@ -362,6 +362,10 @@
         "notice.durationRange", values,
         `${values.phase} length was not changed: enter a whole number of minutes from ${values.min} to ${values.max}.`
       ), { kind: DURATION_RANGE_NOTICE });
+      // The notice moves the page down, which can put the field under the
+      // timer dock. The sticky bars reserve their heights, so the nearest
+      // scroll stops the focused field clear of them.
+      if (this.document.activeElement === input) input.scrollIntoView?.({ block: "nearest" });
     }
 
     // An entry inside the field range is not marked invalid and answers the
@@ -720,8 +724,13 @@
 
     terminalTimerInstruction(status) {
       const { use } = this;
-      if (status === "completed") return use.tr(
+      // Only a ringing completion has a sound to stop; after a reload or a
+      // dismissal the Stop sound control is hidden, so the text omits it.
+      if (status === "completed" && use.activeCompletionAlertTimerId()) return use.tr(
         "timer.instruction.completed", {}, "Run complete. Stop the sound or start another."
+      );
+      if (status === "completed") return use.tr(
+        "timer.instruction.completedQuiet", {}, "Run complete. Start another."
       );
       if (status === "cancelled") return use.tr(
         "timer.instruction.cancelled", {}, "Run cancelled. Start another."
@@ -734,6 +743,7 @@
 
     renderTimerControls(timer, view) {
       const { use, elements } = this;
+      const focusedBankControl = this.focusedTimerBankControl();
       const intents = this.state.readModel?.availableIntents || [];
       const blocked = use.controlsBlocked() || this.state.workspaceBlocked;
       const underway = intents.some((intent) => ["pause", "resume"].includes(intent));
@@ -753,6 +763,21 @@
       elements.clearButton.disabled = blocked || !ringing;
       use.updateTimerCompletion(this.state.timer, this.state.timer.status,
         this.state.readModel?.canonical.remainingMs ?? view.remaining, blocked);
+      this.handOffHiddenTimerFocus(focusedBankControl);
+    }
+
+    // Finish, Cancel, Skip and Stop sound hide once they no longer apply. A
+    // browser moves focus to the page body at the moment a focused control
+    // hides, so the focused control is read before the bank changes.
+    focusedTimerBankControl() {
+      const { elements, document } = this;
+      const bank = [elements.finishButton, elements.cancelButton, elements.skipButton, elements.clearButton];
+      return bank.find((control) => control === document.activeElement) ?? null;
+    }
+
+    // Keyboard focus follows a control that hid to the primary timer control.
+    handOffHiddenTimerFocus(control) {
+      if (control?.hidden) this.elements.timerToggle.focus?.();
     }
 
     renderSkipControl(underway, blocked) {
@@ -838,13 +863,16 @@
         "history.statusSeparator", { status: this.historyStatusLabel(item) },
         ` / ${this.historyStatusLabel(item)}`
       );
-      label.append(task, status);
+      // The " / status" separator continues the phase name, so it follows the
+      // phase inline; the task context is a block line below both.
+      label.append(status);
       if (item.pending) {
         const pending = document.createElement("small");
         pending.className = "history-pending";
         pending.textContent = use.tr("history.queued", {}, " / queued");
         label.append(pending);
       }
+      label.append(task);
       return label;
     }
 
@@ -955,30 +983,41 @@
       row.dataset.taskId = task.id;
       const controls = document.createElement("span");
       controls.className = "task-actions";
-      controls.append(this.taskRenameButton(task, blocked), this.taskDeleteButton(task, blocked));
+      controls.append(...this.taskRowControls(task, blocked));
       row.append(this.taskTitleCell(task), ...this.taskStatCells(summary), controls);
       return row;
     }
 
     taskStatCells(summary) {
-      const { use, document } = this;
-      const count = document.createElement("span");
-      count.className = "task-stat";
-      count.textContent = String(summary.count);
-      count.setAttribute("data-stat-label", use.tr("tasks.column.finished", {}, "Finished"));
-      count.setAttribute("aria-label", use.tr(
-        "tasks.finishedToday", { count: summary.count },
-        `${summary.count} finished pomodoros today`
-      ));
-      const duration = document.createElement("span");
-      duration.className = "task-stat";
-      duration.textContent = this.formatTaskDuration(summary.durationMs);
-      duration.setAttribute("data-stat-label", use.tr("tasks.column.time", {}, "Time"));
-      duration.setAttribute("aria-label", use.tr(
-        "tasks.spentToday", { duration: this.formatTaskDuration(summary.durationMs) },
-        `${this.formatTaskDuration(summary.durationMs)} spent today`
-      ));
-      return [count, duration];
+      const { use } = this;
+      const duration = this.formatTaskDuration(summary.durationMs);
+      return [
+        this.taskStatCell(String(summary.count), use.tr("tasks.column.finished", {}, "Finished"), use.tr(
+          "tasks.finishedToday", { count: summary.count }, `${summary.count} finished pomodoros today`
+        )),
+        this.taskStatCell(duration, use.tr("tasks.column.time", {}, "Time"), use.tr(
+          "tasks.spentToday", { duration }, `${duration} spent today`
+        ))
+      ];
+    }
+
+    // A generic span has no role, so screen readers skip its aria-label and
+    // read the bare number. The cell shows the number to sight and reads the
+    // whole sentence from visually hidden text instead.
+    taskStatCell(value, columnLabel, sentence) {
+      const { document } = this;
+      const cell = document.createElement("span");
+      cell.className = "task-stat";
+      cell.setAttribute("data-stat-label", columnLabel);
+      const shown = document.createElement("span");
+      shown.className = "task-stat-value";
+      shown.setAttribute("aria-hidden", "true");
+      shown.textContent = value;
+      const spoken = document.createElement("span");
+      spoken.className = "visually-hidden";
+      spoken.textContent = sentence;
+      cell.append(shown, spoken);
+      return cell;
     }
 
     taskDeleteButton(task, blocked) {
@@ -1009,6 +1048,31 @@
       return rename;
     }
 
+    // While a title is edited, the row's actions become Save and Cancel, so a
+    // touch user can finish or abandon the edit without a keyboard.
+    taskRowControls(task, blocked) {
+      if (this.taskRename?.taskId !== task.id) {
+        return [this.taskRenameButton(task, blocked), this.taskDeleteButton(task, blocked)];
+      }
+      return [
+        this.taskRenameAction(task, "task-rename-save", ["action.save", "Save"],
+          ["tasks.saveNamed", `Save the new name for ${task.title}`], () => this.commitTaskRename(task)),
+        this.taskRenameAction(task, "task-rename-cancel", ["action.cancel", "Cancel"],
+          ["tasks.cancelRenameNamed", `Keep the name ${task.title}`], () => this.cancelTaskRename(task)),
+      ];
+    }
+
+    taskRenameAction(task, className, [textKey, text], [labelKey, label], activate) {
+      const { use, document } = this;
+      const button = document.createElement("button");
+      button.className = className;
+      button.type = "button";
+      button.textContent = use.tr(textKey, {}, text);
+      button.setAttribute("aria-label", use.tr(labelKey, { title: task.title }, label));
+      button.addEventListener("click", activate);
+      return button;
+    }
+
     taskTitleCell(task) {
       if (this.taskRename?.taskId === task.id) return this.taskRenameEditor(task);
       const name = this.document.createElement("strong");
@@ -1031,8 +1095,8 @@
         if (event.key === "Enter") { event.preventDefault(); this.commitTaskRename(task); }
         else if (event.key === "Escape") { event.preventDefault(); this.cancelTaskRename(task); }
       });
-      // A re-render replaces the editor; only a blur on a live editor commits.
-      input.addEventListener("blur", () => { if (input.isConnected) this.commitTaskRename(task); });
+      // Blur neither commits nor cancels: a stray tap must not save a
+      // half-typed name. Save, Enter, Cancel and Escape end the edit.
       return input;
     }
 
@@ -1220,7 +1284,7 @@
     focusedTaskControl() {
       const { document, elements } = this;
       const active = document.activeElement;
-      const control = ["task-delete", "task-rename", "task-rename-input"].find((name) => active?.classList?.contains(name));
+      const control = ["task-delete", "task-rename", "task-rename-input", "task-rename-save", "task-rename-cancel"].find((name) => active?.classList?.contains(name));
       if (!control) return null;
       const rows = Array.from(elements.taskList.children);
       const index = rows.findIndex((row) => row.contains(active));
@@ -1529,10 +1593,25 @@
         "bootstrapRetry", "bootstrapSignOut"]) elements[name].hidden = true;
       // Retry runs logout() again after a volatile cleanup failure.
       this.renderBootstrapSignOutError(true);
+      this.renderLogoutRecoveryStatus();
       elements.bootstrapDialog.setAttribute("aria-busy", String(state.logoutRecoveryBusy));
       elements.logoutRecoveryRetry.disabled = state.logoutRecoveryBusy;
       elements.logoutRecoverySignIn.disabled = state.logoutRecoveryBusy || !host.navigator.onLine;
       this.focusBootstrapDialog();
+    }
+
+    // Busy progress, or why the last retry left recovery unfinished. Rewriting
+    // unchanged text would announce it again on unrelated renders.
+    renderLogoutRecoveryStatus() {
+      const { state, elements, use } = this;
+      const status = elements.logoutRecoveryStatus;
+      if (!status) return;
+      const message = state.logoutRecoveryBusy
+        ? use.tr("account.logout.recoveryBusy", {}, "Retrying sign-out cleanup…")
+        : state.logoutRecoveryFailure || "";
+      status.hidden = !message;
+      if (status.dataset) status.dataset.state = state.logoutRecoveryBusy ? "busy" : "failed";
+      if (status.textContent !== message) status.textContent = message;
     }
 
     resetBootstrapChoice(clearError = false) {

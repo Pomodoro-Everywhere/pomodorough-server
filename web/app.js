@@ -26,7 +26,7 @@
     "timerDisplay", "timerDetail", "longBreakProgress", "timerInstruction", "completionLimit", "timerToggle",
     "skipButton", "finishButton", "cancelButton", "clearButton", "historyList", "historyCount", "taskForm",
     "taskInput", "taskList", "taskCount", "deviceMark", "logoutRecovery",
-    "logoutRecoveryRetry", "logoutRecoverySignIn"
+    "logoutRecoveryRetry", "logoutRecoverySignIn", "logoutRecoveryStatus"
   ]);
   const MODULE_GLOBALS = Object.freeze([
     "PomodoroughAppState", "PomodoroughAppStorage", "PomodoroughAppActions",

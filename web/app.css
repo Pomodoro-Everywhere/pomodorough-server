@@ -178,7 +178,7 @@ select:focus-visible {
   margin-top: 0.55rem;
   color: var(--ticket);
   font-family: var(--utility);
-  font-size: 0.67rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -248,7 +248,7 @@ select:focus-visible {
   border: 0;
   border-bottom: 1px solid currentColor;
   font-family: var(--utility);
-  font-size: 0.68rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -292,7 +292,7 @@ select:focus-visible {
   margin-bottom: 0.12rem;
   color: var(--steel);
   font-family: var(--utility);
-  font-size: 0.54rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -306,7 +306,7 @@ select:focus-visible {
 .sync-label span {
   overflow-wrap: anywhere;
   font-family: var(--utility);
-  font-size: 0.67rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -415,7 +415,7 @@ main {
 
 .screen-nav button span {
   font-family: var(--utility);
-  font-size: 0.56rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -645,7 +645,7 @@ main {
 .bootstrap-kicker {
   color: var(--platform);
   font-family: var(--utility);
-  font-size: 0.62rem;
+  font-size: 0.6875rem;
   font-weight: 900;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -789,6 +789,75 @@ main {
   background: var(--platform);
 }
 
+/* PWA-21: inside an action row the row's gap spaces the buttons; a margin
+   here would shift the second button's left edge when the row stacks. */
+.bootstrap-actions .bootstrap-signout {
+  margin-inline-start: 0;
+}
+
+/* In-page confirmations for destructive account actions. The typed field has
+   a visible label and its own error line, and the confirm button reads as
+   the destructive choice. */
+.confirmation-field {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 1rem;
+  font-family: var(--utility);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.confirmation-field .bootstrap-dialog-input {
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+  color: var(--page-text);
+  background: var(--surface);
+  border: 2px solid var(--surface-border);
+  border-radius: 0;
+  font-family: var(--utility);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.confirmation-field .bootstrap-dialog-input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.bootstrap-ticket > .confirmation-error {
+  margin-block: 0.6rem 0;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.confirmation-danger {
+  color: var(--porcelain);
+  background: var(--danger);
+}
+
+.confirmation-cancel {
+  color: var(--page-text);
+  background: var(--surface);
+}
+
+.bootstrap-ticket .logout-recovery-status {
+  margin-block: 1rem 0;
+  font-family: var(--utility);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.bootstrap-ticket .logout-recovery-status[data-state="failed"] {
+  padding: 0.9rem 1rem;
+  color: var(--porcelain);
+  background: var(--danger);
+  border: 2px solid var(--track);
+}
+
 .workbench {
   display: grid;
   grid-template-columns: 1fr;
@@ -914,7 +983,7 @@ main {
   color: var(--porcelain);
   background: var(--platform);
   font-family: var(--utility);
-  font-size: 0.67rem;
+  font-size: 0.6875rem;
   font-weight: 900;
   letter-spacing: 0.12em;
   text-align: center;
@@ -945,7 +1014,7 @@ main {
   margin-top: 0.32rem;
   color: var(--muted);
   font-family: var(--utility);
-  font-size: 0.61rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -993,7 +1062,7 @@ main {
   margin-top: 0.3rem;
   color: var(--muted);
   font-family: var(--utility);
-  font-size: 0.58rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1054,7 +1123,7 @@ main {
   margin-bottom: 0.28rem;
   color: var(--muted);
   font-family: var(--utility);
-  font-size: 0.57rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.13em;
 }
@@ -1132,7 +1201,7 @@ main {
 .minute-unit {
   color: var(--muted);
   font-family: var(--utility);
-  font-size: 0.55rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -1182,7 +1251,7 @@ main {
   max-width: 13.5rem;
   margin-top: 0.35rem;
   color: var(--muted);
-  font-size: 0.67rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   line-height: 1.35;
 }
@@ -1293,7 +1362,7 @@ main {
   margin: 1rem 0 0;
   color: var(--subtle);
   font-family: var(--utility);
-  font-size: 0.62rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1354,7 +1423,7 @@ main {
   padding-bottom: 0.7rem;
   border-bottom: 1px solid rgba(247, 248, 242, 0.45);
   font-family: var(--utility);
-  font-size: 0.63rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   letter-spacing: 0.13em;
   text-transform: uppercase;
@@ -1455,12 +1524,12 @@ main {
   top: 0.7rem;
   left: 0.85rem;
   color: var(--steel);
-  font-size: 0.5rem;
+  font-size: 0.6875rem;
 }
 
 .dial-phase {
   color: var(--signal);
-  font-size: clamp(0.68rem, 1.35vw, 0.88rem);
+  font-size: clamp(0.6875rem, 1.35vw, 0.88rem);
 }
 
 .timer-display {
@@ -1479,7 +1548,7 @@ main {
   margin-top: 0.7rem;
   overflow: hidden;
   color: var(--sky);
-  font-size: clamp(0.51rem, 1vw, 0.65rem);
+  font-size: clamp(0.6875rem, 1vw, 0.75rem);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1667,6 +1736,20 @@ main {
   .action-bank .action-primary:focus-visible {
     box-shadow: none;
   }
+
+  /* PWA-09: forced colors drop the platform fill, so the selected tab and the
+     pressed phase take the system highlight pair instead. */
+  .screen-nav button[aria-selected="true"],
+  .phase-button[aria-pressed="true"] {
+    forced-color-adjust: none;
+    color: HighlightText;
+    background: Highlight;
+    border-left-color: HighlightText;
+  }
+
+  .phase-button[aria-pressed="true"] .phase-index {
+    color: HighlightText;
+  }
 }
 
 .action-primary {
@@ -1701,7 +1784,7 @@ main {
   border: 0 !important;
   border-bottom: 1px solid rgba(247, 248, 242, 0.45) !important;
   font-family: var(--utility) !important;
-  font-size: 0.63rem !important;
+  font-size: 0.6875rem !important;
   clip-path: none !important;
 }
 
@@ -1730,7 +1813,7 @@ main {
 .history-kicker {
   color: var(--platform);
   font-family: var(--utility);
-  font-size: 0.62rem;
+  font-size: 0.6875rem;
   font-weight: 900;
   letter-spacing: 0.13em;
   text-transform: uppercase;
@@ -1815,7 +1898,7 @@ main {
   border-radius: 50%;
   box-shadow: 0 0 0 2px var(--platform);
   font-family: var(--utility);
-  font-size: 0.58rem;
+  font-size: 0.6875rem;
   font-weight: 900;
 }
 
@@ -1837,7 +1920,7 @@ main {
   max-width: 100%;
   color: var(--muted);
   font-family: var(--utility);
-  font-size: 0.6rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   text-overflow: ellipsis;
   text-transform: none;
@@ -1853,7 +1936,7 @@ main {
   overflow-wrap: anywhere;
   white-space: normal;
   font-family: var(--utility);
-  font-size: 0.68rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -2020,7 +2103,7 @@ main {
   color: var(--porcelain);
   background: var(--track);
   font-family: var(--utility);
-  font-size: 0.6rem;
+  font-size: 0.6875rem;
   font-weight: 800;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -2082,12 +2165,14 @@ main {
   background: #7c1d18;
   border: 2px solid #7c1d18;
   font-family: var(--utility);
-  font-size: 0.65rem;
+  font-size: 0.6875rem;
   font-weight: 900;
   text-transform: uppercase;
 }
 
-.task-rename {
+.task-rename,
+.task-rename-save,
+.task-rename-cancel {
   min-height: 2.75rem;
   display: inline-flex;
   align-items: center;
@@ -2096,9 +2181,14 @@ main {
   background: var(--porcelain);
   border: 2px solid var(--track);
   font-family: var(--utility);
-  font-size: 0.65rem;
+  font-size: 0.6875rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.task-rename-save {
+  color: var(--porcelain);
+  background: var(--track);
 }
 
 .task-rename-input {
@@ -2114,6 +2204,8 @@ main {
 
 .task-delete:focus-visible,
 .task-rename:focus-visible,
+.task-rename-save:focus-visible,
+.task-rename-cancel:focus-visible,
 .task-rename-input:focus-visible {
   outline: 3px solid var(--track);
   outline-offset: 2px;
@@ -2134,6 +2226,7 @@ main {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
+  align-items: center;
   gap: 1rem;
   min-width: 0;
   padding: 1.3rem max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-right, 0px)) calc(1.3rem + env(safe-area-inset-bottom, 0px)) max(clamp(1rem, 4.5vw, 5rem), env(safe-area-inset-left, 0px));
@@ -2141,7 +2234,7 @@ main {
   background: var(--platform-deep);
   border-top: 0.55rem solid var(--signal);
   font-family: var(--utility);
-  font-size: 0.63rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -2151,6 +2244,13 @@ main {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+/* PWA-10: a footer link is a touch target, so it gets the 44 px minimum. */
+.site-footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
 }
 
 .site-footer a,
@@ -2510,7 +2610,7 @@ main {
     display: block;
     margin-bottom: 0.25rem;
     color: var(--muted);
-    font-size: 0.55rem;
+    font-size: 0.6875rem;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -2705,7 +2805,7 @@ main {
     display: block;
     margin-bottom: 0.25rem;
     color: var(--muted);
-    font-size: 0.55rem;
+    font-size: 0.6875rem;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -2892,10 +2992,17 @@ main {
     border-color: var(--porcelain);
   }
 
-  .task-rename {
+  .task-rename,
+  .task-rename-cancel {
     color: var(--page-text);
     background: var(--surface);
     border-color: var(--surface-border);
+  }
+
+  .task-rename-save {
+    color: var(--surface);
+    background: var(--page-text);
+    border-color: var(--page-text);
   }
 
   .task-rename-input {
@@ -2904,12 +3011,28 @@ main {
 
   .task-delete:focus-visible,
   .task-rename:focus-visible,
+  .task-rename-save:focus-visible,
+  .task-rename-cancel:focus-visible,
   .task-rename-input:focus-visible {
     outline-color: var(--porcelain);
   }
 
   .account-rail .action-danger {
     color: var(--signal);
+  }
+
+  .confirmation-danger {
+    background: #7c1d18;
+    border-color: var(--porcelain);
+  }
+
+  .bootstrap-ticket > .confirmation-error {
+    color: var(--signal);
+  }
+
+  .confirmation-field .bootstrap-dialog-input[aria-invalid="true"] {
+    border-color: var(--signal);
+    box-shadow: inset 0 0 0 1px var(--signal);
   }
 }
 

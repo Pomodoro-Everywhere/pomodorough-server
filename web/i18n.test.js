@@ -196,7 +196,7 @@ test("browser locale loading honors query selection and applies the selected cat
     }
   }, loadBrowserI18n);
   assert.equal(instance.locale, "ar-XB");
-  assert.deepEqual(requests.map(([url]) => url), ["/locales/en.json?v=6", "/locales/ar-XB.json?v=6"]);
+  assert.deepEqual(requests.map(([url]) => url), ["/locales/en.json?v=7", "/locales/ar-XB.json?v=7"]);
   assert.ok(requests.every(([, options]) => options.cache === "no-cache"));
   assert.ok(attributes.some(([name, value]) => name === "dir" && value === "rtl"));
 });

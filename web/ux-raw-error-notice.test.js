@@ -82,6 +82,29 @@ test("a duration below the field minimum states the allowed range and marks the 
   assert.match(current.reports[0][0].message, /invalid duration range/, "core's reason still reaches error reporting");
 });
 
+// UX round 3: the notice moves the page down, so the rejected field can end
+// under the timer dock. The page reserves the sticky bars' heights, and the
+// nearest scroll keeps the focused field clear of them.
+test("a rejected duration scrolls its focused field clear of the sticky bars", async (t) => {
+  const current = await presentingView(t);
+  const input = current.elements.focusDuration;
+  const scrolls = [];
+  input.scrollIntoView = (options) => scrolls.push({ ...options, notice: shownNotice(current)?.text });
+  input.focus();
+  await enterDuration(current, input, "0");
+  assert.deepEqual(scrolls, [{ block: "nearest", notice: RANGE }], "the field scrolls once, after the notice is shown");
+});
+
+test("a rejected duration on a field without focus does not move the page", async (t) => {
+  const current = await presentingView(t);
+  const input = current.elements.focusDuration;
+  const scrolls = [];
+  input.scrollIntoView = (options) => scrolls.push(options);
+  await enterDuration(current, input, "", "blur");
+  assert.deepEqual(shownNotice(current), { text: RANGE, retry: false });
+  assert.deepEqual(scrolls, []);
+});
+
 test("a rejected duration entry is restored on blur and the field is valid again", async (t) => {
   const current = await presentingView(t);
   const input = current.elements.focusDuration;

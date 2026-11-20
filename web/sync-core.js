@@ -554,6 +554,31 @@
     }
   }
 
+  // Receiver rule for the canonical HLC head (R55-S09): both canonical fields or
+  // neither; each a safe non-negative integer; never above the server pair. A
+  // field missing beside its partner reads undefined and fails the integer check.
+  // Clock merge and skew checks stay on serverHlcWallMs/serverHlcCounter.
+  function validateCanonicalHead(payload) {
+    if (!Object.prototype.hasOwnProperty.call(payload, "canonicalHlcWallMs")
+      && !Object.prototype.hasOwnProperty.call(payload, "canonicalHlcCounter")) return;
+    const wallMs = payload.canonicalHlcWallMs;
+    const counter = payload.canonicalHlcCounter;
+    if (!validInteger(wallMs, 0) || !validInteger(counter, 0)
+      || wallMs > payload.serverHlcWallMs
+      || wallMs === payload.serverHlcWallMs && counter > payload.serverHlcCounter) {
+      throw new Error("Bootstrap response returned an invalid canonical HLC head.");
+    }
+  }
+
+  // The head to install from a validated response: the canonical pair when the
+  // server sends it, otherwise the server pair (older server).
+  function responseCanonicalHead(payload) {
+    if (Object.prototype.hasOwnProperty.call(payload, "canonicalHlcWallMs")) {
+      return { wallMs: payload.canonicalHlcWallMs, counter: payload.canonicalHlcCounter };
+    }
+    return { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) };
+  }
+
   function validateCanonicalResponse(payload, sent) {
     if (!isObject(payload)) throw new Error("Bootstrap response was not an object.");
     const acknowledgements = validateAcknowledgements(payload, sent);
@@ -580,6 +605,7 @@
     if (payload.serverHlcWallMs < serverTimeMs || payload.serverHlcWallMs > serverTimeMs + MAX_CLOCK_SKEW_MS) {
       throw new Error("Bootstrap response returned a server HLC inconsistent with serverTime.");
     }
+    validateCanonicalHead(payload);
     return acknowledgements;
   }
 
@@ -658,6 +684,7 @@
     validClockSample,
     validDateTime,
     validateCanonicalResponse,
-    validateAcknowledgements
+    validateAcknowledgements,
+    responseCanonicalHead
   });
 });

@@ -64,7 +64,7 @@ When unsynchronized work exists, confirmation states the exact aggregate count a
 
 A different authenticated account never overwrites a previous local workspace before an explicit **Switch and remove local data** confirmation. Cancelling preserves the previous workspace.
 
-Permanent deletion requires typing `DELETE`, calls `DELETE /api/v1/account`, and clears local account data only after the server confirms deletion. Every Account surface links to the stable privacy policy at <https://pomodorough.egigoka.me/privacy>.
+Permanent deletion requires typing `DELETE`, calls `DELETE /api/v1/account`, and clears local account data only after the server confirms deletion. Every Account surface links to the stable privacy policy at <https://pomodorough.egigoka.me/privacy>. The web app links to `/privacy` on the origin that serves it, which is that address on the production server, so a self-hosted server shows its own copy.
 
 ## Completion guarantees
 

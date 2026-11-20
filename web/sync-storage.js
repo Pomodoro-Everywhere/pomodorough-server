@@ -766,6 +766,12 @@
     return JSON.parse(JSON.stringify(claim));
   }
 
+  // The app passes the receiver-rule head as canonicalHead (R55-S09). Callers
+  // that predate the canonical pair pass only serverHlc, which was the head.
+  function inputCanonicalHead(input) {
+    return input.canonicalHead ?? input.serverHlc;
+  }
+
   function sanitizeCanonicalHead(head) {
     if (!plainObject(head)) return null;
     const wallMs = Number(head.wallMs);
@@ -1153,7 +1159,7 @@
     if (!claim) return { ownershipWrites: [] };
     const records = rebased ? transactionWorkspace(results, input.snapshot, rebased.queues ?? results, {
       projectionPending: rebased.projectionPending, timerDependencies: rebased.timerDependencies,
-      canonicalHead: input.serverHlc ?? results.canonicalHead?.value,
+      canonicalHead: inputCanonicalHead(input) ?? results.canonicalHead?.value,
       deliveryProof: neverSentFromProof(results.deliveryProof?.value, rebased.queues ?? results, input.reconciliation?.sent),
       outgoing: null
     }) : transactionWorkspace(results);
@@ -1530,8 +1536,8 @@
       : canonical.serverHlc || canonical.hlc;
     const hlc = laterHlc(results.hlc?.value, responseHlc);
     metaStore.put({ key: "hlc", value: hlc });
-    if (sanitizeCanonicalHead(canonical.serverHlc)) {
-      metaStore.put({ key: CANONICAL_HEAD_KEY, value: sanitizeCanonicalHead(canonical.serverHlc) });
+    if (sanitizeCanonicalHead(inputCanonicalHead(canonical))) {
+      metaStore.put({ key: CANONICAL_HEAD_KEY, value: sanitizeCanonicalHead(inputCanonicalHead(canonical)) });
     }
     return { hlc, clockOffset };
   }
@@ -1688,7 +1694,7 @@
       ? input.hlc
       : input.serverHlc || input.hlc;
     const hlc = laterHlc(results.hlc?.value, responseHlc);
-    const canonicalHead = sanitizeCanonicalHead(input.serverHlc)
+    const canonicalHead = sanitizeCanonicalHead(inputCanonicalHead(input))
       || sanitizeCanonicalHead(results.canonicalHead?.value) || null;
     const settings = results.settings?.value || {};
     const completion = responseCompletionState(input, results, rebased);

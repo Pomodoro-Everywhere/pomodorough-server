@@ -17,6 +17,9 @@ const catalog = JSON.parse(readFileSync(path.join(__dirname, "../web/locales", `
 const refusalNotice = catalog["account.logout.pendingUnavailable"];
 const refusalOperation = "session.logout.pending-queues";
 const loginPath = /auth\/google\/start/;
+// A sign-out the server confirmed reloads /app, which the server answers with
+// its signed-out page.
+const signedOutPage = (page) => page.locator("#signedOut-title").waitFor({ state: "visible" });
 const keptTask = "R54-S02 kept task";
 const scenarioId = `${fixture.scenario}@${fixture.locale}`;
 const refusalTimeout = { timeout: 20_000 };
@@ -177,14 +180,15 @@ async function openSession(browser) {
   await context.addInitScript(installSignOutObservers);
   await context.addInitScript(installCleanupFailure);
   const page = await context.newPage();
-  const session = { context, page, logoutRequests: [], dialogs: [], events: [],
-    dismissDialogs: false, dialogHandled: null };
+  const session = { context, page, logoutRequests: [], dialogs: [], events: [] };
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/api/v1/auth/logout") session.logoutRequests.push(request);
   });
+  // Sign-out asks in the page; a native dialog here is a regression that the
+  // scenarios assert on, and dismissing it keeps the page from stalling.
   page.on("dialog", (dialog) => {
     session.dialogs.push(dialog.message());
-    session.dialogHandled = session.dismissDialogs ? dialog.dismiss() : dialog.accept();
+    dialog.dismiss().catch((error) => log("dialogDismissFailed", String(error)));
   });
   page.on("console", (message) => {
     if (message.text().startsWith("R54S02 ")) session.events.push(JSON.parse(message.text().slice(7)));
@@ -310,7 +314,8 @@ async function signOutSucceeds(session, button) {
   await page.evaluate(() => { PomodoroughR54S02.mode = null; });
   const start = session.events.length;
   await page.locator(button).click();
-  await page.waitForURL(loginPath);
+  await signedOutPage(page);
+  assert.equal(new URL(page.url()).pathname, "/app");
   assert.equal(logoutRequests.length, 1);
   assert.ok(logoutRequests[0].headers()["x-csrf-token"]);
   assert.deepEqual(await markers(page), { marker: null, owner: null });
@@ -478,15 +483,18 @@ async function cancelScenario(session) {
   await page.waitForFunction(() => PomodoroughR54S02.refusals >= 1, refusalTimeout);
   assert.deepEqual(await fieldState(page), { hidden: false, text: refusalNotice, inDialog: true,
     state: refusalNotice, modal: "bootstrapDialog" });
-  session.dismissDialogs = true;
   await page.evaluate(() => { PomodoroughR54S02.mode = null; });
-  const confirm = page.waitForEvent("dialog");
   await page.locator("#bootstrapSignOut").click();
-  await confirm;
-  await session.dialogHandled;
+  // The pending-changes question is an in-page dialog over the recovery dialog.
+  const question = page.locator("#logoutConfirmation");
+  await question.waitFor({ state: "visible" });
+  const asked = await question.locator("#logoutConfirmationMessage").textContent();
+  await question.locator(".confirmation-cancel").click();
+  await question.waitFor({ state: "hidden" });
   const cancelled = await fieldState(page);
-  log("cancelled", { ...cancelled, dialogs: session.dialogs });
-  assert.equal(session.dialogs.length, 1, JSON.stringify(session.dialogs));
+  log("cancelled", { ...cancelled, asked, dialogs: session.dialogs });
+  assert.ok(asked.trim().length > 0, "the pending-changes question has no text");
+  assert.deepEqual(session.dialogs, [], "the pending-changes question used a native dialog");
   assert.equal(await page.evaluate(() => PomodoroughR54S02.refusals), 1);
   assert.deepEqual(cancelled, { hidden: true, text: "", inDialog: true, state: null, modal: "bootstrapDialog" });
   assert.equal(await page.locator("#bootstrapError").textContent(), limitText);
@@ -531,7 +539,7 @@ async function recoveryRetryScenario(session) {
   assert.equal(await workspaceDump(page), before);
   await page.evaluate(() => Object.assign(PomodoroughR54S02, { mode: null, failMarker: false, failClear: false }));
   await page.locator("#logoutRecoveryRetry").click();
-  await page.waitForURL(loginPath);
+  await signedOutPage(page);
   assert.deepEqual(await markers(page), { marker: null, owner: null });
   assert.equal((await session.context.request.get(`${fixture.url}/api/v1/me`)).status(), 401);
   return "recoveryretry-complete";

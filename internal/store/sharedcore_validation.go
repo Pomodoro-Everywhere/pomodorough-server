@@ -380,9 +380,11 @@ func validateTaskWinners(winners, operationTaskIDs map[string]string) error {
 	return nil
 }
 
+// validateCoreTasks checks task identity and winners only. The position of each
+// task is SharedCore's task list order; the server keeps it and does not check it.
 func validateCoreTasks(tasks []task.Task, winners map[string]string) error {
 	seen := make(map[string]struct{}, len(tasks))
-	for index, current := range tasks {
+	for _, current := range tasks {
 		if current.ID == "" || current.Title == "" || !utf8.ValidString(current.Title) {
 			return errors.New("shared task output contains invalid task")
 		}
@@ -392,16 +394,9 @@ func validateCoreTasks(tasks []task.Task, winners map[string]string) error {
 		if _, exists := winners[current.ID]; !exists {
 			return fmt.Errorf("shared task %q has no winning operation", current.ID)
 		}
-		if index > 0 && !taskBefore(tasks[index-1], current) {
-			return errors.New("shared tasks are not strictly ordered")
-		}
 		seen[current.ID] = struct{}{}
 	}
 	return nil
-}
-
-func taskBefore(left, right task.Task) bool {
-	return left.Title < right.Title || left.Title == right.Title && left.ID < right.ID
 }
 
 func durationResultFromCore(

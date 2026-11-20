@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+// The v9 canonical head backfill reads account_state and the HLC columns of
+// every operation table. Every real database has had account_state with its
+// singleton row since v1, and every operation table carried HLC columns from
+// its creation, so minimal legacy fixtures add these.
+const (
+	legacyAccountStateTable = `CREATE TABLE account_state (
+	singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+	revision INTEGER NOT NULL,
+	current_timer_id TEXT
+) STRICT`
+	legacyAccountStateRow          = `INSERT INTO account_state(singleton, revision, current_timer_id) VALUES (1, 0, NULL)`
+	legacyTimerCommandsTable       = `CREATE TABLE timer_commands (id TEXT PRIMARY KEY, hlc_wall_ms INTEGER NOT NULL DEFAULT 0, hlc_counter INTEGER NOT NULL DEFAULT 0)`
+	legacyDurationOperationsTable  = `CREATE TABLE duration_operations (id TEXT PRIMARY KEY, hlc_wall_ms INTEGER NOT NULL DEFAULT 0, hlc_counter INTEGER NOT NULL DEFAULT 0)`
+	legacyAutoStartOperationsTable = `CREATE TABLE auto_start_operations (id TEXT PRIMARY KEY, hlc_wall_ms INTEGER NOT NULL DEFAULT 0, hlc_counter INTEGER NOT NULL DEFAULT 0)`
+)
+
 func TestMigrateVersionOneAddsTaskSchema(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/legacy.sqlite")
@@ -15,7 +31,9 @@ func TestMigrateVersionOneAddsTaskSchema(t *testing.T) {
 	}
 	defer db.Close()
 	for _, statement := range []string{
-		`CREATE TABLE timer_commands (id TEXT PRIMARY KEY)`,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
 		`CREATE TABLE timer_sessions (timer_id TEXT PRIMARY KEY)`,
 		`PRAGMA user_version = 1`,
 	} {
@@ -72,6 +90,9 @@ func TestMigrateVersionTwoAddsDurationSchemaWithoutRecreatingTasks(t *testing.T)
 		legacyTaskOperationsTable,
 		`INSERT INTO task_operations(id, device_id, task_id, operation_type, title, occurred_at, occurred_at_ms, hlc_wall_ms, hlc_counter)
 		VALUES ('task-operation-0001', 'device-0001', 'task-0001', 'upsert', 'Preserved', '2026-07-15T10:00:00Z', 1784109600000, 1784109600000, 0)`,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
 		`PRAGMA user_version = 2`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -119,9 +140,11 @@ func TestMigrateVersionThreeAddsBootstrapSchemaAndScopedDeleteBypass(t *testing.
 	}
 	defer db.Close()
 	for _, statement := range []string{
-		`CREATE TABLE timer_commands (id TEXT PRIMARY KEY)`,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
 		legacyTaskOperationsTable,
-		`CREATE TABLE duration_operations (id TEXT PRIMARY KEY)`,
+		legacyDurationOperationsTable,
 		`CREATE TRIGGER timer_commands_no_delete BEFORE DELETE ON timer_commands BEGIN SELECT RAISE(ABORT, 'timer commands are immutable'); END`,
 		`CREATE TRIGGER task_operations_no_delete BEFORE DELETE ON task_operations BEGIN SELECT RAISE(ABORT, 'task operations are immutable'); END`,
 		`CREATE TRIGGER duration_operations_no_delete BEFORE DELETE ON duration_operations BEGIN SELECT RAISE(ABORT, 'duration operations are immutable'); END`,
@@ -192,6 +215,10 @@ func TestMigrateVersionFourAddsImmutableAutoStartSchema(t *testing.T) {
 	for _, statement := range []string{
 		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
 		legacyTaskOperationsTable,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
+		legacyDurationOperationsTable,
 		`PRAGMA user_version = 4`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -287,6 +314,11 @@ func TestMigrateVersionFiveAddsImmutableNullableSelectedTaskSchema(t *testing.T)
 	for _, statement := range []string{
 		`CREATE TABLE maintenance_flags (name TEXT PRIMARY KEY CHECK (name = 'bootstrap_replace')) STRICT`,
 		legacyTaskOperationsTable,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
+		legacyDurationOperationsTable,
+		legacyAutoStartOperationsTable,
 		`PRAGMA user_version = 5`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -381,6 +413,9 @@ func TestConcurrentMigrationsSerializeSchemaOwnership(t *testing.T) {
 	}
 	for _, statement := range []string{
 		legacyTaskOperationsTable,
+		legacyAccountStateTable,
+		legacyAccountStateRow,
+		legacyTimerCommandsTable,
 		`PRAGMA user_version = 2`,
 	} {
 		if _, err := setup.ExecContext(ctx, statement); err != nil {

@@ -116,6 +116,7 @@
       return {
         selectedPhase, conflicts: this.rejectedSyncAcknowledgements(validated), clockOffset,
         serverHlc: { wallMs: Number(payload.serverHlcWallMs), counter: Number(payload.serverHlcCounter) },
+        canonicalHead: this.syncCore.responseCanonicalHead(payload),
         hlc: this.mergeServerHlc(payload.serverHlcWallMs, payload.serverHlcCounter, clockOffset),
         snapshot: this.use.snapshotValue({
           revision: rebased.revision, serverTime: payload.serverTime,
@@ -129,6 +130,7 @@
     syncResponsePersistence(payload, sent, expectedUserId, validated, rebased, next, neverSent) {
       return {
         expectedUserId, snapshot: next.snapshot, hlc: next.hlc, serverHlc: next.serverHlc,
+        canonicalHead: next.canonicalHead,
         clockOffset: next.clockOffset, queueIds: this.acknowledgedQueueIds(validated),
         timerOwnerClaim: {
           deviceId: this.state.deviceId, tabId: this.use.tabId(), nowMs: Date.now(), leaseMs: TIMER_OWNER_LEASE_MS

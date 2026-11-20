@@ -132,6 +132,15 @@ function dialogElement(tag) {
   };
 }
 
+function findDialogPart(node, tag) {
+  if (node?.tag === tag) return node;
+  for (const child of node?.children || []) {
+    const found = findDialogPart(child, tag);
+    if (found) return found;
+  }
+  return null;
+}
+
 function deleteFixture(overrides = {}) {
   const created = [];
   const document = {
@@ -186,7 +195,7 @@ test("R50-S03 wrong phrase never deletes and focus defers to input", async () =>
   assert.ok(fixture.calls.some((entry) => entry[0] === "notice" && /Type DELETE exactly/.test(entry[1])));
   await fixture.actions.deleteAccount();
   const dialog = fixture.document.body.appended[0];
-  const input = dialog.children[2];
+  const input = findDialogPart(dialog, "input");
   assert.equal(fixture.timeouts.length, 1);
   fixture.timeouts[0]();
   assert.equal(input.focused, true);

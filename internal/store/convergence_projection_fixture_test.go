@@ -94,7 +94,7 @@ func TestOperationProjectionConvergenceFixture(t *testing.T) {
 					)
 				})
 				tasks, _ := reduceTasks(operations)
-				if !reflect.DeepEqual(tasks, testCase.Expected.Tasks) {
+				if !reflect.DeepEqual(tasks, tasksByID(testCase.Expected.Tasks)) {
 					t.Fatalf("task arrival order %d result = %#v, want %#v", index, tasks, testCase.Expected.Tasks)
 				}
 			}

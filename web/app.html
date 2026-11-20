@@ -6,38 +6,38 @@
   <meta name="theme-color" content="#142c5c" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c1b39" media="(prefers-color-scheme: dark)">
   <meta name="description" content="A local-first focus timer that continues across your devices.">
-  <meta name="pomodorough-version" content="0.56.2">
+  <meta name="pomodorough-version" content="0.57.0">
   <meta name="sentry-dsn" content="%POMODOROUGH_SENTRY_DSN%">
   <title>Pomodorough</title>
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=23">
+  <link rel="stylesheet" href="/app.css?v=24">
   <script src="/sentry-client.js?v=3" defer></script>
-  <script src="/shared-core-metadata.js?v=6" defer></script>
+  <script src="/shared-core-metadata.js?v=7" defer></script>
   <script src="/shared-core.js?v=7" defer></script>
-  <script src="/sync-core.js?v=29" defer></script>
+  <script src="/sync-core.js?v=30" defer></script>
   <script src="/sync-authority.js?v=1" defer></script>
   <script src="/sync-storage-uuid.js?v=1" defer></script>
   <script src="/workspace-core.js?v=2" defer></script>
   <script src="/workspace-transaction.js?v=4" defer></script>
-  <script src="/sync-storage.js?v=36" defer></script>
-  <script src="/i18n.js?v=7" defer></script>
+  <script src="/sync-storage.js?v=37" defer></script>
+  <script src="/i18n.js?v=8" defer></script>
   <script src="/app-runtime.js?v=1" defer></script>
   <script src="/account-operation.js?v=1" defer></script>
-  <script src="/app-state.js?v=11" defer></script>
+  <script src="/app-state.js?v=12" defer></script>
   <script src="/app-storage.js?v=16" defer></script>
   <script src="/app-actions.js?v=13" defer></script>
-  <script src="/app-sync.js?v=10" defer></script>
-  <script src="/app-bootstrap.js?v=8" defer></script>
-  <script src="/app-session.js?v=11" defer></script>
-  <script src="/app-view.js?v=15" defer></script>
-  <script src="/app.js?v=47" defer></script>
+  <script src="/app-sync.js?v=11" defer></script>
+  <script src="/app-bootstrap.js?v=9" defer></script>
+  <script src="/app-session.js?v=12" defer></script>
+  <script src="/app-view.js?v=16" defer></script>
+  <script src="/app.js?v=48" defer></script>
 </head>
 <body>
   <a id="skipTimerLink" class="skip-link" href="#timer-workbench" data-i18n="nav.skipTimer">Skip to timer</a>
 
   <header class="masthead">
-    <a class="wordmark" href="/" aria-label="Pomodorough home" data-i18n-aria-label="nav.home">
+    <a class="wordmark" href="/app">
       <span class="wordmark-symbol" aria-hidden="true">P</span>
       <span class="wordmark-copy">
         <span class="wordmark-main">Pomodorough</span>
@@ -56,7 +56,7 @@
       </div>
       <div id="profile" class="profile" hidden>
         <img id="profileAvatar" class="profile-avatar" src="/icon.svg" alt="" hidden>
-        <a class="text-button" href="https://pomodorough.egigoka.me/privacy" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
+        <a class="text-button" href="/privacy" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
         <button id="logoutButton" class="text-button" type="button" data-i18n="account.signOut">Sign out</button>
       </div>
     </div>
@@ -73,6 +73,7 @@
       <p id="bootstrapSummary" data-i18n="bootstrap.summary">Comparing device and account data.</p>
 
       <section id="logoutRecovery" hidden>
+        <p id="logoutRecoveryStatus" class="logout-recovery-status" role="status" aria-live="polite" hidden></p>
         <div class="bootstrap-actions">
           <button id="logoutRecoveryRetry" class="bootstrap-retry" type="button" data-i18n="account.logout.recoveryRetry">Retry sign-out cleanup</button>
           <button id="logoutRecoverySignIn" class="bootstrap-signout" type="button" data-i18n="account.logout.recoverySignIn">Sign in to recover</button>
@@ -111,7 +112,7 @@
   </dialog>
 
   <main>
-    <nav class="screen-nav" aria-label="Pomodorough screens">
+    <nav class="screen-nav" aria-label="Pomodorough screens" data-i18n-aria-label="nav.screens">
       <div role="tablist" aria-label="Workspace" data-i18n-aria-label="nav.workspace">
         <button id="timerTab" type="button" role="tab" aria-selected="true" aria-controls="timerScreen" data-screen-button="timer">
           <span data-i18n="nav.clock">Clock</span>
@@ -227,7 +228,7 @@
               <label>
                 <span class="visually-hidden" data-i18n="pattern.focusMinutes">Focus minutes</span>
                 <input id="focusDuration" name="focus" type="number" inputmode="numeric" min="1" max="180" value="25">
-                <span class="minute-unit" aria-hidden="true">min</span>
+                <span class="minute-unit" aria-hidden="true" data-i18n="pattern.minuteUnit">min</span>
               </label>
               <button type="button" data-step="1" data-for="focusDuration" aria-label="Increase focus duration" data-i18n-aria-label="pattern.increaseFocus">+</button>
             </div>
@@ -243,7 +244,7 @@
               <label>
                 <span class="visually-hidden" data-i18n="pattern.shortBreakMinutes">Short break minutes</span>
                 <input id="shortBreakDuration" name="short_break" type="number" inputmode="numeric" min="1" max="180" value="5">
-                <span class="minute-unit" aria-hidden="true">min</span>
+                <span class="minute-unit" aria-hidden="true" data-i18n="pattern.minuteUnit">min</span>
               </label>
               <button type="button" data-step="1" data-for="shortBreakDuration" aria-label="Increase short break duration" data-i18n-aria-label="pattern.increaseShortBreak">+</button>
             </div>
@@ -259,7 +260,7 @@
               <label>
                 <span class="visually-hidden" data-i18n="pattern.longBreakMinutes">Long break minutes</span>
                 <input id="longBreakDuration" name="long_break" type="number" inputmode="numeric" min="1" max="180" value="15">
-                <span class="minute-unit" aria-hidden="true">min</span>
+                <span class="minute-unit" aria-hidden="true" data-i18n="pattern.minuteUnit">min</span>
               </label>
               <button type="button" data-step="1" data-for="longBreakDuration" aria-label="Increase long break duration" data-i18n-aria-label="pattern.increaseLongBreak">+</button>
             </div>
@@ -279,7 +280,7 @@
           </span>
         </label>
 
-        <p id="appVersion" class="app-version">Version 0.56.2</p>
+        <p id="appVersion" class="app-version">Version 0.57.0</p>
 
         <section id="accountSection" class="account-rail" aria-labelledby="accountTitle" hidden>
           <strong id="accountTitle" data-i18n="account.title">Account</strong>
@@ -337,7 +338,7 @@
 
   <footer class="site-footer">
     <span data-i18n="footer.local">Local clock / shared account</span>
-    <a href="https://pomodorough.egigoka.me/privacy" data-i18n="account.privacy">Privacy</a>
+    <a href="/privacy" target="_blank" rel="noopener" data-i18n="account.privacy">Privacy</a>
     <span><span data-i18n="footer.device">Device</span> <b id="deviceMark">----</b></span>
   </footer>
 

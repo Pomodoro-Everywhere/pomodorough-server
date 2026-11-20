@@ -39,7 +39,7 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
     Promise,
     fetch: () => Promise.reject(new Error("Unexpected fetch.")),
     importScripts(url) {
-      assert.equal(url, "/shared-core-metadata.js?v=6");
+      assert.equal(url, "/shared-core-metadata.js?v=7");
       context.self.PomodoroughSharedCoreMetadata = sharedCoreMetadata;
     },
     caches: {
@@ -90,8 +90,10 @@ function workerFixture(initialCacheNames, cachedApp = null, cachedLanding = null
   };
 }
 
-test("every shipped privacy link uses the contractual application URL", () => {
-  const privacyPolicy = "https://pomodorough.egigoka.me/privacy";
+// PWA-13: privacy links stay on the serving origin, so a self-hosted or
+// offline instance opens its own /privacy page instead of production.
+test("every shipped privacy link uses the serving origin's privacy page", () => {
+  const privacyPolicy = "/privacy";
   for (const source of [appSource, landingSource]) {
     const links = [...source.matchAll(/href="([^"]*privacy[^"]*)"/g)].map((match) => match[1]);
     assert.ok(links.length > 0);
@@ -101,14 +103,14 @@ test("every shipped privacy link uses the contractual application URL", () => {
 
 test("shell entry assets use cache-busting version URLs", () => {
   for (const asset of ["app.css"]) {
-    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=23`));
-    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=23`));
+    assert.match(appSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=24`));
+    assert.match(workerSource, new RegExp(`/${asset.replace(".", "\\.")}\\?v=24`));
   }
-  assert.match(appSource, /\/app\.js\?v=47/);
-  assert.match(workerSource, /\/app\.js\?v=47/);
-  assert.match(appSource, /\/shared-core-metadata\.js\?v=6/);
+  assert.match(appSource, /\/app\.js\?v=48/);
+  assert.match(workerSource, /\/app\.js\?v=48/);
+  assert.match(appSource, /\/shared-core-metadata\.js\?v=7/);
   assert.match(appSource, /\/shared-core\.js\?v=7/);
-  assert.match(workerSource, /\/shared-core-metadata\.js\?v=6/);
+  assert.match(workerSource, /\/shared-core-metadata\.js\?v=7/);
   assert.match(workerSource, /\/shared-core\.js\?v=7/);
   assert.doesNotMatch(workerSource, /aec9688661f39b92f21de8a26231419f0a2839ab7629bd158af5a46d49632ddf/);
   assert.match(appScriptSource, /sharedCoreHost\.SharedCore\.load/);
@@ -119,29 +121,29 @@ test("shell entry assets use cache-busting version URLs", () => {
       < appCompositionSource.indexOf('await call(application, "loadLocalState", context)')
   );
   assert.match(appScriptSource, /\.taskIdentity\(/);
-  assert.match(appSource, /\/sync-core\.js\?v=29/);
-  assert.match(workerSource, /\/sync-core\.js\?v=29/);
-  assert.match(appSource, /\/sync-storage\.js\?v=36/);
-  assert.match(workerSource, /\/sync-storage\.js\?v=36/);
-  assert.match(appSource, /\/i18n\.js\?v=7/);
-  for (const asset of ["/i18n.js?v=7", "/locales/en.json?v=6", "/locales/ar-XB.json?v=6"]) {
+  assert.match(appSource, /\/sync-core\.js\?v=30/);
+  assert.match(workerSource, /\/sync-core\.js\?v=30/);
+  assert.match(appSource, /\/sync-storage\.js\?v=37/);
+  assert.match(workerSource, /\/sync-storage\.js\?v=37/);
+  assert.match(appSource, /\/i18n\.js\?v=8/);
+  for (const asset of ["/i18n.js?v=8", "/locales/en.json?v=7", "/locales/ar-XB.json?v=7"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
   const scriptVersions = {
-    "app-state.js": 11, "app-storage.js": 16, "app-actions.js": 13, "app-sync.js": 10,
-    "app-bootstrap.js": 8, "app-session.js": 11, "app-view.js": 15
+    "app-state.js": 12, "app-storage.js": 16, "app-actions.js": 13, "app-sync.js": 11,
+    "app-bootstrap.js": 9, "app-session.js": 12, "app-view.js": 16
   };
   for (const file of applicationScriptFiles.filter((file) => file !== "app.js")) {
     const asset = `/${file}?v=${scriptVersions[file] || 1}`;
     assert.match(appSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
-  assert.match(workerSource, /pomodorough-shell-v75-/);
+  assert.match(workerSource, /pomodorough-shell-v77-/);
   assert.match(workerSource, /"\/"/);
   assert.match(workerSource, /"\/index\.html"/);
   assert.match(workerSource, /"\/privacy"/);
   assert.match(workerSource, /"\/app"/);
-  for (const asset of ["/landing.css?v=2", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]) {
+  for (const asset of ["/landing.css?v=3", "/platform-selector.js?v=1", "/landing.js?v=2", "/icon.svg"]) {
     assert.match(workerSource, new RegExp(`"${asset.replace(/[.?]/g, "\\$&")}"`));
   }
 });
@@ -206,7 +208,7 @@ test("offline navigation keeps root landing and app route distinct", async () =>
 test("offline landing migration serves exact cached redirect assets", async () => {
   const cachedLanding = { name: "cached landing" };
   const assets = Object.fromEntries(
-    ["/landing.css?v=2", "/platform-selector.js?v=1", "/landing.js?v=1", "/icon.svg"]
+    ["/landing.css?v=3", "/platform-selector.js?v=1", "/landing.js?v=2", "/icon.svg"]
       .map((url) => [url, { url }])
   );
   const fixture = workerFixture([], { name: "cached app" }, cachedLanding, assets);

@@ -14,6 +14,9 @@
   const PENDING_LOGOUT_SIGN_IN_KEY = "pomodoroughPendingLogoutSignIn";
   const ACCOUNT_DELETION_REFUSED = "account-deletion-refused";
   const SIGN_IN_LANDING_FIELD = "signin=";
+  // The server answers a signed-out request for the app root with its
+  // signed-out page, so a completed sign-out reloads that address.
+  const SIGNED_OUT_PATH = "/app";
 
   function timingMs(name, fallback) {
     try {
@@ -95,6 +98,60 @@
     const returnPath = safeLoginReturnPath(joined) === joined ? joined
       : safeLoginReturnPath(joinReturnPath("/app", landing));
     return `/auth/google/start?return=${encodeURIComponent(returnPath)}`;
+  }
+
+  function createElementWithClass(document, tag, className) {
+    const element = document.createElement(tag);
+    if (element && className) element.className = className;
+    return element;
+  }
+
+  // The typed-word field of a confirmation: a visible label, the input, and
+  // an error line the dialog fills when the word is wrong.
+  function createConfirmationField(document, id) {
+    const label = createElementWithClass(document, "label", "confirmation-field");
+    const fieldLabel = createElementWithClass(document, "span", "confirmation-field-label");
+    const input = createElementWithClass(document, "input", "bootstrap-dialog-input");
+    input.id = `${id}Field`;
+    input.type = "text";
+    input.autocomplete = "off";
+    input.setAttribute?.("aria-describedby", `${id}Message ${id}Error`);
+    label.append?.(fieldLabel, input);
+    const error = createElementWithClass(document, "p", "confirmation-error");
+    error.id = `${id}Error`;
+    error.setAttribute?.("role", "alert");
+    error.hidden = true;
+    return { label, fieldLabel, input, error };
+  }
+
+  // An in-page confirmation for a destructive account action. The form lets
+  // Enter submit, and the confirm button carries the danger style. Returns
+  // null where the document cannot build a dialog.
+  function createConfirmationDialog(document, id, { field = false } = {}) {
+    if (!document?.createElement || !document?.body?.append) return null;
+    const dialog = createElementWithClass(document, "dialog", "bootstrap-dialog confirmation-dialog");
+    if (!dialog) return null;
+    dialog.id = id;
+    dialog.setAttribute?.("aria-labelledby", `${id}Title`);
+    dialog.setAttribute?.("aria-describedby", `${id}Message`);
+    dialog.setAttribute?.("aria-modal", "true");
+    const form = createElementWithClass(document, "form", "bootstrap-ticket confirmation-form");
+    const title = createElementWithClass(document, "h2", "bootstrap-dialog-title");
+    title.id = `${id}Title`;
+    const message = createElementWithClass(document, "p", "bootstrap-dialog-message");
+    message.id = `${id}Message`;
+    const typed = field ? createConfirmationField(document, id) : null;
+    const actions = createElementWithClass(document, "div", "bootstrap-dialog-actions bootstrap-actions");
+    const confirm = createElementWithClass(document, "button", "bootstrap-dialog-button confirmation-danger");
+    confirm.type = "submit";
+    const cancel = createElementWithClass(document, "button", "bootstrap-dialog-button confirmation-cancel");
+    cancel.type = "button";
+    actions.append?.(confirm, cancel);
+    form.append?.(title, message, ...(typed ? [typed.label, typed.error] : []), actions);
+    dialog.append?.(form);
+    document.body.append(dialog);
+    return { dialog, form, title, message, confirm, cancel,
+      fieldLabel: typed?.fieldLabel || null, input: typed?.input || null, error: typed?.error || null };
   }
 
   function bindActions(owner, names) {
@@ -455,6 +512,20 @@
       this.host.location.assign(loginStartUrl(this.host.location, this.pendingSignInToken()));
     }
 
+    // Only for a sign-out the server confirmed: nothing is left to recover, so
+    // the user sees the server's signed-out page rather than the Google account
+    // chooser. While the marker still stands, the sign-in redirect stays: its
+    // landing token proves that the revocation ran.
+    leaveAfterSignOut() {
+      if (this.pendingLocalLogout()) {
+        this.redirectToLogin();
+        return;
+      }
+      if (this.redirecting) return;
+      this.redirecting = true;
+      this.host.location.assign(SIGNED_OUT_PATH);
+    }
+
     // One token serves the marker until a landing consumes it, so every tab
     // that signs in to recover lands with a token the shared marker accepts.
     pendingSignInToken() {
@@ -777,11 +848,13 @@
         const completed = await this.use.clearLocalData(identity, issuer);
         accountOperation.requireBound(completed);
         this.state.logoutRecoveryRequired = false;
+        this.state.logoutRecoveryFailure = null;
         return { cleared: true, context: completed };
       } catch (error) {
         const context = error.cleanupContext || issuer;
         if (!accountOperation.isCurrent(context)) return { cleared: false, context };
         this.state.logoutRecoveryRequired = true;
+        this.state.logoutRecoveryFailure = this.logoutCleanupFailedNotice();
         this.use.showNotice(this.logoutCleanupFailedNotice(), this.logoutCleanupFailedOptions());
         this.host.console.warn("Pomodorough pending logout cleanup failed:", error);
         reportFrontendError(error, "session.logout-recovery.cleanup-failed");
@@ -790,9 +863,32 @@
       }
     }
 
+    // The pending sign-out dialog covers the page notice, so a retry that
+    // leaves recovery unfinished says why inside the dialog.
     async retryPendingLogout() {
+      if (this.state.logoutRecoveryBusy) return false;
+      this.state.logoutRecoveryFailure = null;
+      try {
+        return await this.runPendingLogoutRetry();
+      } finally {
+        this.explainUnfinishedLogoutRecovery();
+      }
+    }
+
+    explainUnfinishedLogoutRecovery() {
+      const { state } = this;
+      if (!state.logoutRecoveryRequired || this.redirecting) return;
+      if (state.bootstrapSignOutError || state.logoutRecoveryFailure) return;
+      state.logoutRecoveryFailure = this.host.navigator?.onLine === false
+        ? this.use.tr("account.logout.recoveryOffline", {},
+          "Sign-out cleanup needs a connection. Connect, then try again.")
+        : this.use.tr("account.logout.recoveryFailed", {},
+          "Sign-out cleanup did not finish. Check the connection, or sign in to recover, then try again.");
+      this.use.render();
+    }
+
+    async runPendingLogoutRetry() {
       if (this.logoutCleanupRetryRequired) {
-        if (this.state.logoutRecoveryBusy) return false;
         this.state.logoutRecoveryBusy = true;
         this.use.render();
         let cleaned = false;
@@ -923,63 +1019,50 @@
 
     deleteAccountDialog() {
       if (this.deleteAccountDialogRefs) return this.deleteAccountDialogRefs;
-      const document = this.host.document;
-      if (!document?.createElement || !document?.body?.append) return null;
-      const dialog = document.createElement("dialog");
-      if (!dialog) return null;
-      dialog.className = "bootstrap-dialog";
-      dialog.setAttribute?.("aria-labelledby", "deleteAccountTitle");
-      dialog.setAttribute?.("aria-describedby", "deleteAccountMessage");
-      dialog.setAttribute?.("aria-modal", "true");
-      const title = document.createElement("h2");
-      title.id = "deleteAccountTitle";
-      title.className = "bootstrap-dialog-title";
-      const message = document.createElement("p");
-      message.id = "deleteAccountMessage";
-      message.className = "bootstrap-dialog-message";
-      const input = document.createElement("input");
-      input.type = "text";
-      input.autocomplete = "off";
-      input.className = "bootstrap-dialog-input";
-      const buttons = document.createElement("div");
-      buttons.className = "bootstrap-dialog-actions";
-      const confirm = document.createElement("button");
-      confirm.type = "button";
-      confirm.className = "bootstrap-dialog-button";
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.className = "bootstrap-dialog-button";
-      confirm.addEventListener?.("click", () => this.confirmDeleteAccount());
-      cancel.addEventListener?.("click", () => this.cancelDeleteAccount());
-      dialog.addEventListener?.("cancel", () => this.cancelDeleteAccount());
-      buttons.append?.(confirm, cancel);
-      dialog.append?.(title, message, input, buttons);
-      document.body.append(dialog);
-      this.deleteAccountDialogRefs = { dialog, title, message, input, confirm, cancel };
-      return this.deleteAccountDialogRefs;
+      const refs = createConfirmationDialog(this.host.document, "deleteAccount", { field: true });
+      if (!refs) return null;
+      refs.form.addEventListener?.("submit", (event) => {
+        event?.preventDefault?.();
+        this.confirmDeleteAccount();
+      });
+      refs.cancel.addEventListener?.("click", () => this.cancelDeleteAccount());
+      refs.dialog.addEventListener?.("cancel", () => this.cancelDeleteAccount());
+      this.deleteAccountDialogRefs = refs;
+      return refs;
     }
 
     openDeleteAccountDialog() {
       const refs = this.deleteAccountDialog();
-      if (!refs) {
-        this.use.showNotice(this.use.tr(
-          "account.delete.prompt", {},
-          "Delete your Pomodorough account, timer history, tasks, settings, sessions, and server device records permanently? Type DELETE to confirm."
-        ));
-        return false;
-      }
-      refs.title.textContent = this.use.tr("account.delete", {}, "Delete account");
-      refs.message.textContent = this.use.tr(
+      const prompt = this.use.tr(
         "account.delete.prompt", {},
         "Delete your Pomodorough account, timer history, tasks, settings, sessions, and server device records permanently? Type DELETE to confirm."
       );
-      refs.confirm.textContent = this.use.tr("bootstrap.confirm", {}, "Confirm");
+      if (!refs) {
+        this.use.showNotice(prompt);
+        return false;
+      }
+      refs.title.textContent = this.use.tr("account.delete", {}, "Delete account");
+      refs.message.textContent = prompt;
+      refs.fieldLabel.textContent = this.use.tr("account.delete.field", {}, "Type DELETE");
+      refs.confirm.textContent = this.use.tr("account.delete", {}, "Delete account");
       refs.cancel.textContent = this.use.tr("bootstrap.cancel", {}, "Cancel");
       refs.input.value = "";
-      refs.input.setAttribute?.("aria-label", refs.message.textContent);
+      this.showDeleteAccountFieldError(null);
       if (!refs.dialog.open) refs.dialog.showModal?.();
       this.host.setTimeout?.(() => refs.input.focus?.(), timingMs("focusDefer", 0));
       return true;
+    }
+
+    // A wrong word keeps the dialog open and says so beside the field, where
+    // the person is looking; null clears the error.
+    showDeleteAccountFieldError(message) {
+      const refs = this.deleteAccountDialogRefs;
+      if (!refs) return;
+      refs.error.hidden = !message;
+      refs.error.textContent = message || "";
+      if (message) refs.input.setAttribute?.("aria-invalid", "true");
+      else refs.input.removeAttribute?.("aria-invalid");
+      if (message) refs.input.focus?.();
     }
 
     closeDeleteAccountDialog() {
@@ -996,14 +1079,17 @@
     }
 
     async confirmDeleteAccount(confirmation) {
-      const value = typeof confirmation === "string" ? confirmation : this.deleteAccountDialogRefs?.input?.value;
-      this.closeDeleteAccountDialog();
+      const fromDialog = typeof confirmation !== "string";
+      const value = fromDialog ? this.deleteAccountDialogRefs?.input?.value : confirmation;
       if (!this.accountDeletionConfirmationIsValid(value)) {
-        this.use.showNotice(this.use.tr(
+        const message = this.use.tr(
           "account.delete.invalid", {}, "Account was not deleted. Type DELETE exactly to confirm."
-        ));
+        );
+        if (fromDialog && this.deleteAccountDialogRefs?.dialog.open) this.showDeleteAccountFieldError(message);
+        else this.use.showNotice(message);
         return false;
       }
+      this.closeDeleteAccountDialog();
       if (!this.state.csrfToken) {
         this.use.showNotice(this.use.tr(
           "account.delete.offline", {}, "Connect to the account server before deleting your account."
@@ -1049,6 +1135,7 @@
           // Retry in this dialog runs logout() again and shows its own refusal.
           // A refusal left by an overlapping click must not open with the dialog.
           this.state.bootstrapSignOutError = null;
+          this.state.logoutRecoveryFailure = this.logoutCleanupFailedNotice();
           this.use.showNotice(this.logoutCleanupFailedNotice(), this.logoutCleanupFailedOptions());
           this.use.render();
           return false;
@@ -1056,7 +1143,8 @@
       }
       if (!accountOperation.isCurrent(effectsContext)) return false;
       this.logoutCleanupRetryRequired = false;
-      this.redirectToLogin();
+      if (completion.showSignedOutPage) this.leaveAfterSignOut();
+      else this.redirectToLogin();
       return true;
     }
 
@@ -1184,18 +1272,57 @@
       return true;
     }
 
+    logoutConfirmationDialog() {
+      if (this.logoutConfirmationRefs) return this.logoutConfirmationRefs;
+      const refs = createConfirmationDialog(this.host.document, "logoutConfirmation");
+      if (!refs) return null;
+      refs.form.addEventListener?.("submit", (event) => {
+        event?.preventDefault?.();
+        this.settleLogoutConfirmation(true);
+      });
+      refs.cancel.addEventListener?.("click", () => this.settleLogoutConfirmation(false));
+      refs.dialog.addEventListener?.("cancel", () => this.settleLogoutConfirmation(false));
+      refs.dialog.addEventListener?.("close", () => this.settleLogoutConfirmation(false));
+      this.logoutConfirmationRefs = refs;
+      return refs;
+    }
+
+    // Asks before a sign-out discards queued changes. Cancel is the focused
+    // default. A host that cannot show an in-page dialog uses its native one.
+    confirmDiscardingPending(pendingCount) {
+      const message = this.use.tr(
+        "account.logout.pending", { count: pendingCount },
+        `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Signing out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
+      );
+      const refs = this.logoutConfirmationDialog();
+      if (typeof refs?.dialog.showModal !== "function") return Promise.resolve(Boolean(this.host.confirm?.(message)));
+      this.settleLogoutConfirmation(false);
+      refs.title.textContent = this.use.tr("account.logout.pendingTitle", {}, "Discard unsynced changes?");
+      refs.message.textContent = message;
+      refs.confirm.textContent = this.use.tr("account.logout.discard", {}, "Sign out and discard");
+      refs.cancel.textContent = this.use.tr("bootstrap.cancel", {}, "Cancel");
+      return new Promise((resolve) => {
+        this.logoutConfirmationResolve = resolve;
+        if (!refs.dialog.open) refs.dialog.showModal();
+        this.host.setTimeout?.(() => refs.cancel.focus?.(), timingMs("focusDefer", 0));
+      });
+    }
+
+    settleLogoutConfirmation(confirmed) {
+      const resolve = this.logoutConfirmationResolve;
+      if (!resolve) return;
+      this.logoutConfirmationResolve = null;
+      try { if (this.logoutConfirmationRefs.dialog.open) this.logoutConfirmationRefs.dialog.close(); }
+      catch (error) { this.host.console.warn("Pomodorough sign-out confirmation did not close:", error); }
+      resolve(confirmed);
+    }
+
     async logout() {
       const context = this.use.captureAccountContext();
       if (!await this.readPendingQueuesBeforeLogout(context)) return;
       context.assertCurrent();
       const pendingCount = this.pendingOperationCount();
-      if (pendingCount > 0) {
-        const confirmed = this.host.confirm(this.use.tr(
-          "account.logout.pending", { count: pendingCount },
-          `${pendingCount} change${pendingCount === 1 ? " is" : "s are"} waiting to sync. Signing out will discard ${pendingCount === 1 ? "it" : "them"}. Continue?`
-        ));
-        if (!confirmed) return;
-      }
+      if (pendingCount > 0 && !await this.confirmDiscardingPending(pendingCount)) return;
       context.assertCurrent();
       this.elements.logoutButton.disabled = true;
       const durableRecovery = this.markPendingLogout();
@@ -1218,7 +1345,7 @@
       if (!accountOperation.isCurrent(cleanupContext)) return;
       this.use.assertCleanupIdentity(identity);
       return this.completeAccountCleanup(identity, cleanupContext, {
-        clearMarker: serverRevoked, durableRecovery, reportFailure: (error) => {
+        clearMarker: serverRevoked, durableRecovery, showSignedOutPage: serverRevoked, reportFailure: (error) => {
           this.host.console.warn("Pomodorough local sign-out cleanup was incomplete:", error);
           reportFrontendError(error, "session.logout.cleanup-incomplete");
         }

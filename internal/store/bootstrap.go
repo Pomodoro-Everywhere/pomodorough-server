@@ -138,6 +138,10 @@ func lookupStoredBootstrapResponse(ctx context.Context, tx *sql.Tx, request Boot
 		return SyncResult{}, false, err
 	}
 	result, err = normalizeStoredSyncResult(result)
+	if err != nil {
+		return SyncResult{}, false, err
+	}
+	result, err = normalizeStoredCanonicalHead([]byte(storedResponse), result)
 	return result, true, err
 }
 
@@ -252,6 +256,9 @@ func recordBootstrapResponse(ctx context.Context, tx *sql.Tx, request BootstrapR
 		addAcknowledgements(&result, syncRequest, application.operations, application.reduction)
 	}
 	result.Changed = changed
+	if err := persistCanonicalHead(ctx, tx, application.reduction, result); err != nil {
+		return SyncResult{}, err
+	}
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("encode bootstrap response: %w", err)

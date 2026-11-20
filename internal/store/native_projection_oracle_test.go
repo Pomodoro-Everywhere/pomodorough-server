@@ -7,6 +7,10 @@ import (
 )
 
 // Historical Go reducers remain test-only compatibility fixtures. SharedCore owns production policy.
+//
+// reduceTasks decides which tasks survive, not where they are listed. The task
+// list order belongs to SharedCore, so the result is in tasksByID order and
+// callers compare it with tasksByID of the SharedCore or fixture task list.
 func reduceTasks(operations []task.Operation) ([]task.Task, map[string]string) {
 	winners := make(map[string]task.Operation)
 	for _, operation := range operations {
@@ -20,13 +24,15 @@ func reduceTasks(operations []task.Operation) ([]task.Task, map[string]string) {
 			tasks = append(tasks, task.Task{ID: taskID, Title: operation.Title})
 		}
 	}
-	sort.Slice(tasks, func(i, j int) bool {
-		if tasks[i].Title != tasks[j].Title {
-			return tasks[i].Title < tasks[j].Title
-		}
-		return tasks[i].ID < tasks[j].ID
-	})
-	return tasks, winningIDs
+	return tasksByID(tasks), winningIDs
+}
+
+// tasksByID returns a copy in task ID order, so two task lists can be compared
+// as sets without stating a task list order.
+func tasksByID(tasks []task.Task) []task.Task {
+	ordered := append([]task.Task{}, tasks...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	return ordered
 }
 
 func reduceDurations(operations []DurationOperation) (DurationsMs, map[string]struct{}) {

@@ -276,5 +276,7 @@ test("R51-S04 RTL, keyboard focus, and callbacks survive the fold repair", (t) =
   const accountBlock = /<section id="accountSection"[^>]*>([\s\S]*?)<\/section>/.exec(appHtml)[1];
   assert.match(accountBlock, /id="deleteAccountButton"/);
   assert.ok(appHtml.indexOf('id="accountSection"') > appHtml.indexOf('id="appVersion"'), "Account section is the last rail item");
-  assert.match(appHtml, /<a class="wordmark" href="\/" aria-label="Pomodorough home"/);
+  // PWA-13: the app wordmark stays inside the service worker scope so it
+  // works offline; PWA-14: its visible text is its accessible name.
+  assert.match(appHtml, /<a class="wordmark" href="\/app">/);
 });

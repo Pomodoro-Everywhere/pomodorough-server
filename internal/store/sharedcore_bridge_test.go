@@ -71,7 +71,7 @@ func TestSharedCoreReducersSatisfyCompatibilityFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(gotTasks, wantTasks) || !reflect.DeepEqual(gotTaskWinners, wantTaskWinners) {
+	if !reflect.DeepEqual(tasksByID(gotTasks), wantTasks) || !reflect.DeepEqual(gotTaskWinners, wantTaskWinners) {
 		t.Fatalf("shared task mismatch: got %#v/%#v want %#v/%#v", gotTasks, gotTaskWinners, wantTasks, wantTaskWinners)
 	}
 

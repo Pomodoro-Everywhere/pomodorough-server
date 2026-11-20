@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"iter"
 	"time"
 
 	"pomodorough/internal/task"
@@ -102,6 +101,8 @@ type SyncResult struct {
 	ServerTime                   string                        `json:"serverTime"`
 	ServerHLCWallMs              int64                         `json:"serverHlcWallMs"`
 	ServerHLCCounter             int64                         `json:"serverHlcCounter"`
+	CanonicalHLCWallMs           int64                         `json:"canonicalHlcWallMs"`
+	CanonicalHLCCounter          int64                         `json:"canonicalHlcCounter"`
 	Changed                      bool                          `json:"-"`
 }
 
@@ -205,6 +206,9 @@ func (s *Store) syncLocked(ctx context.Context, db *sql.DB, request SyncRequest,
 	if err != nil {
 		return SyncResult{}, err
 	}
+	if err := persistCanonicalHead(ctx, tx, reduction, result); err != nil {
+		return SyncResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit sync: %w", err)
 	}
@@ -253,6 +257,9 @@ func (s *Store) materializeProjectionLocked(ctx context.Context, db *sql.DB, now
 	if err != nil {
 		return SyncResult{}, err
 	}
+	if err := persistCanonicalHead(ctx, tx, reduction, result); err != nil {
+		return SyncResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SyncResult{}, fmt.Errorf("commit projection materialization: %w", err)
 	}
@@ -286,6 +293,7 @@ type accountReduction struct {
 	selectedTaskOperations       []SelectedTaskOperation
 	selectedTaskID               *string
 	winningSelectedTaskOperation string
+	canonicalFloor               coreHLC
 }
 
 func validateUniqueOperationIDs(request SyncRequest) error {
@@ -491,7 +499,9 @@ func applySelectedTaskOperations(ctx context.Context, tx *sql.Tx, deviceID strin
 
 func reduceAccount(ctx context.Context, source databaseQueryer, now time.Time) (accountReduction, error) {
 	var reduction accountReduction
-	if err := source.QueryRowContext(ctx, `SELECT revision FROM account_state WHERE singleton = 1`).Scan(&reduction.revision); err != nil {
+	if err := source.QueryRowContext(ctx, `SELECT revision, canonical_hlc_wall_ms, canonical_hlc_counter
+		FROM account_state WHERE singleton = 1`).Scan(&reduction.revision, &reduction.canonicalFloor.WallMs,
+		&reduction.canonicalFloor.Counter); err != nil {
 		return accountReduction{}, fmt.Errorf("read account revision: %w", err)
 	}
 	if err := validateCanonicalRevision(reduction.revision); err != nil {
@@ -705,19 +715,6 @@ func sameProjectedTime(left, right time.Time) bool {
 	return left.UnixMilli() == right.UnixMilli()
 }
 
-func hlcObservations(reduction accountReduction, request *SyncRequest) iter.Seq[coreHLC] {
-	return func(yield func(coreHLC) bool) {
-		if !yieldReductionClocks(reduction, yield) {
-			return
-		}
-		if request != nil {
-			yieldReductionClocks(accountReduction{commands: request.Commands, taskOperations: request.TaskOperations,
-				durationOperations: request.DurationOperations, autoStartOperations: request.AutoStartOperations,
-				selectedTaskOperations: request.SelectedTaskOperations}, yield)
-		}
-	}
-}
-
 func yieldReductionClocks(source accountReduction, yield func(coreHLC) bool) bool {
 	for _, command := range source.commands {
 		if !yield(coreHLC{WallMs: command.HLCWallMs, Counter: command.HLCCounter}) {
@@ -747,16 +744,12 @@ func yieldReductionClocks(source accountReduction, yield func(coreHLC) bool) boo
 	return true
 }
 
-func serverHLCFromReductionWithCore(ctx context.Context, call coreJSONCall, reduction accountReduction, now time.Time, request *SyncRequest) (coreHLC, error) {
-	return hlcHeadSequenceWithCore(ctx, call, now.UnixMilli(), hlcObservations(reduction, request))
-}
-
 func resultFromReduction(ctx context.Context, reduction accountReduction, revision int64, now time.Time, request *SyncRequest) (SyncResult, error) {
 	return resultFromReductionWithCore(ctx, callAccountSharedCore, reduction, revision, now, request)
 }
 
 func resultFromReductionWithCore(ctx context.Context, call coreJSONCall, reduction accountReduction, revision int64, now time.Time, request *SyncRequest) (SyncResult, error) {
-	serverHLC, err := serverHLCFromReductionWithCore(ctx, call, reduction, now, request)
+	heads, err := responseHLCHeadsWithCore(ctx, call, reduction, now, request)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -774,8 +767,10 @@ func resultFromReductionWithCore(ctx context.Context, call coreJSONCall, reducti
 		AutoStartBreaks:              reduction.autoStartBreaks,
 		SelectedTaskID:               reduction.selectedTaskID,
 		ServerTime:                   now.UTC().Format(time.RFC3339Nano),
-		ServerHLCWallMs:              serverHLC.WallMs,
-		ServerHLCCounter:             serverHLC.Counter,
+		ServerHLCWallMs:              heads.server.WallMs,
+		ServerHLCCounter:             heads.server.Counter,
+		CanonicalHLCWallMs:           heads.canonical.WallMs,
+		CanonicalHLCCounter:          heads.canonical.Counter,
 	}), nil
 }
 

@@ -1778,7 +1778,7 @@ components:
             $ref: "#/components/schemas/HistoryItem"
         tasks:
           type: array
-          description: Active task projection sorted by title and ID.
+          description: Active task projection in the shared Core task list order (Core contract `TASK_LIST_ORDER.md`). Clients keep this order and must not re-sort.
           items:
             $ref: "#/components/schemas/Task"
         durationsMs:
@@ -1808,6 +1808,27 @@ components:
           minimum: 0
           maximum: 9007199254740991
           description: Counter component paired with `serverHlcWallMs`.
+        canonicalHlcWallMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: >-
+            Wall component of the canonical HLC head: the maximum HLC tuple of every operation the
+            server ordered into this workspace, plus the accepted operations of this request. It
+            never includes the server's physical clock, is `(0, 0)` when there is no operation,
+            never moves backwards and is unchanged at an unchanged revision. Sent together with
+            `canonicalHlcCounter` and never above `(serverHlcWallMs, serverHlcCounter)`. Receivers
+            use this pair as the canonical head and fall back to the server pair when both fields
+            are absent (older server); they reject a response with only one field, a value outside
+            this range, or a pair above the server pair. Clock merge and skew checks stay on the
+            server pair.
+        canonicalHlcCounter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Counter component paired with `canonicalHlcWallMs`.
 
     HistoryResponse:
       type: object

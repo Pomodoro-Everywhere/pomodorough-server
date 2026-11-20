@@ -171,8 +171,9 @@ test("R51-S05 anchors preserved, no script or tabindex added", () => {
 });
 
 test("R51-S05 landing page controls stay intact", () => {
-  assert.match(landingHtml, /<a class="wordmark" href="\/" aria-label="Pomodorough home">/);
-  assert.match(landingHtml, /<a class="button button-web" href="\/app">Use Web app<\/a>/);
+  // PWA-14: no aria-label, so the accessible name is the visible wordmark text.
+  assert.match(landingHtml, /<a class="wordmark" href="\/">/);
+  assert.match(landingHtml, /<a class="button button-web" href="\/app" data-i18n="landing.useWeb">Use Web app<\/a>/);
   assert.match(landingHtml, /<a class="route-card route-android"/);
   assert.match(css, /\.wordmark\s*\{[^}]*min-width:\s*0/);
   assert.match(css, /\.route-grid\s*\{[^}]*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);

@@ -106,16 +106,17 @@ test("R50-S04 text scale is preserved, never shrunk", () => {
 });
 
 test("R50-S04 anchors and glyph bounds are preserved", () => {
-  assert.match(html, /<a class="wordmark" href="\/" aria-label="Pomodorough home">/);
-  assert.match(html, /<a class="button button-web" href="\/app">Use Web app<\/a>/);
+  assert.match(html, /<a class="wordmark" href="\/">/);
+  assert.match(html, /<a class="button button-web" href="\/app" data-i18n="landing.useWeb">Use Web app<\/a>/);
   assert.match(html, /<a class="button button-native" href="#native-options" data-native-cta>/);
   for (const route of ["route-apple", "route-desktop", "route-android"]) {
     assert.match(html, new RegExp(`<a class="route-card ${route}" href="https://github\\.com/Pomodoro-Everywhere/pomodorough-`));
   }
   assert.equal((html.match(/<span class="route-arrow" aria-hidden="true">&#8599;<\/span>/g) || []).length, 3);
   assert.match(html, /<span class="wordmark-symbol" aria-hidden="true">P<\/span>/);
-  assert.match(html, /<a class="skip-link" href="#departure">Skip to downloads<\/a>/);
-  assert.match(html, /<div id="departure" class="departure"/);
+  assert.match(html, /<a class="skip-link" href="#departure" data-i18n="landing.skip">Skip to downloads<\/a>/);
+  // PWA-14: a labelled region needs a landmark element, not a bare div.
+  assert.match(html, /<section id="departure" class="departure" aria-labelledby="departure-title">/);
   assert.doesNotMatch(html, /tabindex/);
 });
 
